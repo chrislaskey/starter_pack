@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "phoenix",
+  "description": "The Phoenix web UI window. It is a remote origin, so it may only call the one command that hands the app an API token. In development that is any port on localhost. For another server add its URL (PHOENIX_URL).",
+  "remote": {
+    "urls": ["http://localhost:*/*", "http://127.0.0.1:*/*"]
+  },
+  "windows": ["phoenix"],
+  "permissions": ["allow-set-api-token"]
+}

@@ -1,0 +1,190 @@
+//! The Starter Pack desktop app.
+//!
+//! The app is a Tauri shell around the Phoenix server. It has two windows:
+//!
+//!   * `main`, a local page showing whether the websocket API is connected,
+//!     with buttons to log in, open the web UI and make a test request
+//!   * `phoenix`, the Phoenix web UI itself, loaded from the server
+//!
+//! Logging in happens in the Phoenix window. Once the user is logged in,
+//! Phoenix's `/client/new` page hands the app an API token through the
+//! `set_api_token` command. The app keeps the token (see `token`) and a
+//! background task (see `phoenix`) holds a websocket connection to the API
+//! with it for as long as the app runs.
+
+mod config;
+mod phoenix;
+mod token;
+
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::{mpsc, oneshot};
+
+use config::Config;
+use phoenix::{Client, Control, Reply, Status};
+use token::TokenStore;
+
+const MAIN_WINDOW: &str = "main";
+const PHOENIX_WINDOW: &str = "phoenix";
+
+pub struct AppState {
+    config: Config,
+    tokens: Arc<TokenStore>,
+    status: Arc<Mutex<Status>>,
+    control: mpsc::UnboundedSender<Control>,
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("desktop_lib=info"))
+        .init();
+
+    tauri::Builder::default()
+        .setup(|app| {
+            let config = Config::from_env();
+            let tokens = Arc::new(TokenStore::open(app.path().app_data_dir()?));
+            let status = Arc::new(Mutex::new(Status {
+                state: phoenix::State::Disconnected,
+                detail: Some("Starting".into()),
+                has_token: tokens.get().is_some(),
+                server_url: config.server_url.to_string(),
+            }));
+            let (control, control_rx) = mpsc::unbounded_channel();
+
+            let client = Client::new(
+                app.handle().clone(),
+                config.clone(),
+                tokens.clone(),
+                status.clone(),
+                control_rx,
+            );
+            tauri::async_runtime::spawn(client.run());
+
+            app.manage(AppState {
+                config,
+                tokens,
+                status,
+                control,
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_connection_status,
+            set_api_token,
+            log_out,
+            open_phoenix,
+            api_request
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+/// The current connection status, for the main window when it loads. Later
+/// changes arrive as `connection-status` events.
+#[tauri::command]
+fn get_connection_status(state: State<'_, AppState>) -> Status {
+    state.status.lock().unwrap().clone()
+}
+
+/// Stores the API token and connects with it. Called by Phoenix's
+/// `/client/new` page in the Phoenix window, the only remote origin
+/// allowed to call it (see `capabilities/phoenix.json`).
+#[tauri::command]
+fn set_api_token(app: AppHandle, state: State<'_, AppState>, token: String) -> Result<(), String> {
+    let token = token.trim();
+    let base64url = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_';
+    if token.is_empty() || token.len() > 256 || !token.bytes().all(base64url) {
+        return Err("The token is not a base64url string".into());
+    }
+
+    state.tokens.set(token)?;
+    notify_token_changed(&state)?;
+    log::info!("Received an API token, connecting");
+
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = main.set_focus();
+    }
+    Ok(())
+}
+
+/// Deletes the API token on the server when connected, then forgets it
+/// locally either way, which disconnects.
+#[tauri::command]
+async fn log_out(state: State<'_, AppState>) -> Result<(), String> {
+    if state.tokens.get().is_some() {
+        match request(&state.control, "auth.token.delete".into(), json!({})).await {
+            Ok(_) => log::info!("Deleted the API token on the server"),
+            Err(error) => log::warn!(
+                "Could not delete the API token on the server, forgetting it locally only: {error}"
+            ),
+        }
+    }
+
+    state.tokens.clear()?;
+    notify_token_changed(&state)
+}
+
+/// Shows a page of the Phoenix web UI in the Phoenix window, opening the
+/// window when needed.
+#[tauri::command]
+fn open_phoenix(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let url = state.config.page_url(path.as_deref().unwrap_or("/"))?;
+
+    if let Some(window) = app.get_webview_window(PHOENIX_WINDOW) {
+        window.navigate(url).map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, PHOENIX_WINDOW, WebviewUrl::External(url))
+        .title("Starter Pack")
+        .inner_size(1100.0, 800.0)
+        .user_agent(&user_agent())
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Makes a request on the websocket API and returns its reply. `event` is a
+/// request name like `auth.token.get`, see `App.Web.ApiChannel`.
+#[tauri::command]
+async fn api_request(state: State<'_, AppState>, event: String, payload: Option<Value>) -> Reply {
+    request(&state.control, event, payload.unwrap_or_else(|| json!({}))).await
+}
+
+async fn request(control: &mpsc::UnboundedSender<Control>, event: String, payload: Value) -> Reply {
+    let (reply, reply_rx) = oneshot::channel();
+    control
+        .send(Control::Request {
+            event,
+            payload,
+            reply,
+        })
+        .map_err(|_| json!({"reason": "client_stopped"}))?;
+    reply_rx
+        .await
+        .map_err(|_| json!({"reason": "disconnected"}))?
+}
+
+fn notify_token_changed(state: &AppState) -> Result<(), String> {
+    state
+        .control
+        .send(Control::TokenChanged)
+        .map_err(|_| "The connection task stopped".to_string())
+}
+
+/// A browser-like user agent so the Phoenix pages render as in a browser,
+/// with a product token the server can recognise the desktop app by.
+fn user_agent() -> String {
+    format!(
+        "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 (KHTML, like Gecko) StarterPackClient/{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}

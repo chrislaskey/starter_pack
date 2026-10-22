@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The local status window: it reads the connection state, opens the Phoenix window and sends API requests",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-get-connection-status",
+    "allow-open-phoenix",
+    "allow-api-request",
+    "allow-log-out"
+  ]
+}
