@@ -10,6 +10,6 @@ both.
 
 ```sh
 git submodule update --init
-(cd phoenix && mix setup && mix phx.server)
+(cd phoenix && mix setup && API_SOCKET=true mix phx.server)
 (cd tauri && cargo tauri dev)
 ```

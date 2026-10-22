@@ -7,7 +7,10 @@
 //!   * `phoenix`, the Phoenix web UI itself, loaded from the server
 //!
 //! Logging in happens in the Phoenix window. Once the user is logged in,
-//! Phoenix's `/client/new` page hands the app an API token through the
+//! Phoenix's `/client/new` page hands the app an API token: it looks for a
+//! `window.appClient` object on the page (see Phoenix's
+//! `assets/js/app_client.js`), which this app injects into every page of the
+//! Phoenix window, and calls its `setApiToken`, which runs the
 //! `set_api_token` command. The app keeps the token (see `token`) and a
 //! background task (see `phoenix`) holds a websocket connection to the API
 //! with it for as long as the app runs.
@@ -28,6 +31,15 @@ use token::TokenStore;
 
 const MAIN_WINDOW: &str = "main";
 const PHOENIX_WINDOW: &str = "phoenix";
+
+/// Runs on every page of the Phoenix window before the page's own scripts.
+/// Phoenix's `assets/js/app_client.js` looks for `window.appClient` to hand
+/// the app an API token, so any client that provides it works the same way.
+const APP_CLIENT_SCRIPT: &str = r#"
+window.appClient = {
+  setApiToken: (token) => window.__TAURI__.core.invoke("set_api_token", { token }),
+};
+"#;
 
 pub struct AppState {
     config: Config,
@@ -88,9 +100,10 @@ fn get_connection_status(state: State<'_, AppState>) -> Status {
     state.status.lock().unwrap().clone()
 }
 
-/// Stores the API token and connects with it. Called by Phoenix's
-/// `/client/new` page in the Phoenix window, the only remote origin
-/// allowed to call it (see `capabilities/phoenix.json`).
+/// Stores the API token and connects with it. Called through
+/// `window.appClient.setApiToken` by Phoenix's `/client/new` page in the
+/// Phoenix window, the only remote origin allowed to call it (see
+/// `capabilities/phoenix.json`).
 #[tauri::command]
 fn set_api_token(app: AppHandle, state: State<'_, AppState>, token: String) -> Result<(), String> {
     let token = token.trim();
@@ -147,6 +160,7 @@ fn open_phoenix(
         .title("Starter Pack")
         .inner_size(1100.0, 800.0)
         .user_agent(&user_agent())
+        .initialization_script(APP_CLIENT_SCRIPT)
         .build()
         .map_err(|error| error.to_string())?;
     Ok(())

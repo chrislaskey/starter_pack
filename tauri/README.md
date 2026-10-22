@@ -13,11 +13,13 @@ The app has two windows:
 
 1. The user clicks **Log in**. The app opens the Phoenix window on
    `/client/new`, which asks them to log in first when they are not.
-2. The user clicks **Connect** on that page. Phoenix creates an API token
-   (`App.Data.Accounts.generate_user_api_token/1`) and pushes it to the page,
-   whose LiveView hook hands it to the app with the `set_api_token` command.
-   That page is the only remote origin allowed to call anything on the app,
-   see `src-tauri/capabilities/phoenix.json`.
+2. That page's `ClientConnect` hook (Phoenix's `assets/js/app_client.js`)
+   looks for a `window.appClient` object. The app injects one into every
+   page of the Phoenix window; its `setApiToken` runs the `set_api_token`
+   command. Phoenix creates an API token
+   (`App.Data.Accounts.generate_user_api_token/1`), hands it over and moves
+   on to the web UI. The Phoenix window is the only remote origin allowed to
+   call anything on the app, see `src-tauri/capabilities/phoenix.json`.
 3. The Rust side (`src-tauri/src/phoenix.rs`) stores the token in the app
    data directory and connects to `App.Web.ApiSocket` at `/api/websocket`
    with it, in the `Sec-WebSocket-Protocol` header like the `phoenix`
@@ -40,8 +42,17 @@ Prerequisites: Rust (see `../phoenix/.tool-versions`), the Tauri CLI
 tools. The main window is plain HTML and JavaScript, so there is no Node
 toolchain.
 
+The server only accepts API connections when `API_SOCKET=true`. It reads
+`.env` in the Phoenix directory, so the simplest is a gitignored
+`phoenix/.env`:
+
 ```sh
-# Terminal 1: the server, with the websocket API on (config :app, api_socket: true)
+API_SOCKET=true
+PORT=4010
+```
+
+```sh
+# Terminal 1: the server
 cd phoenix && mix phx.server
 
 # Terminal 2: the app
@@ -49,7 +60,7 @@ cd tauri && cargo tauri dev
 ```
 
 The app connects to `http://localhost:4000` by default. Set `PHOENIX_URL` to
-use another server, and add its URL to `src-tauri/capabilities/phoenix.json`
+match the server's port or to use another server, and add its URL to `src-tauri/capabilities/phoenix.json`
 so its `/client/new` page may hand the app a token.
 
 Logs go to stderr. Set `RUST_LOG=desktop_lib=debug` for more.
