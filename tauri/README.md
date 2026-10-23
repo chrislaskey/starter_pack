@@ -6,7 +6,7 @@ The app has two windows:
 
 * **main**, a local page (`src/`) with a connection indicator for the
   websocket API, and buttons to log in, open the web UI, send a test request
-  and log out
+  and log out. It links to the [tmux example](#tmux-example).
 * **phoenix**, the Phoenix web UI loaded from the server
 
 ## How it connects
@@ -67,15 +67,63 @@ Logs go to stderr. Set `RUST_LOG=desktop_lib=debug` for more.
 
 `cargo tauri build` makes the macOS app bundle under `src-tauri/target/release/bundle`.
 
+## tmux example
+
+`src/tmux-example.html` is a spike for driving the user's tmux from the app
+(research in `docs/macos-tmux-research.md`). It:
+
+1. Guesses the user's shell, terminal app (the first installed of iTerm2,
+   Ghostty, kitty and WezTerm, else the Terminal app that comes with macOS)
+   and tmux, and shows them in a collapsed settings form the user can
+   correct.
+2. Shows the tmux sessions on the user's tmux server, refreshing every 5
+   seconds. For each window and pane it shows:
+   - the program in the foreground, and whether it's a shell at a prompt
+   - the Claude Code status, when Claude Code runs in the pane
+   - the pane's directory
+   - its git status, like a shell prompt: branch, `✔` staged, `✘` unstaged,
+     `✂` untracked, `⚠` conflicted, `↑`/`↓` ahead of and behind the upstream
+   - the processes on the pane's tty, with their state and CPU use
+
+   The processes come from `ps`, the Claude Code statuses from
+   `~/.claude/sessions` (undocumented), and the git status from
+   `git --no-optional-locks status --porcelain=v2`. A separate list shows
+   every running Claude Code session, in tmux or not.
+3. Creates a session running the user's login shell in a directory, types a
+   command into it (`claude` by default) and opens it in the terminal app. The
+   directory defaults to the root of the git repository the app runs in (the
+   nearest parent with a `.git`), else the directory the app runs in. Under
+   `cargo tauri dev` that's the repository root. Apps launched from Finder run
+   in `/`, so for those the default is the home directory. A leading `~` is
+   expanded.
+4. **Open** on a session brings its terminal window to the front, or opens a
+   new window attached to it. Terminal and iTerm2 find the window by the tty
+   tmux reports for the session's clients (AppleScript). Ghostty
+   (AppleScript) and WezTerm (`wezterm cli`) find it by the title tmux gives
+   it, `tmux:<session>`. kitty always gets a new window.
+5. Shows `tmux attach -t <session>` to copy into any terminal as a fallback.
+
+Opening and focusing windows in Terminal, Ghostty and iTerm2 sends Apple events, so
+macOS asks once whether the app may control that terminal app. Under
+`cargo tauri dev` the question is about the terminal running the command.
+
 ## Layout
 
 ```
-src/                     the main window: index.html, main.js, styles.css
+src/                     the main window: index.html, main.js, styles.css,
+                         and the tmux example page: tmux-example.*
 src-tauri/
   src/lib.rs             the Tauri app: windows, state and commands
   src/phoenix.rs         the websocket API client
   src/token.rs           the stored API token
   src/config.rs          the server URL
+  src/tmux_example.rs    the tmux example page's settings and actions
+  src/tmux.rs            runs tmux
+  src/terminal_app.rs    finds terminal apps, opens and focuses their windows
+  src/process.rs         lists processes with ps
+  src/claude_code.rs     reads Claude Code's session statuses
+  src/git.rs             reads a directory's git status
+  Info.plist             merged into the app bundle's Info.plist
   capabilities/          which window may call which command
   tauri.conf.json        the Tauri configuration
 ```

@@ -1,6 +1,8 @@
 // The status window. It mirrors the connection state the Rust side emits
 // and sends the user's actions back as commands.
 
+import { log } from "./log.js";
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -12,20 +14,6 @@ const LABELS = {
 };
 
 const el = (id) => document.getElementById(id);
-
-function log(message, data) {
-  const item = document.createElement("li");
-  const time = new Date().toLocaleTimeString();
-  item.textContent = `${time}  ${message}`;
-  if (data !== undefined) {
-    const pre = document.createElement("pre");
-    pre.textContent = JSON.stringify(data, null, 2);
-    item.appendChild(pre);
-  }
-  const list = el("log");
-  list.prepend(item);
-  while (list.children.length > 30) list.lastChild.remove();
-}
 
 let lastState;
 

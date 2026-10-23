@@ -14,9 +14,17 @@
 //! `set_api_token` command. The app keeps the token (see `token`) and a
 //! background task (see `phoenix`) holds a websocket connection to the API
 //! with it for as long as the app runs.
+//!
+//! The main window also has a tmux example page, see `tmux_example`.
 
+mod claude_code;
 mod config;
+mod git;
 mod phoenix;
+mod process;
+mod terminal_app;
+mod tmux;
+mod tmux_example;
 mod token;
 
 use std::sync::{Arc, Mutex};
@@ -27,6 +35,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use config::Config;
 use phoenix::{Client, Control, Reply, Status};
+use terminal_app::ShowOutcome;
+use tmux_example::{DetectedSettings, Settings, TmuxStatus};
 use token::TokenStore;
 
 const MAIN_WINDOW: &str = "main";
@@ -87,7 +97,11 @@ pub fn run() {
             set_api_token,
             log_out,
             open_phoenix,
-            api_request
+            api_request,
+            get_tmux_example_settings,
+            get_tmux_status,
+            create_tmux_session,
+            open_tmux_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -171,6 +185,37 @@ fn open_phoenix(
 #[tauri::command]
 async fn api_request(state: State<'_, AppState>, event: String, payload: Option<Value>) -> Reply {
     request(&state.control, event, payload.unwrap_or_else(|| json!({}))).await
+}
+
+/// Best guesses for the tmux example page's settings form.
+#[tauri::command]
+async fn get_tmux_example_settings() -> DetectedSettings {
+    tmux_example::detect_settings().await
+}
+
+/// The tmux sessions with what runs in each pane, and the Claude Code
+/// sessions.
+#[tauri::command]
+async fn get_tmux_status(tmux_path: String) -> Result<TmuxStatus, String> {
+    tmux_example::get_status(&tmux_path).await
+}
+
+/// Creates a tmux session in `directory`, types `command` into it and opens
+/// it in the terminal app.
+#[tauri::command]
+async fn create_tmux_session(
+    settings: Settings,
+    name: String,
+    directory: String,
+    command: String,
+) -> Result<ShowOutcome, String> {
+    tmux_example::create_session(&settings, &name, &directory, &command).await
+}
+
+/// Brings a tmux session's terminal window to the front, or opens one.
+#[tauri::command]
+async fn open_tmux_session(settings: Settings, name: String) -> Result<ShowOutcome, String> {
+    tmux_example::open_session(&settings, &name).await
 }
 
 async fn request(control: &mpsc::UnboundedSender<Control>, event: String, payload: Value) -> Reply {
