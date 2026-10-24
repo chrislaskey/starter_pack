@@ -23,9 +23,8 @@
   let status = $state();
   let quickSearch = $state();
 
-  const PASTE_OUTCOMES = {
+  const PASTE_RESULTS = {
     pasted: "pasted into",
-    not_requested: "not pasted",
     no_accessibility_access: "not pasted: no Accessibility access",
     previous_app_not_activated: "not pasted: couldn't bring back",
     failed: "not pasted: failed in",
@@ -62,20 +61,20 @@
     await refreshQuickSearch();
   }
 
-  const ANCHORS = { caret: "at the text caret", text_field: "under the text field", screen: "at the screen position" };
+  const PLACEMENTS = { caret: "at the text caret", text_field: "under the text field", screen: "at the screen position" };
 
   function logOpened(verb, opened) {
     const app = opened.previous_app?.name ?? "no app";
     const [x, y] = opened.position.map(Math.round);
-    const detail = opened.anchor_detail ? ` (${opened.anchor_detail})` : "";
-    log(`Quick search ${verb} ${ANCHORS[opened.anchor] ?? opened.anchor} over ${app}, at ${x},${y}${detail}`);
+    const error = opened.placement_error ? ` (${opened.placement_error})` : "";
+    log(`Quick search ${verb} ${PLACEMENTS[opened.placement] ?? opened.placement} over ${app}, at ${x},${y}${error}`);
   }
 
-  function logPick(outcome) {
+  function logPasted(outcome) {
     const app = outcome.previous_app?.name ?? "the previous app";
     const detail = outcome.paste.detail ? ` (${outcome.paste.detail})` : "";
     log(
-      `Quick search copied ${outcome.label} as ${outcome.clipboard_types.join(", ")}, ${PASTE_OUTCOMES[outcome.paste.result]} ${app}${detail}`,
+      `Quick search copied ${outcome.label} as ${outcome.clipboard_types.join(", ")}, ${PASTE_RESULTS[outcome.paste.result]} ${app}${detail}`,
     );
   }
 
@@ -91,9 +90,9 @@
     const unlisteners = [
       listen("connection-status", (event) => render(event.payload)),
       listen("api-message", (event) => log(`Server pushed ${event.payload.event}`, event.payload.payload)),
-      listen("quick-search-picked", (event) => logPick(event.payload)),
       listen("quick-search-opened", (event) => logOpened("opened", event.payload)),
-      listen("quick-search-anchored", (event) => logOpened("moved", event.payload)),
+      listen("quick-search-moved", (event) => logOpened("moved", event.payload)),
+      listen("quick-search-pasted", (event) => logPasted(event.payload)),
     ];
     invoke("get_connection_status").then(render);
     // The user grants Accessibility access in System Settings and comes back.
@@ -147,7 +146,7 @@
     <h2>Quick search</h2>
     <p>
       Press <kbd>{quickSearch?.shortcut ?? "⌃⌘T"}</kbd> in any app to open the popup, type to filter, <kbd>↵</kbd> copies
-      the first match and pastes it where you were typing.
+      the selected item and pastes it where you were typing.
     </p>
     <p class="muted">
       {#if quickSearch?.accessibility_trusted}
@@ -159,7 +158,7 @@
       {/if}
     </p>
     <div class="actions">
-      <Button onclick={() => run("Open quick search", "toggle_quick_search")}>Open quick search</Button>
+      <Button onclick={() => run("Open quick search", "open_quick_search")}>Open quick search</Button>
       {#if quickSearch && !quickSearch.accessibility_trusted}
         <Button variant="primary" onclick={requestAccessibility}>Allow Accessibility access</Button>
       {/if}

@@ -38,7 +38,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use config::Config;
 use phoenix::{Client, Control, Reply, Status};
-use quick_search::{Choice, PickOutcome, QuickSearchStatus};
+use quick_search::{Item, PasteOutcome};
 use terminal_app::ShowOutcome;
 use tmux_example::{DetectedSettings, Settings, TmuxStatus};
 use token::TokenStore;
@@ -112,10 +112,10 @@ pub fn run() {
             open_tmux_session,
             get_quick_search_status,
             request_accessibility_access,
-            toggle_quick_search,
-            list_quick_search_choices,
-            quick_search_pick,
-            quick_search_dismiss
+            open_quick_search,
+            close_quick_search,
+            list_quick_search_items,
+            paste_quick_search_item
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -232,11 +232,11 @@ async fn open_tmux_session(settings: Settings, name: String) -> Result<ShowOutco
     tmux_example::open_session(&settings, &name).await
 }
 
-/// The quick search popup's shortcut, whether pasting can work, and its
-/// choices, for the status page.
+/// The quick search popup's shortcut and whether pasting can work, for the
+/// status page.
 #[tauri::command]
-fn get_quick_search_status() -> QuickSearchStatus {
-    quick_search::status()
+fn get_quick_search_status() -> quick_search::Status {
+    quick_search::get_status()
 }
 
 /// Asks macOS for Accessibility access when it isn't granted, which opens
@@ -246,33 +246,29 @@ fn request_accessibility_access() -> bool {
     macos::is_accessibility_trusted(true)
 }
 
-/// Opens or closes the quick search popup, what ⌃⌘T does.
+/// Opens the quick search popup, like ⌃⌘T does.
 #[tauri::command]
-fn toggle_quick_search(app: AppHandle) -> Result<(), String> {
-    quick_search::toggle(&app)
+fn open_quick_search(app: AppHandle) -> Result<(), String> {
+    quick_search::open(&app)
 }
 
-/// The choices the popup filters.
+/// Closes the popup without pasting.
 #[tauri::command]
-fn list_quick_search_choices() -> Vec<Choice> {
-    quick_search::choices()
+fn close_quick_search(app: AppHandle) {
+    quick_search::close(&app);
 }
 
-/// Copies the picked choice, closes the popup and pastes it into the app the
-/// popup opened over.
+/// The popup's items whose label or value contains `query`.
 #[tauri::command]
-async fn quick_search_pick(
-    app: AppHandle,
-    choice_id: String,
-    paste: bool,
-) -> Result<PickOutcome, String> {
-    quick_search::pick(app, choice_id, paste).await
+fn list_quick_search_items(query: Option<String>) -> Vec<Item> {
+    quick_search::list_items(query.as_deref().unwrap_or_default())
 }
 
-/// Closes the popup without picking.
+/// Copies the item, closes the popup and pastes into the app the popup
+/// opened over.
 #[tauri::command]
-fn quick_search_dismiss(app: AppHandle) {
-    quick_search::hide(&app);
+async fn paste_quick_search_item(app: AppHandle, item_id: String) -> Result<PasteOutcome, String> {
+    quick_search::paste_item(app, item_id).await
 }
 
 async fn request(control: &mpsc::UnboundedSender<Control>, event: String, payload: Value) -> Reply {

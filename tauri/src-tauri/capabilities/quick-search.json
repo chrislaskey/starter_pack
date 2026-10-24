@@ -1,12 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "quick-search",
-  "description": "The quick search popup: it lists the choices, copies and pastes the pick, and closes itself",
+  "description": "The quick search popup: it lists its items, pastes one, and closes itself",
   "windows": ["quick-search"],
   "permissions": [
     "core:default",
-    "allow-list-quick-search-choices",
-    "allow-quick-search-pick",
-    "allow-quick-search-dismiss"
+    "allow-list-quick-search-items",
+    "allow-paste-quick-search-item",
+    "allow-close-quick-search"
   ]
 }

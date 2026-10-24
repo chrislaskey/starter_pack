@@ -1,47 +1,48 @@
-<!-- The quick search popup. The Rust side (src-tauri/src/quick_search.rs)
-     opens it with ⌃⌘T, knows the choices (text snippets and sample images)
-     and does the copying and pasting; this page filters the choices as the
-     user types, moves the selection with the arrow keys and sends the pick. -->
+<!-- The quick search popup. The Rust side (src-tauri/src/quick_search/)
+     opens it with ⌃⌘T, lists and filters the items and pastes the one the
+     user picks; this page shows them and moves the selection. -->
 <script>
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
 
-  const ANCHORS = {
+  const PLACEMENTS = {
     caret: "At the text caret",
     text_field: "Under the text field",
     screen: "No caret found",
   };
-  const APP_SUFFIX = (opened) => (opened?.previous_app?.name ? ` in ${opened.previous_app.name}` : "");
 
-  let choices = $state([]);
+  let items = $state([]);
   let query = $state("");
   let selected = $state(0);
   let opened = $state();
   let message = $state("");
   let input = $state();
 
-  let matches = $derived.by(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return choices;
-    return choices.filter(
-      (choice) => choice.label.toLowerCase().includes(needle) || choice.value.toLowerCase().includes(needle),
-    );
+  let placementMessage = $derived.by(() => {
+    if (!opened) return "";
+    const app = opened.previous_app?.name ? ` in ${opened.previous_app.name}` : "";
+    const error = opened.placement_error ? `: ${opened.placement_error}` : "";
+    return `${PLACEMENTS[opened.placement] ?? opened.placement}${app}${error}`;
   });
 
-  // A new filter starts over at the first match.
+  // The last query sent wins, in case replies arrive out of order.
+  let latestQuery = "";
+
+  async function listItems() {
+    const sent = query;
+    latestQuery = sent;
+    const listed = await invoke("list_quick_search_items", { query: sent });
+    if (sent !== latestQuery) return;
+    items = listed;
+    selected = 0;
+  }
+
   $effect(() => {
     query;
-    selected = 0;
+    listItems();
   });
 
-  let anchorMessage = $derived.by(() => {
-    if (!opened) return "";
-    const detail = opened.anchor_detail ? `: ${opened.anchor_detail}` : "";
-    return `${ANCHORS[opened.anchor] ?? opened.anchor}${APP_SUFFIX(opened)}${detail}`;
-  });
-
-  // Each time the popup opens it starts over with the input focused.
   async function reset(event) {
     query = "";
     message = "";
@@ -50,11 +51,11 @@
     input?.focus();
   }
 
-  async function pick(choice) {
-    if (!choice) return;
+  async function paste(item) {
+    if (!item) return;
     message = "Copying…";
     try {
-      await invoke("quick_search_pick", { choiceId: choice.id, paste: true });
+      await invoke("paste_quick_search_item", { itemId: item.id });
     } catch (error) {
       message = `Failed: ${error}`;
     }
@@ -62,28 +63,26 @@
 
   function onSubmit(event) {
     event.preventDefault();
-    pick(matches[selected] ?? matches[0]);
+    paste(items[selected] ?? items[0]);
   }
 
   function onKeydown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
-      invoke("quick_search_dismiss");
-    } else if (event.key === "ArrowDown" && matches.length) {
+      invoke("close_quick_search");
+    } else if (event.key === "ArrowDown" && items.length) {
       event.preventDefault();
-      selected = (selected + 1) % matches.length;
-    } else if (event.key === "ArrowUp" && matches.length) {
+      selected = (selected + 1) % items.length;
+    } else if (event.key === "ArrowUp" && items.length) {
       event.preventDefault();
-      selected = (selected - 1 + matches.length) % matches.length;
+      selected = (selected - 1 + items.length) % items.length;
     }
   }
 
   onMount(() => {
-    invoke("list_quick_search_choices").then((list) => (choices = list));
     const unlisteners = [
       listen("quick-search-opened", reset),
-      // The caret found after the popup already opened at the screen position.
-      listen("quick-search-anchored", (event) => (opened = event.payload)),
+      listen("quick-search-moved", (event) => (opened = event.payload)),
     ];
     reset();
     return () => unlisteners.forEach(async (unlisten) => (await unlisten)());
@@ -103,17 +102,17 @@
     autocomplete="off"
     spellcheck="false"
   />
-  <ul class="choices" role="listbox">
-    {#each matches as choice, index (choice.id)}
+  <ul class="items" role="listbox">
+    {#each items as item, index (item.id)}
       <li role="option" aria-selected={index === selected}>
-        <button type="button" class="choice" class:selected={index === selected} onclick={() => pick(choice)}>
-          {#if choice.preview}
-            <img class="thumbnail" src={choice.preview} alt="" />
+        <button type="button" class="item" class:selected={index === selected} onclick={() => paste(item)}>
+          {#if item.preview_url}
+            <img class="thumbnail" src={item.preview_url} alt="" />
           {:else}
             <span class="thumbnail text-mark" aria-hidden="true">Aa</span>
           {/if}
-          <span class="label">{choice.label}</span>
-          <span class="value">{choice.value}</span>
+          <span class="label">{item.label}</span>
+          <span class="value">{item.value}</span>
         </button>
       </li>
     {:else}
@@ -124,7 +123,7 @@
     {#if opened && !opened.accessibility_trusted}
       <p class="warning">No Accessibility access: copies only, can't paste or find the caret.</p>
     {/if}
-    <p class="status" title={anchorMessage}>{message || anchorMessage}</p>
+    <p class="status" title={placementMessage}>{message || placementMessage}</p>
     <p class="keys"><kbd>↑</kbd><kbd>↓</kbd> select · <kbd>↵</kbd> copy &amp; paste · <kbd>esc</kbd> close</p>
   </footer>
 </form>

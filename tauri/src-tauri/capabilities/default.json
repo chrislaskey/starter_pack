@@ -15,6 +15,6 @@
     "allow-open-tmux-session",
     "allow-get-quick-search-status",
     "allow-request-accessibility-access",
-    "allow-toggle-quick-search"
+    "allow-open-quick-search"
   ]
 }

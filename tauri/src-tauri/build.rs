@@ -15,10 +15,10 @@ fn main() {
         "open_tmux_session",
         "get_quick_search_status",
         "request_accessibility_access",
-        "toggle_quick_search",
-        "list_quick_search_choices",
-        "quick_search_pick",
-        "quick_search_dismiss",
+        "open_quick_search",
+        "close_quick_search",
+        "list_quick_search_items",
+        "paste_quick_search_item",
     ]);
 
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
