@@ -15,13 +15,16 @@
 //! background task (see `phoenix`) holds a websocket connection to the API
 //! with it for as long as the app runs.
 //!
-//! The main window also has a tmux example page, see `tmux_example`.
+//! The main window also has a tmux example page, see `tmux_example`, and
+//! ⌃⌘T opens the quick search popup anywhere on the Mac, see `quick_search`.
 
 mod claude_code;
 mod config;
 mod git;
+mod macos;
 mod phoenix;
 mod process;
+mod quick_search;
 mod terminal_app;
 mod tmux;
 mod tmux_example;
@@ -35,11 +38,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use config::Config;
 use phoenix::{Client, Control, Reply, Status};
+use quick_search::{Choice, PickOutcome, QuickSearchStatus};
 use terminal_app::ShowOutcome;
 use tmux_example::{DetectedSettings, Settings, TmuxStatus};
 use token::TokenStore;
 
-const MAIN_WINDOW: &str = "main";
+pub(crate) const MAIN_WINDOW: &str = "main";
 const PHOENIX_WINDOW: &str = "phoenix";
 
 /// Runs on every page of the Phoenix window before the page's own scripts.
@@ -64,7 +68,11 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_nspanel::init())
+        .plugin(tauri_plugin_clipboard::init())
         .setup(|app| {
+            quick_search::register(app.handle())?;
+
             let config = Config::from_env();
             let tokens = Arc::new(TokenStore::open(app.path().app_data_dir()?));
             let status = Arc::new(Mutex::new(Status {
@@ -101,7 +109,13 @@ pub fn run() {
             get_tmux_example_settings,
             get_tmux_status,
             create_tmux_session,
-            open_tmux_session
+            open_tmux_session,
+            get_quick_search_status,
+            request_accessibility_access,
+            toggle_quick_search,
+            list_quick_search_choices,
+            quick_search_pick,
+            quick_search_dismiss
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -216,6 +230,49 @@ async fn create_tmux_session(
 #[tauri::command]
 async fn open_tmux_session(settings: Settings, name: String) -> Result<ShowOutcome, String> {
     tmux_example::open_session(&settings, &name).await
+}
+
+/// The quick search popup's shortcut, whether pasting can work, and its
+/// choices, for the status page.
+#[tauri::command]
+fn get_quick_search_status() -> QuickSearchStatus {
+    quick_search::status()
+}
+
+/// Asks macOS for Accessibility access when it isn't granted, which opens
+/// the system dialog, and says whether it's granted now.
+#[tauri::command]
+fn request_accessibility_access() -> bool {
+    macos::is_accessibility_trusted(true)
+}
+
+/// Opens or closes the quick search popup, what ⌃⌘T does.
+#[tauri::command]
+fn toggle_quick_search(app: AppHandle) -> Result<(), String> {
+    quick_search::toggle(&app)
+}
+
+/// The choices the popup filters.
+#[tauri::command]
+fn list_quick_search_choices() -> Vec<Choice> {
+    quick_search::choices()
+}
+
+/// Copies the picked choice, closes the popup and pastes it into the app the
+/// popup opened over.
+#[tauri::command]
+async fn quick_search_pick(
+    app: AppHandle,
+    choice_id: String,
+    paste: bool,
+) -> Result<PickOutcome, String> {
+    quick_search::pick(app, choice_id, paste).await
+}
+
+/// Closes the popup without picking.
+#[tauri::command]
+fn quick_search_dismiss(app: AppHandle) {
+    quick_search::hide(&app);
 }
 
 async fn request(control: &mpsc::UnboundedSender<Control>, event: String, payload: Value) -> Reply {

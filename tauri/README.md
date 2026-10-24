@@ -146,6 +146,33 @@ Opening and focusing windows in Terminal, Ghostty and iTerm2 sends Apple events,
 macOS asks once whether the app may control that terminal app. Under
 `cargo tauri dev` the question is about the terminal running the command.
 
+## Quick search
+
+⌃⌘T in any app opens a small popup (`src/quick-search.html`,
+`src/quick-search/`) under the text caret, else under the focused text
+field, else near the top of the screen like Spotlight. It has a filter box
+over a few choices, three text snippets and five sample images (PNG, JPEG,
+GIF, animated GIF, WebP in `src/quick-search/images/`); ↑/↓ move the
+selection, Enter copies the selected match to the clipboard, closes the
+popup and pastes it where the user was typing. Escape or clicking elsewhere
+closes it. Text is copied through the `tauri-plugin-clipboard` plugin;
+images are written to `NSPasteboard` directly as one item with a file URL,
+the original bytes, a PNG and a TIFF, so each app takes the representation
+it understands (the research notes explain which does what).
+
+The popup is a non-activating `NSPanel` (through the `tauri-nspanel`
+plugin), so it takes keystrokes while the app the user was typing in stays
+in front and receives the paste. Finding the caret and pasting both need
+Accessibility access (System Settings › Privacy & Security ›
+Accessibility); the status page asks for it. Without it the popup still
+copies, opens at the screen position and reports `no_accessibility_access`.
+Under `cargo tauri dev` macOS checks the terminal app that runs it, so
+grant access to that app; a bundle's grant is tied to its signature and may
+need re-granting after a rebuild. The research notes are in
+`docs/macos-quick-search-research.md`; the Rust side is
+`src-tauri/src/quick_search.rs` with the AppKit, Accessibility and Core
+Graphics calls in `src-tauri/src/macos.rs`.
+
 ## Layout
 
 ```
@@ -153,6 +180,7 @@ src/                     the main window, a Svelte app with one HTML entry per p
   index.html, main.js    the status page, mounting StatusPage.svelte
   tmux-example.html      the tmux example page, mounting tmux-example/
   tmux-example/          the tmux example page's components and styles
+  quick-search.html      the quick search popup, mounting quick-search/
   lib/                   shared by both pages: the log, the app:emit handler
   app.css, styles.css    Tailwind with Phoenix's theme, and the app's own styles
 vite.config.js           the Vite build: the pages, Tailwind, the $phoenix alias
@@ -164,6 +192,8 @@ src-tauri/
   src/token.rs           the stored API token
   src/config.rs          the server URL
   src/tmux_example.rs    the tmux example page's settings and actions
+  src/quick_search.rs    the quick search popup: hotkey, panel, copy and paste
+  src/macos.rs           AppKit, Accessibility and Core Graphics calls Tauri lacks
   src/tmux.rs            runs tmux
   src/terminal_app.rs    finds terminal apps, opens and focuses their windows
   src/process.rs         lists processes with ps
@@ -171,5 +201,6 @@ src-tauri/
   src/git.rs             reads a directory's git status
   Info.plist             merged into the app bundle's Info.plist
   capabilities/          which window may call which command
+docs/                    research notes from the spikes
   tauri.conf.json        the Tauri configuration
 ```

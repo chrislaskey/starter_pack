@@ -13,6 +13,12 @@ fn main() {
         "get_tmux_status",
         "create_tmux_session",
         "open_tmux_session",
+        "get_quick_search_status",
+        "request_accessibility_access",
+        "toggle_quick_search",
+        "list_quick_search_choices",
+        "quick_search_pick",
+        "quick_search_dismiss",
     ]);
 
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))

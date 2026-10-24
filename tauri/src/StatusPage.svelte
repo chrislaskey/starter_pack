@@ -21,6 +21,15 @@
   };
 
   let status = $state();
+  let quickSearch = $state();
+
+  const PASTE_OUTCOMES = {
+    pasted: "pasted into",
+    not_requested: "not pasted",
+    no_accessibility_access: "not pasted: no Accessibility access",
+    previous_app_not_activated: "not pasted: couldn't bring back",
+    failed: "not pasted: failed in",
+  };
 
   function render(next) {
     if (next.state !== status?.state) {
@@ -39,6 +48,37 @@
     }
   }
 
+  async function refreshQuickSearch() {
+    try {
+      quickSearch = await invoke("get_quick_search_status");
+    } catch (error) {
+      log(`Getting the quick search status failed: ${error}`);
+    }
+  }
+
+  async function requestAccessibility() {
+    const trusted = await invoke("request_accessibility_access");
+    log(trusted ? "Accessibility access is granted" : "Asked macOS for Accessibility access, grant it in System Settings");
+    await refreshQuickSearch();
+  }
+
+  const ANCHORS = { caret: "at the text caret", text_field: "under the text field", screen: "at the screen position" };
+
+  function logOpened(verb, opened) {
+    const app = opened.previous_app?.name ?? "no app";
+    const [x, y] = opened.position.map(Math.round);
+    const detail = opened.anchor_detail ? ` (${opened.anchor_detail})` : "";
+    log(`Quick search ${verb} ${ANCHORS[opened.anchor] ?? opened.anchor} over ${app}, at ${x},${y}${detail}`);
+  }
+
+  function logPick(outcome) {
+    const app = outcome.previous_app?.name ?? "the previous app";
+    const detail = outcome.paste.detail ? ` (${outcome.paste.detail})` : "";
+    log(
+      `Quick search copied ${outcome.label} as ${outcome.clipboard_types.join(", ")}, ${PASTE_OUTCOMES[outcome.paste.result]} ${app}${detail}`,
+    );
+  }
+
   async function run(action, command, args) {
     try {
       await invoke(command, args);
@@ -51,9 +91,18 @@
     const unlisteners = [
       listen("connection-status", (event) => render(event.payload)),
       listen("api-message", (event) => log(`Server pushed ${event.payload.event}`, event.payload.payload)),
+      listen("quick-search-picked", (event) => logPick(event.payload)),
+      listen("quick-search-opened", (event) => logOpened("opened", event.payload)),
+      listen("quick-search-anchored", (event) => logOpened("moved", event.payload)),
     ];
     invoke("get_connection_status").then(render);
-    return () => unlisteners.forEach(async (unlisten) => (await unlisten)());
+    // The user grants Accessibility access in System Settings and comes back.
+    refreshQuickSearch();
+    window.addEventListener("focus", refreshQuickSearch);
+    return () => {
+      window.removeEventListener("focus", refreshQuickSearch);
+      unlisteners.forEach(async (unlisten) => (await unlisten)());
+    };
   });
 </script>
 
@@ -92,6 +141,29 @@
   <section>
     <h2>Examples</h2>
     <p><a href="tmux-example.html">tmux sessions in your terminal app →</a></p>
+  </section>
+
+  <section>
+    <h2>Quick search</h2>
+    <p>
+      Press <kbd>{quickSearch?.shortcut ?? "⌃⌘T"}</kbd> in any app to open the popup, type to filter, <kbd>↵</kbd> copies
+      the first match and pastes it where you were typing.
+    </p>
+    <p class="muted">
+      {#if quickSearch?.accessibility_trusted}
+        Accessibility access is granted, so pasting and finding the text caret work.
+      {:else}
+        Without Accessibility access the popup can only copy, and opens near the top of the screen. Under
+        <code>cargo tauri dev</code> macOS checks the terminal app running it, so grant access to that app when
+        the system dialog names it.
+      {/if}
+    </p>
+    <div class="actions">
+      <Button onclick={() => run("Open quick search", "toggle_quick_search")}>Open quick search</Button>
+      {#if quickSearch && !quickSearch.accessibility_trusted}
+        <Button variant="primary" onclick={requestAccessibility}>Allow Accessibility access</Button>
+      {/if}
+    </div>
   </section>
 
   <LogList />

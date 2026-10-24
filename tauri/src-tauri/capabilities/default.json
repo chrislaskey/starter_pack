@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The local status window: it reads the connection state, opens the Phoenix window and sends API requests, and the tmux example page",
+  "description": "The local status window: it reads the connection state, opens the Phoenix window and sends API requests, the tmux example page and the quick search status",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -12,6 +12,9 @@
     "allow-get-tmux-example-settings",
     "allow-get-tmux-status",
     "allow-create-tmux-session",
-    "allow-open-tmux-session"
+    "allow-open-tmux-session",
+    "allow-get-quick-search-status",
+    "allow-request-accessibility-access",
+    "allow-toggle-quick-search"
   ]
 }

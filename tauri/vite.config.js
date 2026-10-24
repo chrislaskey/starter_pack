@@ -64,6 +64,7 @@ export default defineConfig({
       input: {
         main: resolve(import.meta.dirname, "src/index.html"),
         tmux_example: resolve(import.meta.dirname, "src/tmux-example.html"),
+        quick_search: resolve(import.meta.dirname, "src/quick-search.html"),
       },
     },
   },

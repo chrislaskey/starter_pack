@@ -1,0 +1,138 @@
+/* The quick search popup. It fills its borderless panel, whose corners the
+   Rust side rounds. */
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+.popup {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: var(--card);
+}
+
+.popup input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+}
+
+.popup input:focus {
+  border-color: var(--accent);
+}
+
+.choices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.choice {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0.65rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--fg);
+  text-align: left;
+  cursor: default;
+}
+
+.choice .label {
+  white-space: nowrap;
+}
+
+.choice .value {
+  margin-left: auto;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.choice.selected {
+  background: var(--accent);
+  color: white;
+}
+
+.choice.selected .value {
+  color: rgb(255 255 255 / 0.8);
+}
+
+.thumbnail {
+  flex: none;
+  width: 32px;
+  height: 20px;
+  border-radius: 3px;
+  object-fit: cover;
+  background: var(--bg);
+}
+
+.text-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.choice.selected .text-mark {
+  color: white;
+  background: rgb(255 255 255 / 0.2);
+}
+
+.choices .empty {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.9rem;
+}
+
+.popup footer {
+  margin-top: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.popup footer p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup footer .warning {
+  color: #c0392b;
+}
+
+.popup footer .keys {
+  display: flex;
+  gap: 0.3em;
+  justify-content: flex-end;
+}
+
+kbd {
+  font-family: inherit;
+  padding: 0 0.3em;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
