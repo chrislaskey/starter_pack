@@ -4,80 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>tmux example</title>
-    <link rel="stylesheet" href="styles.css" />
-    <link rel="stylesheet" href="tmux-example.css" />
-    <script type="module" src="/tmux-example.js" defer></script>
+    <script type="module" src="/tmux-example/main.js"></script>
+    <!-- Phoenix's theme script, inlined here by vite.config.js so it runs
+         before the first paint -->
+    <!-- phoenix-theme-script -->
   </head>
 
   <body>
-    <main class="container wide">
-      <header>
-        <p><a href="index.html">← Back</a></p>
-        <h1>tmux example</h1>
-        <p class="muted">Your tmux sessions and what runs in them. Refreshes every 5 seconds.</p>
-      </header>
-
-      <section>
-        <div class="section-header">
-          <h2>Sessions</h2>
-          <button id="refresh" class="secondary small">Refresh</button>
-        </div>
-        <div id="sessions" class="stack"></div>
-      </section>
-
-      <section>
-        <h2>Claude Code</h2>
-        <ul id="claude-code-sessions" class="card rows"></ul>
-        <p class="muted hint">
-          Read from <code>~/.claude/sessions</code>, which Claude Code doesn't document, so it may change.
-        </p>
-      </section>
-
-      <section>
-        <h2>New session</h2>
-        <form id="new-session" class="card new-session">
-          <label>
-            Name
-            <input name="name" value="tauri-example" required spellcheck="false" />
-          </label>
-          <label class="grow">
-            Directory
-            <input name="directory" required spellcheck="false" placeholder="Detecting…" />
-          </label>
-          <label>
-            Command
-            <input name="command" value="claude" spellcheck="false" />
-          </label>
-          <button type="submit">Create and open</button>
-        </form>
-      </section>
-
-      <details class="card settings">
-        <summary>
-          <span>Settings</span>
-          <span id="settings-summary" class="muted">Detecting…</span>
-        </summary>
-        <form id="settings" class="settings-fields">
-          <p class="muted">Best guesses, change them if they're wrong.</p>
-          <label>
-            Shell
-            <input name="shell" required spellcheck="false" />
-          </label>
-          <label>
-            Terminal app
-            <select name="terminal_app"></select>
-          </label>
-          <label>
-            tmux
-            <input name="tmux_path" required spellcheck="false" />
-          </label>
-        </form>
-      </details>
-
-      <section>
-        <h2>Log</h2>
-        <ul id="log"></ul>
-      </section>
-    </main>
+    <div id="app"></div>
   </body>
 </html>

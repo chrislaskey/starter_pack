@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ESNext",
+    "checkJs": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "paths": { "$phoenix/*": ["../phoenix/lib/app/web/*"] }
+  },
+  "include": ["src/**/*.d.ts", "src/**/*.js", "src/**/*.svelte", "../phoenix/lib/app/web/**/*.svelte"]
+}

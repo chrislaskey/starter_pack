@@ -1,0 +1,14 @@
+/* Tailwind and daisyUI with Phoenix's theme, for the Svelte components
+   Phoenix generates ($phoenix/...), so they look like they do on the web.
+   The app's own styles go in the base layer, so the components' utility
+   classes win over them. */
+
+@import "tailwindcss" source(none);
+@import "../../phoenix/assets/css/theme.css";
+@source "../../phoenix/lib/app/web/**/*.svelte";
+@source "./";
+
+/* Makes the "hero-#{ICON}" classes Phoenix's icon component uses */
+@plugin "../vendor/heroicons.js";
+
+@import "./styles.css" layer(base);
