@@ -108,8 +108,8 @@ for now.
 
 ## tmux example
 
-`src/tmux-example.html` (`src/tmux-example/`) is a spike for driving the user's tmux from the app
-(research in `docs/macos-tmux-research.md`). It:
+`src/tmux-example.html` (`src/tmux-example/`) is an example of driving the
+user's tmux from the app (`docs/tmux-example.md` says how to remove it). It:
 
 1. Guesses the user's shell, terminal app (the first installed of iTerm2,
    Ghostty, kitty and WezTerm, else the Terminal app that comes with macOS)
@@ -162,7 +162,7 @@ the caret and pasting need Accessibility access (System Settings › Privacy
 & Security › Accessibility); the status page asks for it. Under
 `cargo tauri dev` macOS checks the terminal app that runs it, so grant
 access to that app. `docs/quick-search.md` describes how it's built, its
-limitations and how to test it by hand; the Rust side is
+limitations, how to test it by hand and how to remove it; the Rust side is
 `src-tauri/src/quick_search/` with the AppKit, Accessibility and Core
 Graphics calls in `src-tauri/src/macos/`.
 
@@ -196,5 +196,5 @@ src-tauri/
   Info.plist             merged into the app bundle's Info.plist
   capabilities/          which window may call which command
   tauri.conf.json        the Tauri configuration
-docs/                    how each example is built; docs/suggestions/ for ideas not built
+docs/                    how each example is built and removed; docs/suggestions/ for ideas not built
 ```

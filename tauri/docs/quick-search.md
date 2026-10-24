@@ -176,3 +176,39 @@ By hand:
    (a file upload that animates), Notes or TextEdit (a static picture), a
    browser text area (the PNG, or nothing) and a terminal (nothing). Try
    **WebP image** in Preview with ⌘N: it opens as an image.
+
+## Removing it
+
+The popup is an example. To build an app without it, delete these and
+the app builds and runs as before:
+
+1. `src-tauri/src/quick_search/` and `src-tauri/src/macos/`.
+2. In `src-tauri/src/lib.rs`: the `mod macos;` and `mod quick_search;`
+   lines, the `use quick_search::…` line, the `tauri_nspanel` and
+   `tauri_plugin_clipboard` plugins, the `quick_search::register` call in
+   `setup`, the six command functions (`get_quick_search_status`,
+   `request_accessibility_access`, `open_quick_search`,
+   `close_quick_search`, `list_quick_search_items`,
+   `paste_quick_search_item`) and their entries in `generate_handler!`.
+3. In `src-tauri/build.rs`: the same six command names.
+4. `src-tauri/capabilities/quick-search.json`, and the three lines
+   `allow-get-quick-search-status`, `allow-request-accessibility-access`
+   and `allow-open-quick-search` in `capabilities/default.json`.
+5. In `src-tauri/Cargo.toml`: `tauri-plugin-global-shortcut`,
+   `tauri-plugin-clipboard`, `tauri-nspanel`, `core-graphics`,
+   `core-foundation`, `objc2`, `objc2-foundation` and `objc2-app-kit`.
+   Nothing else uses them. Run `cargo update` afterwards to prune
+   `Cargo.lock`.
+6. `src/quick-search.html`, `src/quick-search/` and
+   `src/public/quick-search/`, and the `quick_search` entry in
+   `vite.config.js`.
+7. In `src/StatusPage.svelte`: the "Quick search" section, the
+   `quickSearch` state, `PASTE_RESULTS`, `PLACEMENTS`,
+   `refreshQuickSearch`, `requestAccessibility`, `logOpened`, `logPasted`,
+   the three `quick-search-*` listeners and the window focus listener in
+   `onMount`.
+8. This file, `docs/suggestions/quick-search.md` and the "Quick search"
+   section of `README.md`.
+
+Then `cargo clippy --all-targets -- -D warnings`, `cargo test` and
+`pnpm check` should pass. `grep -ri "quick.search" .` finds anything missed.
