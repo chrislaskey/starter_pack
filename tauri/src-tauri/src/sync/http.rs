@@ -28,6 +28,10 @@ pub struct Page {
     pub next: Option<Value>,
     /// What to store as the cursor once `next` is nothing.
     pub cursor: Option<Cursor>,
+    /// The server purged tombstones this device never saw: drop everything
+    /// and pull from nothing. Only a pull says so.
+    #[serde(default)]
+    pub resync: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -64,7 +64,10 @@ opened, from the Sync now button, and every half minute:
 2. **Pull** every page from the stored cursor, applying each page as
    upserts in one transaction with foreign keys deferred, then store the
    new cursor. A pull a minute apart re-delivers the last minute's rows,
-   which the upserts absorb.
+   which the upserts absorb. A device away longer than the server's
+   retention window gets `resync` instead of rows: it may have missed a
+   purged tombstone, so it drops every synced row and the cursor and
+   pulls from nothing.
 3. **Backfill** each community the pull showed the user joined, since the
    cursor cannot see rows that became visible without changing.
 4. **Prune** every post not by the user that is no longer in a community

@@ -272,6 +272,24 @@ pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
         .map_err(sql_error)
 }
 
+/// Drops every synced row and the cursor, for a resync from nothing. The
+/// outbox stays: what is queued is pushed before any pull.
+pub fn reset(connection: &Connection) -> Result<(), String> {
+    let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+    for table in TABLES.iter().rev() {
+        transaction
+            .execute(&format!("DELETE FROM \"{table}\""), [])
+            .map_err(sql_error)?;
+    }
+    transaction
+        .execute(
+            "UPDATE sync_state SET last_pulled_at = NULL, last_pulled_id = NULL WHERE id = 1",
+            [],
+        )
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)
+}
+
 // The cursor
 
 pub fn cursor(connection: &Connection) -> Result<Option<Cursor>, String> {

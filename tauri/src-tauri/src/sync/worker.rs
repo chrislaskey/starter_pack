@@ -16,6 +16,8 @@ pub struct SyncReport {
     pub backfilled: usize,
     pub pruned: usize,
     pub pending: i64,
+    /// The realm was pulled from nothing, see `pull`.
+    pub resynced: bool,
 }
 
 pub async fn sync_realm(
@@ -109,12 +111,22 @@ async fn pull(
     user_id: &str,
     report: &mut SyncReport,
 ) -> Result<Vec<String>, String> {
-    let cursor = store::cursor(connection)?;
+    let mut cursor = store::cursor(connection)?;
     let mut after = None;
     let mut joined = Vec::new();
 
     loop {
         let page = server.pull(cursor.as_ref(), after.as_ref()).await?;
+
+        if page.resync {
+            log::info!("The server purged what this device never saw, pulling from nothing");
+            store::reset(connection)?;
+            report.resynced = true;
+            cursor = None;
+            after = None;
+            continue;
+        }
+
         let applied = apply_page(connection, user_id, &page.rows)?;
         report.pulled += applied.rows;
         joined.extend(applied.joined_communities);
