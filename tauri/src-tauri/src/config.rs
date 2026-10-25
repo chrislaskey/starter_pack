@@ -4,6 +4,8 @@
 //! defaults to the Phoenix dev server. The websocket API and the web UI are
 //! both derived from it.
 
+use std::net::SocketAddr;
+
 use url::Url;
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:4000";
@@ -38,5 +40,27 @@ impl Config {
         self.server_url
             .join(path)
             .map_err(|error| error.to_string())
+    }
+
+    /// A sync endpoint of a realm, `App.Web.SyncController`: the realm's
+    /// host on the server's scheme and port.
+    pub fn sync_url(&self, realm_host: &str, path: &str) -> Result<Url, String> {
+        let mut url = self.server_url.clone();
+        url.set_host(Some(realm_host))
+            .map_err(|error| format!("{realm_host} is not a valid host: {error}"))?;
+        url.set_path(path);
+        url.set_query(None);
+        Ok(url)
+    }
+
+    /// Where a realm host resolves to in development. Browsers resolve
+    /// `*.localhost` to this machine but the system resolver does not, so
+    /// such a host points at the server's address.
+    pub fn dev_address(&self, realm_host: &str) -> Option<SocketAddr> {
+        if !realm_host.ends_with(".localhost") {
+            return None;
+        }
+        let port = self.server_url.port_or_known_default()?;
+        Some(SocketAddr::from(([127, 0, 0, 1], port)))
     }
 }

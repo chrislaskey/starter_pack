@@ -15,8 +15,10 @@
 //! background task (see `phoenix`) holds a websocket connection to the API
 //! with it for as long as the app runs.
 //!
-//! The main window also has a tmux example page, see `tmux_example`, and
-//! ⌃⌘T opens the quick search popup anywhere on the Mac, see `quick_search`.
+//! The main window also has the realms page, where the user's realms work
+//! offline-first from one SQLite file per realm and sync with the server,
+//! see `sync`; a tmux example page, see `tmux_example`; and ⌃⌘T opens the
+//! quick search popup anywhere on the Mac, see `quick_search`.
 
 mod claude_code;
 mod config;
@@ -25,6 +27,7 @@ mod macos;
 mod phoenix;
 mod process;
 mod quick_search;
+mod sync;
 mod terminal_app;
 mod tmux;
 mod tmux_example;
@@ -56,10 +59,11 @@ window.appClient = {
 "#;
 
 pub struct AppState {
-    config: Config,
-    tokens: Arc<TokenStore>,
-    status: Arc<Mutex<Status>>,
-    control: mpsc::UnboundedSender<Control>,
+    pub(crate) config: Config,
+    pub(crate) tokens: Arc<TokenStore>,
+    pub(crate) status: Arc<Mutex<Status>>,
+    pub(crate) control: mpsc::UnboundedSender<Control>,
+    pub(crate) device: sync::Device,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -74,7 +78,9 @@ pub fn run() {
             quick_search::register(app.handle())?;
 
             let config = Config::from_env();
-            let tokens = Arc::new(TokenStore::open(app.path().app_data_dir()?));
+            let data_dir = app.path().app_data_dir()?;
+            let tokens = Arc::new(TokenStore::open(data_dir.clone()));
+            let device = sync::Device::open(data_dir);
             let status = Arc::new(Mutex::new(Status {
                 state: phoenix::State::Disconnected,
                 detail: Some("Starting".into()),
@@ -91,12 +97,14 @@ pub fn run() {
                 control_rx,
             );
             tauri::async_runtime::spawn(client.run());
+            tauri::async_runtime::spawn(sync::run_timer(app.handle().clone()));
 
             app.manage(AppState {
                 config,
                 tokens,
                 status,
                 control,
+                device,
             });
             Ok(())
         })
@@ -115,7 +123,12 @@ pub fn run() {
             open_quick_search,
             close_quick_search,
             list_quick_search_items,
-            paste_quick_search_item
+            paste_quick_search_item,
+            sync::list_realms,
+            sync::get_realm_page,
+            sync::write_post,
+            sync::edit_post,
+            sync::sync_realm
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -151,7 +164,8 @@ fn set_api_token(app: AppHandle, state: State<'_, AppState>, token: String) -> R
 }
 
 /// Deletes the API token on the server when connected, then forgets it
-/// locally either way, which disconnects.
+/// locally either way, which disconnects, along with the realm files and
+/// the identity on this device.
 #[tauri::command]
 async fn log_out(state: State<'_, AppState>) -> Result<(), String> {
     if state.tokens.get().is_some() {
@@ -164,6 +178,7 @@ async fn log_out(state: State<'_, AppState>) -> Result<(), String> {
     }
 
     state.tokens.clear()?;
+    state.device.forget_all()?;
     notify_token_changed(&state)
 }
 
@@ -271,7 +286,11 @@ async fn paste_quick_search_item(app: AppHandle, item_id: String) -> Result<Past
     quick_search::paste_item(app, item_id).await
 }
 
-async fn request(control: &mpsc::UnboundedSender<Control>, event: String, payload: Value) -> Reply {
+pub(crate) async fn request(
+    control: &mpsc::UnboundedSender<Control>,
+    event: String,
+    payload: Value,
+) -> Reply {
     let (reply, reply_rx) = oneshot::channel();
     control
         .send(Control::Request {
