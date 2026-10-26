@@ -18,8 +18,13 @@ pub struct SyncReport {
     pub pending: i64,
     /// The realm was pulled from nothing, see `pull`.
     pub resynced: bool,
+    /// Why the push failed as a whole, when it did; the pull still ran.
+    pub push_error: Option<String>,
 }
 
+/// One sync. A push that fails as a whole, such as the server refusing
+/// the request, does not stop the pull: the outbox waits for the next
+/// sync and the report says why.
 pub async fn sync_realm(
     server: &SyncServer,
     connection: &mut Connection,
@@ -27,10 +32,11 @@ pub async fn sync_realm(
 ) -> Result<SyncReport, String> {
     let mut report = SyncReport::default();
 
-    push(server, connection, user_id, &mut report).await?;
-    let joined = pull(server, connection, user_id, &mut report).await?;
-    for community_id in joined {
+    report.push_error = push(server, connection, user_id, &mut report).await.err();
+    pull(server, connection, user_id, &mut report).await?;
+    for community_id in store::pending_backfills(connection)? {
         backfill(server, connection, user_id, &community_id, &mut report).await?;
+        store::remove_backfill(connection, &community_id)?;
     }
     report.pruned = store::prune(connection, user_id)?;
     report.pending = store::pending_count(connection)?;
@@ -38,10 +44,11 @@ pub async fn sync_realm(
     Ok(report)
 }
 
-/// Pushes the outbox. An accepted row gets its `last_synced_at`; a
-/// rejected row is replaced by the server's version, or dropped when the
-/// server has none. A row edited again while the push was in flight
-/// stays queued.
+/// Pushes the outbox. An accepted row gets its `last_synced_at`. A
+/// rejected row is replaced by the server's version when there is one;
+/// without one the row and its entry stay, with the attempt counted and
+/// the reason kept, so the user can fix it. A row edited again while the
+/// push was in flight stays queued.
 async fn push(
     server: &SyncServer,
     connection: &mut Connection,
@@ -92,28 +99,31 @@ async fn push(
                 if !same_id {
                     store::delete_row(connection, &rejected.table, &rejected.id)?;
                 }
+                // Dequeued first, or the server's row would be skipped as a
+                // local edit; an edit made meanwhile is queued again below
+                store::dequeue(connection, &rejected.table, &rejected.id, &started)?;
                 apply_page(connection, user_id, &[server_row])?;
             }
-            None => store::delete_row(connection, &rejected.table, &rejected.id)?,
+            None => {
+                store::record_failure(connection, &rejected.table, &rejected.id, &rejected.reason)?
+            }
         }
-        store::dequeue(connection, &rejected.table, &rejected.id, &started)?;
         report.rejected += 1;
     }
 
     Ok(())
 }
 
-/// Pulls every page from the stored cursor and applies it. Returns the
-/// communities the user just became a member of.
+/// Pulls every page from the stored cursor and applies it. A membership
+/// that arrives for the user records the backfill to do.
 async fn pull(
     server: &SyncServer,
     connection: &mut Connection,
     user_id: &str,
     report: &mut SyncReport,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let mut cursor = store::cursor(connection)?;
     let mut after = None;
-    let mut joined = Vec::new();
 
     loop {
         let page = server.pull(cursor.as_ref(), after.as_ref()).await?;
@@ -127,9 +137,7 @@ async fn pull(
             continue;
         }
 
-        let applied = apply_page(connection, user_id, &page.rows)?;
-        report.pulled += applied.rows;
-        joined.extend(applied.joined_communities);
+        report.pulled += apply_page(connection, user_id, &page.rows)?.rows;
 
         match page.next {
             Some(token) => after = Some(token),
@@ -137,7 +145,7 @@ async fn pull(
                 if let Some(cursor) = page.cursor {
                     store::save_cursor(connection, &cursor)?;
                 }
-                return Ok(joined);
+                return Ok(());
             }
         }
     }

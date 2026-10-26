@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
   last_error TEXT,
   PRIMARY KEY (table_name, row_id)
 );
+CREATE TABLE IF NOT EXISTS sync_backfills (
+  community_id TEXT PRIMARY KEY
+);
 "#;
 
 /// Opens the file, creating and migrating it when needed.

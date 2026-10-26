@@ -85,10 +85,28 @@ pub fn apply_rows(
         if !TABLES.contains(&row.table.as_str()) {
             return Err(format!("unknown table {}", row.table));
         }
+        let id = row
+            .row
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("a row without an id")?;
+
+        // A local edit waiting to be pushed is kept, whatever the server has
+        if queued(connection, &row.table, id)? {
+            continue;
+        }
+        // A removed community row of a post this device never held is noise
+        if row.table == "posts_communities"
+            && !is_live(&row.row)
+            && !post_exists(connection, &row.row)?
+        {
+            continue;
+        }
         if row.table == "users_communities"
             && is_new_live_membership(connection, user_id, &row.row)?
             && let Some(community) = row.row.get("community_id").and_then(Value::as_str)
         {
+            add_backfill(connection, community)?;
             applied.joined_communities.push(community.to_string());
         }
         upsert(connection, &row.table, &row.row)?;
@@ -96,6 +114,58 @@ pub fn apply_rows(
     }
 
     Ok(applied)
+}
+
+fn is_live(row: &Map<String, Value>) -> bool {
+    row.get("deleted_at").is_none_or(Value::is_null)
+}
+
+fn post_exists(connection: &Connection, row: &Map<String, Value>) -> Result<bool, String> {
+    let Some(post_id) = row.get("post_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM posts WHERE id = ?1)",
+            [post_id],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)
+}
+
+// Backfills still to do: a community the user joined, recorded with the
+// page that brought the membership and cleared after the last page
+
+pub fn add_backfill(connection: &Connection, community_id: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO sync_backfills (community_id) VALUES (?1)",
+            [community_id],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+pub fn pending_backfills(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT community_id FROM sync_backfills ORDER BY community_id")
+        .map_err(sql_error)?;
+    let ids = statement
+        .query_map([], |row| row.get(0))
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    Ok(ids)
+}
+
+pub fn remove_backfill(connection: &Connection, community_id: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM sync_backfills WHERE community_id = ?1",
+            [community_id],
+        )
+        .map_err(sql_error)?;
+    Ok(())
 }
 
 fn is_new_live_membership(
@@ -282,9 +352,10 @@ pub fn reset(connection: &Connection) -> Result<(), String> {
             .map_err(sql_error)?;
     }
     transaction
-        .execute(
-            "UPDATE sync_state SET last_pulled_at = NULL, last_pulled_id = NULL WHERE id = 1",
-            [],
+        .execute_batch(
+            "UPDATE sync_state SET last_pulled_at = NULL, last_pulled_id = NULL WHERE id = 1;
+             DELETE FROM sync_outbox;
+             DELETE FROM sync_backfills;",
         )
         .map_err(sql_error)?;
     transaction.commit().map_err(sql_error)
@@ -350,6 +421,34 @@ pub fn queue(connection: &Connection, table: &str, id: &str, now: &str) -> Resul
     Ok(())
 }
 
+/// Whether the row has a local change waiting to be pushed.
+pub fn queued(connection: &Connection, table: &str, id: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sync_outbox WHERE table_name = ?1 AND row_id = ?2)",
+            params![table, id],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)
+}
+
+/// Keeps the entry, counting the failed push with the server's reason.
+pub fn record_failure(
+    connection: &Connection,
+    table: &str,
+    id: &str,
+    error: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE sync_outbox SET attempts = attempts + 1, last_error = ?3
+             WHERE table_name = ?1 AND row_id = ?2",
+            params![table, id, error],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
 /// Drops the entry unless the row was edited again after `pushed_at`.
 pub fn dequeue(
     connection: &Connection,
@@ -383,11 +482,7 @@ pub fn write_post(
     community_ids: &[String],
     now: &str,
 ) -> Result<String, String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("The post is empty".into());
-    }
-
+    let body = checked_body(body)?;
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
     let post_id = uuid::Uuid::now_v7().to_string();
     transaction
@@ -433,11 +528,7 @@ pub fn edit_post(
     body: &str,
     now: &str,
 ) -> Result<(), String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("The post is empty".into());
-    }
-
+    let body = checked_body(body)?;
     let changed = connection
         .execute(
             "UPDATE posts SET body = ?1, updated_at = ?2
@@ -449,6 +540,21 @@ pub fn edit_post(
         return Err("Not your post, or it is gone".into());
     }
     queue(connection, "posts", post_id, now)
+}
+
+/// The server's rule for a post body, checked here so a post written
+/// offline is not refused on push: not empty, at most `MAX_BODY_CHARS`.
+pub const MAX_BODY_CHARS: usize = 10_000;
+
+fn checked_body(body: &str) -> Result<&str, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("The post is empty".into());
+    }
+    if body.chars().count() > MAX_BODY_CHARS {
+        return Err(format!("The post is over {MAX_BODY_CHARS} characters"));
+    }
+    Ok(body)
 }
 
 // Reads for the pages
@@ -744,6 +850,112 @@ pub(crate) mod tests {
         };
         save_cursor(&connection, &saved).unwrap();
         assert_eq!(cursor(&connection).unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn a_pulled_row_never_overwrites_a_queued_local_edit() {
+        let connection = open_in_memory().unwrap();
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        let mine = write_post(&connection, ME, "local edit", &[], AT).unwrap();
+
+        let mut from_server = realm_rows()[5].clone();
+        from_server.row["id"] = json!(mine);
+        from_server.row["author_id"] = json!(ME);
+        from_server.row["body"] = json!("server copy");
+        let applied = apply_rows(&connection, ME, &[from_server]).unwrap();
+
+        assert_eq!(applied.rows, 0);
+        assert_eq!(
+            row_json(&connection, "posts", &mine).unwrap().unwrap()["body"],
+            json!("local edit")
+        );
+    }
+
+    #[test]
+    fn a_new_membership_records_a_backfill_until_it_is_done() {
+        let connection = open_in_memory().unwrap();
+        assert!(pending_backfills(&connection).unwrap().is_empty());
+
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        assert_eq!(
+            pending_backfills(&connection).unwrap(),
+            vec![COMMUNITY.to_string()]
+        );
+
+        // The same membership again adds nothing
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        assert_eq!(pending_backfills(&connection).unwrap().len(), 1);
+
+        remove_backfill(&connection, COMMUNITY).unwrap();
+        assert!(pending_backfills(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_removed_row_of_an_unknown_post_is_skipped_and_prune_follows_a_removal() {
+        let connection = open_in_memory().unwrap();
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+
+        let mut removed = realm_rows()[6].clone();
+        removed.row["deleted_at"] = json!(AT);
+        removed.row["deleted_by_id"] = json!(OTHER);
+        apply_rows(&connection, ME, &[removed.clone()]).unwrap();
+        assert_eq!(prune(&connection, ME).unwrap(), 1);
+        assert!(feed(&connection, ME).unwrap().is_empty());
+
+        // The post is gone now, so the same tombstone again is noise
+        let applied = apply_rows(&connection, ME, &[removed]).unwrap();
+        assert_eq!(applied.rows, 0);
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM posts_communities", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn reset_drops_every_row_the_cursor_the_outbox_and_the_backfills() {
+        let connection = open_in_memory().unwrap();
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        write_post(&connection, ME, "queued", &[], AT).unwrap();
+        save_cursor(
+            &connection,
+            &Cursor {
+                last_synced_at: AT.into(),
+                id: COMMUNITY.into(),
+            },
+        )
+        .unwrap();
+
+        reset(&connection).unwrap();
+
+        assert!(feed(&connection, ME).unwrap().is_empty());
+        assert!(member_communities(&connection, ME).unwrap().is_empty());
+        assert_eq!(cursor(&connection).unwrap(), None);
+        assert_eq!(pending_count(&connection).unwrap(), 0);
+        assert!(pending_backfills(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_push_is_counted_on_the_entry_and_a_long_body_is_refused() {
+        let connection = open_in_memory().unwrap();
+        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        let mine = write_post(&connection, ME, "draft", &[], AT).unwrap();
+
+        record_failure(&connection, "posts", &mine, "invalid: body").unwrap();
+        let (attempts, last_error): (i64, String) = connection
+            .query_row(
+                "SELECT attempts, last_error FROM sync_outbox WHERE row_id = ?1",
+                [&mine],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((attempts, last_error.as_str()), (1, "invalid: body"));
+        assert!(queued(&connection, "posts", &mine).unwrap());
+
+        let long = "x".repeat(MAX_BODY_CHARS + 1);
+        assert!(write_post(&connection, ME, &long, &[], AT).is_err());
+        assert!(edit_post(&connection, ME, &mine, &long, AT).is_err());
     }
 
     #[test]

@@ -57,10 +57,12 @@ background.
 opened, from the Sync now button, and every half minute:
 
 1. **Push** the outbox. An accepted row gets the server's `last_synced_at`.
-   A rejected row is replaced by the server's version, or dropped when the
-   server has none; memberships and `posts_communities` rows always come
-   back this way, since the server wins on them. A row edited again while
-   the push was in flight stays queued.
+   A rejected row is replaced by the server's version when there is one;
+   memberships and `posts_communities` rows always come back this way,
+   since the server wins on them. Without one, the row and its entry
+   stay, with the attempt counted and the reason in `last_error`, for the
+   user to fix. A row edited again while the push was in flight stays
+   queued. A push that fails as a whole does not stop the pull.
 2. **Pull** every page from the stored cursor, applying each page as
    upserts in one transaction with foreign keys deferred, then store the
    new cursor. A pull a minute apart re-delivers the last minute's rows,
@@ -69,12 +71,20 @@ opened, from the Sync now button, and every half minute:
    purged tombstone, so it drops every synced row and the cursor and
    pulls from nothing.
 3. **Backfill** each community the pull showed the user joined, since the
-   cursor cannot see rows that became visible without changing.
+   cursor cannot see rows that became visible without changing. The
+   communities to backfill are recorded in `sync_backfills` with the page
+   that brought the membership and cleared after the last page, so a
+   backfill cut short is finished on the next sync.
 4. **Prune** every post not by the user that is no longer in a community
    the user is a live member of. Its community rows go with it through
    the foreign key.
 
 The report, or the error, reaches the page as a `realm-synced` event.
+
+Two rules keep local edits safe. One sync of a realm runs at a time, on a
+lock per realm. And a row pulled from the server, or returned with a
+rejection, never replaces a row that has a local change waiting in the
+outbox: the push decides that row's fate first.
 
 ### Commands
 

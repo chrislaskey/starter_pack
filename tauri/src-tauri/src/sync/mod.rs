@@ -26,10 +26,11 @@ pub mod schema;
 pub mod store;
 pub mod worker;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -78,6 +79,8 @@ pub struct RealmPage {
 pub struct Device {
     dir: PathBuf,
     identity: Mutex<Option<Identity>>,
+    /// One lock per realm, so two syncs of a realm never overlap.
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Device {
@@ -97,7 +100,17 @@ impl Device {
         Self {
             dir: data_dir,
             identity: Mutex::new(identity),
+            locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn lock(&self, slug: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(slug.to_string())
+            .or_default()
+            .clone()
     }
 
     pub fn identity(&self) -> Option<Identity> {
@@ -121,8 +134,16 @@ impl Device {
             .ok_or_else(|| format!("This device knows no realm {slug}"))
     }
 
-    pub fn realm_path(&self, slug: &str) -> PathBuf {
-        self.dir.join("realms").join(format!("{slug}.db"))
+    /// The realm's file. The slug is the server's, so it is checked
+    /// before it becomes part of a path.
+    pub fn realm_path(&self, slug: &str) -> Result<PathBuf, String> {
+        let plain = |character: char| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        };
+        if slug.is_empty() || !slug.chars().all(plain) {
+            return Err(format!("{slug:?} is not a realm slug"));
+        }
+        Ok(self.dir.join("realms").join(format!("{slug}.db")))
     }
 
     /// Forgets the identity and every realm file, on log out.
@@ -185,7 +206,7 @@ pub async fn write_post(
 ) -> Result<RealmPage, String> {
     let device = &state.device;
     let identity = device.identity().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.realm_path(&slug))?;
+    let connection = schema::open(&device.realm_path(&slug)?)?;
     store::write_post(
         &connection,
         &identity.user.id,
@@ -210,7 +231,7 @@ pub async fn edit_post(
 ) -> Result<RealmPage, String> {
     let device = &state.device;
     let identity = device.identity().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.realm_path(&slug))?;
+    let connection = schema::open(&device.realm_path(&slug)?)?;
     store::edit_post(
         &connection,
         &identity.user.id,
@@ -233,7 +254,7 @@ pub async fn sync_realm(app: AppHandle, slug: String) -> Result<SyncReport, Stri
 fn page(device: &Device, slug: &str) -> Result<RealmPage, String> {
     let identity = device.identity().ok_or("Not logged in on this device")?;
     let realm = device.realm(slug)?;
-    let connection = schema::open(&device.realm_path(slug))?;
+    let connection = schema::open(&device.realm_path(slug)?)?;
 
     Ok(RealmPage {
         realm,
@@ -253,7 +274,9 @@ pub async fn run_sync(app: &AppHandle, slug: &str) -> Result<SyncReport, String>
     let token = state.tokens.get().ok_or("Not logged in")?;
     let realm = device.realm(slug)?;
     let server = http::SyncServer::new(&state.config, &realm.host, &token)?;
-    let mut connection = schema::open(&device.realm_path(slug))?;
+    let lock = device.lock(slug);
+    let _one_sync_at_a_time = lock.lock().await;
+    let mut connection = schema::open(&device.realm_path(slug)?)?;
 
     let result = worker::sync_realm(&server, &mut connection, &identity.user.id).await;
 
