@@ -43,9 +43,13 @@ rows to push, see `phoenix/priv/client_migrations/README.md`.
 
 ### A local write
 
-`write_post` inserts the post and one `app_posts_communities` row per chosen
-community, with a UUIDv7 from this device and the device's time as
-`updated_at`, and queues each row in `sync_outbox`. The page shows the
+`write_post` checks the post with the server's own rules first,
+`App.Data.Post.changeset/3` as the Rust `mix app.rust` writes next to the
+schema and `src-tauri/src/changesets.rs` compiles in by path, so a post the
+server would refuse is refused here before it is saved. It then inserts the
+post and one `app_posts_communities` row per chosen community, with a
+UUIDv7 from this device and the device's time as `updated_at`, and queues
+each row in `sync_outbox`. The page shows the
 post at once, marked as waiting to sync, and a sync starts in the
 background.
 

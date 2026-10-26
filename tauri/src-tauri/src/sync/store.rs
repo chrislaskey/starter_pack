@@ -12,6 +12,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::changesets;
+
 /// The synced tables, parents first.
 pub const TABLES: [&str; 5] = [
     "app_users",
@@ -482,7 +484,7 @@ pub fn write_post(
     community_ids: &[String],
     now: &str,
 ) -> Result<String, String> {
-    let body = checked_body(body)?;
+    let body = checked_body(user_id, body)?;
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
     let post_id = uuid::Uuid::now_v7().to_string();
     transaction
@@ -528,7 +530,7 @@ pub fn edit_post(
     body: &str,
     now: &str,
 ) -> Result<(), String> {
-    let body = checked_body(body)?;
+    let body = checked_body(user_id, body)?;
     let changed = connection
         .execute(
             "UPDATE app_posts SET body = ?1, updated_at = ?2
@@ -542,19 +544,23 @@ pub fn edit_post(
     queue(connection, "app_posts", post_id, now)
 }
 
-/// The server's rule for a post body, checked here so a post written
-/// offline is not refused on push: not empty, at most `MAX_BODY_CHARS`.
-pub const MAX_BODY_CHARS: usize = 10_000;
+/// The server's rules for a post, `App.Data.Post.changeset/3`, run here so
+/// a post written offline is not refused on push. The author is data, as
+/// the posting flow sets it on the server; the body is what the user
+/// typed, kept as the server keeps it.
+fn checked_body(author_id: &str, body: &str) -> Result<String, String> {
+    let mut data = Map::new();
+    data.insert("author_id".into(), Value::from(author_id));
+    let mut params = Map::new();
+    params.insert("body".into(), Value::from(body));
 
-fn checked_body(body: &str) -> Result<&str, String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("The post is empty".into());
-    }
-    if body.chars().count() > MAX_BODY_CHARS {
-        return Err(format!("The post is over {MAX_BODY_CHARS} characters"));
-    }
-    Ok(body)
+    let changeset = changesets::checked(changesets::post::changeset(&data, &params))?;
+    Ok(changeset
+        .changes()
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or(body)
+        .to_string())
 }
 
 // Reads for the pages
@@ -764,10 +770,11 @@ pub(crate) mod tests {
         assert_eq!(outbox[1].table, "app_posts_communities");
         assert_eq!(pending_count(&connection).unwrap(), 2);
 
+        // The body is kept as typed, as the server keeps it
         let row = row_json(&connection, "app_posts", &post_id)
             .unwrap()
             .unwrap();
-        assert_eq!(row["body"], json!("mine"));
+        assert_eq!(row["body"], json!("  mine  "));
         assert_eq!(row["author_id"], json!(ME));
         assert_eq!(row["updated_at"], json!(AT));
         assert_eq!(row["deleted_at"], Value::Null);
@@ -955,8 +962,11 @@ pub(crate) mod tests {
         assert_eq!((attempts, last_error.as_str()), (1, "invalid: body"));
         assert!(queued(&connection, "app_posts", &mine).unwrap());
 
-        let long = "x".repeat(MAX_BODY_CHARS + 1);
-        assert!(write_post(&connection, ME, &long, &[], AT).is_err());
+        let long = "x".repeat(10_001);
+        assert_eq!(
+            write_post(&connection, ME, &long, &[], AT).unwrap_err(),
+            "body should be at most 10000 character(s)"
+        );
         assert!(edit_post(&connection, ME, &mine, &long, AT).is_err());
     }
 

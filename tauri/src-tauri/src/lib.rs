@@ -20,6 +20,7 @@
 //! server, see `sync`; a tmux example page, see `tmux_example`; and ⌃⌘T opens the
 //! quick search popup anywhere on the Mac, see `quick_search`.
 
+mod changesets;
 mod claude_code;
 mod config;
 mod git;

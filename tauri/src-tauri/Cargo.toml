@@ -14,6 +14,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The validations of the Phoenix app's universal changesets, see
+# ../../phoenix/priv/rust/README.md and src/changesets.rs
+ecto_changeset = { path = "../../phoenix/native/ecto_changeset" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs"] }

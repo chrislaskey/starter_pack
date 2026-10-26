@@ -13,3 +13,8 @@ git submodule update --init
 (cd phoenix && mix setup && API_SOCKET=true mix phx.server)
 (cd tauri && cargo tauri dev)
 ```
+
+The desktop app validates a post with the Rust the Phoenix app writes from
+its `App.Data.Post.changeset/3`, and runs itself, see
+`phoenix/priv/rust/README.md` and, for the spike behind it,
+`phoenix/docs/design/shared-validations.md`.
