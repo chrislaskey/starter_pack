@@ -1,0 +1,61 @@
+defmodule App.Data.PostCommunity do
+  @moduledoc """
+  "This post is in this community", and the membership it was added
+  under, `users_communities_id`, which is always the author's. Leaving a
+  community soft-deletes the member's rows through that membership, and
+  rejoining revives them, see `App.Data.Memberships`. Removing a post from
+  a community soft-deletes its row, and adding it back revives the same
+  row, so the unique index on the pair is plain.
+  """
+
+  use Ecto.Schema
+  use App.Data.Synced
+  import Ecto.Changeset
+
+  @primary_key {:id, Ecto.UUID, autogenerate: [version: 7]}
+  @foreign_key_type Ecto.UUID
+
+  schema "app_posts_communities" do
+    belongs_to :post, App.Data.Post
+    belongs_to :community, App.Data.Community
+    belongs_to :membership, App.Data.UserCommunity, foreign_key: :users_communities_id
+    field :last_synced_at, :utc_datetime_usec
+    field :deleted_at, :utc_datetime_usec
+    field :deleted_by_id, Ecto.UUID
+
+    timestamps(type: :utc_datetime_usec)
+  end
+
+  @required [:post_id, :community_id, :users_communities_id]
+
+  def changeset(row, params, _options \\ []) do
+    row
+    |> cast(params, @required)
+    |> validate_required(@required)
+    |> unique_constraint([:post_id, :community_id])
+    |> put_change(:last_synced_at, DateTime.utc_now())
+  end
+
+  @doc """
+  Removing the post from the community, or the leave cascade: a soft
+  delete with the `deleted_at` the flow computed.
+  """
+  def remove_changeset(row, params, _options \\ []) do
+    row
+    |> cast(params, [:deleted_at, :deleted_by_id])
+    |> validate_required([:deleted_at, :deleted_by_id])
+    |> put_change(:last_synced_at, DateTime.utc_now())
+  end
+
+  @doc """
+  Adding the post back: revives the row under the author's current
+  membership.
+  """
+  def revive_changeset(row, params, _options \\ []) do
+    row
+    |> cast(params, [:users_communities_id])
+    |> validate_required([:users_communities_id])
+    |> change(deleted_at: nil, deleted_by_id: nil)
+    |> put_change(:last_synced_at, DateTime.utc_now())
+  end
+end

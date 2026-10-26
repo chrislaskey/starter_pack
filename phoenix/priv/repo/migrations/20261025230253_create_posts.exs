@@ -1,0 +1,43 @@
+defmodule App.Repo.Migrations.CreatePosts do
+  use Ecto.Migration
+
+  def change do
+    create table(:app_posts, primary_key: false) do
+      add :id, :uuid, primary_key: true
+      add :author_id, references(:app_users, type: :uuid, on_delete: :delete_all), null: false
+      add :body, :text, null: false
+      add :last_synced_at, :utc_datetime_usec, null: false
+      add :deleted_at, :utc_datetime_usec
+      add :deleted_by_id, :uuid
+
+      timestamps(type: :utc_datetime_usec)
+    end
+
+    create index(:app_posts, [:author_id])
+
+    create table(:app_posts_communities, primary_key: false) do
+      add :id, :uuid, primary_key: true
+      add :post_id, references(:app_posts, type: :uuid, on_delete: :delete_all), null: false
+
+      add :community_id, references(:app_communities, type: :uuid, on_delete: :delete_all),
+        null: false
+
+      # The membership the post was added under; the leave cascade and the
+      # purge follow it
+      add :users_communities_id,
+          references(:app_users_communities, type: :uuid, on_delete: :delete_all),
+          null: false
+
+      add :last_synced_at, :utc_datetime_usec, null: false
+      add :deleted_at, :utc_datetime_usec
+      add :deleted_by_id, :uuid
+
+      timestamps(type: :utc_datetime_usec)
+    end
+
+    create index(:app_posts_communities, [:community_id])
+    create index(:app_posts_communities, [:users_communities_id])
+    # Plain, not partial: adding a post back revives the soft-deleted row
+    create unique_index(:app_posts_communities, [:post_id, :community_id])
+  end
+end
