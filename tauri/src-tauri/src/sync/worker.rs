@@ -1,4 +1,4 @@
-//! One sync of one realm: push the outbox, pull what changed, backfill a
+//! One sync: push the outbox, pull what changed, backfill a
 //! community the user just joined, prune what the user can no longer see.
 //! See "Push, in detail" and "Leak 4" in `phoenix/docs/design/offline-sync.md`.
 
@@ -16,7 +16,7 @@ pub struct SyncReport {
     pub backfilled: usize,
     pub pruned: usize,
     pub pending: i64,
-    /// The realm was pulled from nothing, see `pull`.
+    /// The file was pulled from nothing, see `pull`.
     pub resynced: bool,
     /// Why the push failed as a whole, when it did; the pull still ran.
     pub push_error: Option<String>,
@@ -25,7 +25,7 @@ pub struct SyncReport {
 /// One sync. A push that fails as a whole, such as the server refusing
 /// the request, does not stop the pull: the outbox waits for the next
 /// sync and the report says why.
-pub async fn sync_realm(
+pub async fn sync(
     server: &SyncServer,
     connection: &mut Connection,
     user_id: &str,
@@ -199,8 +199,8 @@ mod tests {
     use std::env;
 
     /// Against a running server, as a device would sync. Needs, see
-    /// `docs/offline-sync.md`: `SYNC_SERVER_URL`, `SYNC_REALM_HOST`,
-    /// `SYNC_TOKEN` and `SYNC_USER_ID` of a user who is a member of the
+    /// `docs/offline-sync.md`: `SYNC_SERVER_URL`, `SYNC_TOKEN` and
+    /// `SYNC_USER_ID` of a user who is a member of the
     /// community `SYNC_COMMUNITY_ID`.
     #[tokio::test]
     #[ignore = "needs a running Phoenix server with API_SOCKET=true"]
@@ -209,16 +209,15 @@ mod tests {
         let config = Config {
             server_url: variable("SYNC_SERVER_URL").parse().unwrap(),
         };
-        let host = variable("SYNC_REALM_HOST");
         let token = variable("SYNC_TOKEN");
         let user_id = variable("SYNC_USER_ID");
         let community_id = variable("SYNC_COMMUNITY_ID");
-        let server = SyncServer::new(&config, &host, &token).unwrap();
+        let server = SyncServer::new(&config, &token).unwrap();
 
         // A first sync on a fresh device pulls everything and backfills the
         // community the membership makes visible
         let mut phone = open_in_memory().unwrap();
-        let report = sync_realm(&server, &mut phone, &user_id).await.unwrap();
+        let report = sync(&server, &mut phone, &user_id).await.unwrap();
         assert!(report.pulled > 0, "{report:?}");
         assert!(store::cursor(&phone).unwrap().is_some());
         assert!(
@@ -238,7 +237,7 @@ mod tests {
             &now,
         )
         .unwrap();
-        let report = sync_realm(&server, &mut phone, &user_id).await.unwrap();
+        let report = sync(&server, &mut phone, &user_id).await.unwrap();
         assert_eq!(report.pushed, 1, "{report:?}");
         assert_eq!(
             report.rejected, 1,
@@ -247,7 +246,7 @@ mod tests {
         assert_eq!(report.pending, 0);
 
         let mut laptop = open_in_memory().unwrap();
-        sync_realm(&server, &mut laptop, &user_id).await.unwrap();
+        sync(&server, &mut laptop, &user_id).await.unwrap();
         let on_laptop = store::feed(&laptop, &user_id).unwrap();
         assert!(
             on_laptop
@@ -273,18 +272,18 @@ mod tests {
             &super::super::now_iso8601(),
         )
         .unwrap();
-        sync_realm(&server, &mut laptop, &user_id).await.unwrap();
-        let report = sync_realm(&server, &mut phone, &user_id).await.unwrap();
+        sync(&server, &mut laptop, &user_id).await.unwrap();
+        let report = sync(&server, &mut phone, &user_id).await.unwrap();
         assert_eq!(report.rejected, 1, "{report:?}");
 
         let body = |connection: &Connection| {
-            store::row_json(connection, "posts", &post_id)
+            store::row_json(connection, "app_posts", &post_id)
                 .unwrap()
                 .unwrap()["body"]
                 .clone()
         };
         assert_eq!(body(&phone), "laptop, later");
-        sync_realm(&server, &mut laptop, &user_id).await.unwrap();
+        sync(&server, &mut laptop, &user_id).await.unwrap();
         assert_eq!(body(&laptop), "laptop, later");
     }
 }

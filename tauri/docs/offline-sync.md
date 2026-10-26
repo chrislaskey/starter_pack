@@ -1,7 +1,7 @@
-# Offline-first realms
+# Offline-first communities
 
-The realms page shows the user's realms and, for the chosen one, its
-communities and feed, read from a SQLite file on this device. Writing a
+The communities page shows the user's communities and feed, read from a
+SQLite file on this device. Writing a
 post works with the network off. A sync pushes local changes, pulls the
 server's, and the two converge. The design is
 `phoenix/docs/design/offline-sync.md`; this is what the desktop app does
@@ -11,13 +11,13 @@ with it, built 2026-10-25 as phase 6 of
 ## Code
 
 ```
-src/realms.html, src/realms/           the realms page
+src/communities.html, src/communities/ the communities page
 src-tauri/src/sync/
-  mod.rs      the identity store, the commands and the half-minute timer
-  schema.rs   opening a realm's file: the embedded client migrations
-  store.rs    reads and local writes on a file, applying server rows
+  mod.rs      the profile, the commands and the half-minute timer
+  schema.rs   opening the file: the embedded client migrations
+  store.rs    reads and local writes on the file, applying server rows
   http.rs     the three sync endpoints over HTTP with the API token
-  worker.rs   one sync of one realm
+  worker.rs   one sync
 src-tauri/build.rs                     embeds phoenix/priv/client_migrations/*.sql
 ```
 
@@ -27,17 +27,15 @@ to apply, what to push, what to prune.
 ### On the device
 
 ```
-<app data dir>/identity.json     the user and their realms, from identity.realms.list
-<app data dir>/realms/<slug>.db  one SQLite file per realm
+<app data dir>/profile.json  the user, from auth.user.get
+<app data dir>/app.db        the synced tables
 ```
 
-`identity.json` is the realm directory: who the user is and which realms
-they may enter, each with the host its web UI and sync endpoints live on.
-It comes from the `identity.realms.list` request on the websocket API and
-is kept so the page opens offline. Logging out deletes it and every realm
-file.
+`profile.json` is who the user is, from the `auth.user.get` request on
+the websocket API, kept so the page opens offline. Logging out deletes it
+and `app.db`.
 
-A realm file has the same tables as the server's realm database, created
+`app.db` has the same `app_` tables as the server's database, created
 from the SQL files Phoenix exports with `mix app.migrations`, which
 `build.rs` embeds so the app builds without Elixir. It adds the two
 client-only tables, `sync_state` for the cursor and `sync_outbox` for the
@@ -45,7 +43,7 @@ rows to push, see `phoenix/priv/client_migrations/README.md`.
 
 ### A local write
 
-`write_post` inserts the post and one `posts_communities` row per chosen
+`write_post` inserts the post and one `app_posts_communities` row per chosen
 community, with a UUIDv7 from this device and the device's time as
 `updated_at`, and queues each row in `sync_outbox`. The page shows the
 post at once, marked as waiting to sync, and a sync starts in the
@@ -53,12 +51,12 @@ background.
 
 ### A sync
 
-`worker::sync_realm` runs after every local write, when a realm is
-opened, from the Sync now button, and every half minute:
+`worker::sync` runs after every local write, when the page is opened,
+from the Sync now button, and every half minute:
 
 1. **Push** the outbox. An accepted row gets the server's `last_synced_at`.
    A rejected row is replaced by the server's version when there is one;
-   memberships and `posts_communities` rows always come back this way,
+   memberships and `app_posts_communities` rows always come back this way,
    since the server wins on them. Without one, the row and its entry
    stay, with the attempt counted and the reason in `last_error`, for the
    user to fix. A row edited again while the push was in flight stays
@@ -79,10 +77,9 @@ opened, from the Sync now button, and every half minute:
    the user is a live member of. Its community rows go with it through
    the foreign key.
 
-The report, or the error, reaches the page as a `realm-synced` event.
+The report, or the error, reaches the page as a `synced` event.
 
-Two rules keep local edits safe. One sync of a realm runs at a time, on a
-lock per realm. And a row pulled from the server, or returned with a
+Two rules keep local edits safe. One sync runs at a time, on a lock. And a row pulled from the server, or returned with a
 rejection, never replaces a row that has a local change waiting in the
 outbox: the push decides that row's fate first.
 
@@ -90,18 +87,17 @@ outbox: the push decides that row's fate first.
 
 | Command | Does |
 | --- | --- |
-| `list_realms` | the realm directory, from the server when connected, else as saved |
-| `get_realm_page` | a realm's communities, feed, pending count and cursor, from its file |
+| `get_profile` | the user, from the server when connected, else as saved |
+| `get_communities_page` | the user's communities, feed, pending count and cursor, from the file |
 | `write_post` | writes a post into the file and starts a sync |
 | `edit_post` | edits the user's own post in the file and starts a sync |
-| `sync_realm` | syncs the realm now and returns the report |
+| `sync_now` | syncs now and returns the report |
 
 ### Development
 
-Browsers resolve `acme.localhost` to this machine but the system resolver
-does not, so `SyncServer` points any `*.localhost` host at the server's
-address, see `Config::dev_address`. The server refuses sync requests
-unless `API_SOCKET=true`, like the websocket API.
+The sync endpoints are on the server at `PHOENIX_URL`, the same one the
+websocket API uses. The server refuses sync requests unless
+`API_SOCKET=true`, like the websocket API.
 
 Run the Rust tests with `cargo test` in `src-tauri`. They exercise the
 file, the outbox and the pruning against an in-memory database; the
@@ -110,11 +106,10 @@ server side is tested in Phoenix with its own simulated client,
 
 One test runs two simulated devices against a live server and is ignored
 by default. With the Phoenix dev server running with `API_SOCKET=true`,
-a user connected to a realm and a member of one of its communities, and
-that user's API token:
+a user who is a member of a community, and that user's API token:
 
 ```sh
-SYNC_SERVER_URL=http://localhost:4000 SYNC_REALM_HOST=acme.localhost \
+SYNC_SERVER_URL=http://localhost:4000 \
 SYNC_TOKEN=... SYNC_USER_ID=... SYNC_COMMUNITY_ID=... \
 cargo test two_devices_converge -- --ignored
 ```

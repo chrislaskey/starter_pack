@@ -1,5 +1,5 @@
-//! The three sync endpoints of `App.Web.SyncController`, on the realm's
-//! host with the API token as a bearer token.
+//! The three sync endpoints of `App.Web.SyncController`, on the server
+//! with the API token as a bearer token.
 
 use std::time::Duration;
 
@@ -16,7 +16,6 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 pub struct SyncServer {
     client: reqwest::Client,
     config: Config,
-    host: String,
     token: String,
 }
 
@@ -58,17 +57,15 @@ pub struct Rejected {
 }
 
 impl SyncServer {
-    pub fn new(config: &Config, realm_host: &str, token: &str) -> Result<Self, String> {
-        let mut builder = reqwest::Client::builder().timeout(TIMEOUT);
-        if let Some(address) = config.dev_address(realm_host) {
-            builder = builder.resolve(realm_host, address);
-        }
-        let client = builder.build().map_err(|error| error.to_string())?;
+    pub fn new(config: &Config, token: &str) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .map_err(|error| error.to_string())?;
 
         Ok(Self {
             client,
             config: config.clone(),
-            host: realm_host.to_string(),
             token: token.to_string(),
         })
     }
@@ -102,7 +99,7 @@ impl SyncServer {
     }
 
     async fn post<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T, String> {
-        let url = self.config.sync_url(&self.host, path)?;
+        let url = self.config.page_url(path)?;
         let response = self
             .client
             .post(url)
@@ -110,11 +107,11 @@ impl SyncServer {
             .json(body)
             .send()
             .await
-            .map_err(|error| format!("Could not reach {}: {error}", self.host))?;
+            .map_err(|error| format!("Could not reach the server: {error}"))?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("{} refused {path} with {status}", self.host));
+            return Err(format!("The server refused {path} with {status}"));
         }
         response
             .json()

@@ -1,4 +1,4 @@
-//! Reads and writes on a realm's file, see `schema`.
+//! Reads and writes on the device's file, see `schema`.
 //!
 //! Server rows are applied as upserts, column for column, exactly as they
 //! come off the wire. A local write upserts the row with a client-generated
@@ -14,11 +14,11 @@ use serde_json::{Map, Value};
 
 /// The synced tables, parents first.
 pub const TABLES: [&str; 5] = [
-    "users",
-    "communities",
-    "users_communities",
-    "posts",
-    "posts_communities",
+    "app_users",
+    "app_communities",
+    "app_users_communities",
+    "app_posts",
+    "app_posts_communities",
 ];
 
 /// A row on the wire: the table and its columns, see `App.Data.Sync`.
@@ -96,13 +96,13 @@ pub fn apply_rows(
             continue;
         }
         // A removed community row of a post this device never held is noise
-        if row.table == "posts_communities"
+        if row.table == "app_posts_communities"
             && !is_live(&row.row)
             && !post_exists(connection, &row.row)?
         {
             continue;
         }
-        if row.table == "users_communities"
+        if row.table == "app_users_communities"
             && is_new_live_membership(connection, user_id, &row.row)?
             && let Some(community) = row.row.get("community_id").and_then(Value::as_str)
         {
@@ -126,7 +126,7 @@ fn post_exists(connection: &Connection, row: &Map<String, Value>) -> Result<bool
     };
     connection
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM posts WHERE id = ?1)",
+            "SELECT EXISTS (SELECT 1 FROM app_posts WHERE id = ?1)",
             [post_id],
             |row| row.get(0),
         )
@@ -185,7 +185,7 @@ fn is_new_live_membership(
         .ok_or("a row without an id")?;
     let was_live: bool = connection
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM users_communities WHERE id = ?1 AND deleted_at IS NULL)",
+            "SELECT EXISTS (SELECT 1 FROM app_users_communities WHERE id = ?1 AND deleted_at IS NULL)",
             [id],
             |row| row.get(0),
         )
@@ -329,11 +329,11 @@ pub fn delete_row(connection: &Connection, table: &str, id: &str) -> Result<(), 
 pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
     connection
         .execute(
-            "DELETE FROM posts
+            "DELETE FROM app_posts
              WHERE author_id != ?1
                AND id NOT IN (
-                 SELECT pc.post_id FROM posts_communities pc
-                 JOIN users_communities uc
+                 SELECT pc.post_id FROM app_posts_communities pc
+                 JOIN app_users_communities uc
                    ON uc.community_id = pc.community_id AND uc.user_id = ?1 AND uc.deleted_at IS NULL
                  WHERE pc.deleted_at IS NULL
                )",
@@ -487,17 +487,17 @@ pub fn write_post(
     let post_id = uuid::Uuid::now_v7().to_string();
     transaction
         .execute(
-            "INSERT INTO posts (id, author_id, body, last_synced_at, inserted_at, updated_at)
+            "INSERT INTO app_posts (id, author_id, body, last_synced_at, inserted_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4, ?4)",
             params![post_id, user_id, body, now],
         )
         .map_err(sql_error)?;
-    queue(&transaction, "posts", &post_id, now)?;
+    queue(&transaction, "app_posts", &post_id, now)?;
 
     for community_id in community_ids {
         let membership: Option<String> = transaction
             .query_row(
-                "SELECT id FROM users_communities WHERE user_id = ?1 AND community_id = ?2 AND deleted_at IS NULL",
+                "SELECT id FROM app_users_communities WHERE user_id = ?1 AND community_id = ?2 AND deleted_at IS NULL",
                 params![user_id, community_id],
                 |row| row.get(0),
             )
@@ -508,12 +508,12 @@ pub fn write_post(
         let row_id = uuid::Uuid::now_v7().to_string();
         transaction
             .execute(
-                "INSERT INTO posts_communities (id, post_id, community_id, users_communities_id, last_synced_at, inserted_at, updated_at)
+                "INSERT INTO app_posts_communities (id, post_id, community_id, users_communities_id, last_synced_at, inserted_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)",
                 params![row_id, post_id, community_id, membership, now],
             )
             .map_err(sql_error)?;
-        queue(&transaction, "posts_communities", &row_id, now)?;
+        queue(&transaction, "app_posts_communities", &row_id, now)?;
     }
 
     transaction.commit().map_err(sql_error)?;
@@ -531,7 +531,7 @@ pub fn edit_post(
     let body = checked_body(body)?;
     let changed = connection
         .execute(
-            "UPDATE posts SET body = ?1, updated_at = ?2
+            "UPDATE app_posts SET body = ?1, updated_at = ?2
              WHERE id = ?3 AND author_id = ?4 AND deleted_at IS NULL",
             params![body, now, post_id, user_id],
         )
@@ -539,7 +539,7 @@ pub fn edit_post(
     if changed == 0 {
         return Err("Not your post, or it is gone".into());
     }
-    queue(connection, "posts", post_id, now)
+    queue(connection, "app_posts", post_id, now)
 }
 
 /// The server's rule for a post body, checked here so a post written
@@ -565,8 +565,8 @@ pub fn member_communities(
 ) -> Result<Vec<Community>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT c.id, c.name FROM communities c
-             JOIN users_communities uc ON uc.community_id = c.id
+            "SELECT c.id, c.name FROM app_communities c
+             JOIN app_users_communities uc ON uc.community_id = c.id
              WHERE uc.user_id = ?1 AND uc.deleted_at IS NULL AND c.deleted_at IS NULL
              ORDER BY c.name",
         )
@@ -590,9 +590,9 @@ pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, Str
     let mut statement = connection
         .prepare(
             "SELECT p.id, p.body, p.author_id, coalesce(u.email, ''), p.inserted_at,
-                    EXISTS (SELECT 1 FROM sync_outbox o WHERE o.table_name = 'posts' AND o.row_id = p.id)
-             FROM posts p
-             LEFT JOIN users u ON u.id = p.author_id
+                    EXISTS (SELECT 1 FROM sync_outbox o WHERE o.table_name = 'app_posts' AND o.row_id = p.id)
+             FROM app_posts p
+             LEFT JOIN app_users u ON u.id = p.author_id
              WHERE p.deleted_at IS NULL
              ORDER BY p.inserted_at DESC
              LIMIT 200",
@@ -617,8 +617,8 @@ pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, Str
 
     let mut names = connection
         .prepare(
-            "SELECT c.name FROM posts_communities pc
-             JOIN communities c ON c.id = pc.community_id
+            "SELECT c.name FROM app_posts_communities pc
+             JOIN app_communities c ON c.id = pc.community_id
              WHERE pc.post_id = ?1 AND pc.deleted_at IS NULL
              ORDER BY c.name",
         )
@@ -672,49 +672,49 @@ pub(crate) mod tests {
 
     /// Me, another user, a community both are in, and a post by the other
     /// user in it, as a pull would deliver them.
-    pub fn realm_rows() -> Vec<WireRow> {
+    pub fn server_rows() -> Vec<WireRow> {
         vec![
             wire(
-                "users",
+                "app_users",
                 stamped(
                     json!({"id": ME, "email": "me@example.com", "joined_at": AT}),
                     AT,
                 ),
             ),
             wire(
-                "users",
+                "app_users",
                 stamped(
                     json!({"id": OTHER, "email": "other@example.com", "joined_at": AT}),
                     AT,
                 ),
             ),
             wire(
-                "communities",
+                "app_communities",
                 stamped(json!({"id": COMMUNITY, "name": "Gardeners"}), AT),
             ),
             wire(
-                "users_communities",
+                "app_users_communities",
                 stamped(
                     json!({"id": MEMBERSHIP, "user_id": ME, "community_id": COMMUNITY, "role": "member"}),
                     AT,
                 ),
             ),
             wire(
-                "users_communities",
+                "app_users_communities",
                 stamped(
                     json!({"id": "01a17558-0000-7000-8000-00000000000e", "user_id": OTHER, "community_id": COMMUNITY, "role": "member"}),
                     AT,
                 ),
             ),
             wire(
-                "posts",
+                "app_posts",
                 stamped(
                     json!({"id": "01a17558-0000-7000-8000-0000000000a1", "author_id": OTHER, "body": "hello"}),
                     AT,
                 ),
             ),
             wire(
-                "posts_communities",
+                "app_posts_communities",
                 stamped(
                     json!({"id": "01a17558-0000-7000-8000-0000000000b1", "post_id": "01a17558-0000-7000-8000-0000000000a1", "community_id": COMMUNITY, "users_communities_id": "01a17558-0000-7000-8000-00000000000e"}),
                     AT,
@@ -727,7 +727,7 @@ pub(crate) mod tests {
     fn applies_rows_as_upserts_and_notices_a_new_membership() {
         let connection = open_in_memory().unwrap();
 
-        let applied = apply_rows(&connection, ME, &realm_rows()).unwrap();
+        let applied = apply_rows(&connection, ME, &server_rows()).unwrap();
         assert_eq!(applied.rows, 7);
         assert_eq!(applied.joined_communities, vec![COMMUNITY.to_string()]);
 
@@ -740,7 +740,7 @@ pub(crate) mod tests {
 
         // The same rows again change nothing, an edit replaces the column
         let later = "2026-10-25T13:00:00.000000Z";
-        let mut edited = realm_rows();
+        let mut edited = server_rows();
         edited[5].row["body"] = json!("hello again");
         edited[5].row["updated_at"] = json!(later);
         let applied = apply_rows(&connection, ME, &edited).unwrap();
@@ -752,19 +752,21 @@ pub(crate) mod tests {
     #[test]
     fn a_local_post_is_queued_with_its_community_rows() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
 
         let post_id =
             write_post(&connection, ME, "  mine  ", &[COMMUNITY.to_string()], AT).unwrap();
 
         let outbox = outbox(&connection).unwrap();
         assert_eq!(outbox.len(), 2);
-        assert_eq!(outbox[0].table, "posts");
+        assert_eq!(outbox[0].table, "app_posts");
         assert_eq!(outbox[0].id, post_id);
-        assert_eq!(outbox[1].table, "posts_communities");
+        assert_eq!(outbox[1].table, "app_posts_communities");
         assert_eq!(pending_count(&connection).unwrap(), 2);
 
-        let row = row_json(&connection, "posts", &post_id).unwrap().unwrap();
+        let row = row_json(&connection, "app_posts", &post_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(row["body"], json!("mine"));
         assert_eq!(row["author_id"], json!(ME));
         assert_eq!(row["updated_at"], json!(AT));
@@ -790,22 +792,22 @@ pub(crate) mod tests {
     #[test]
     fn dequeue_keeps_an_entry_edited_after_the_push_started() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         let post_id = write_post(&connection, ME, "draft", &[], AT).unwrap();
 
         queue(
             &connection,
-            "posts",
+            "app_posts",
             &post_id,
             "2026-10-25T12:00:01.000000Z",
         )
         .unwrap();
-        dequeue(&connection, "posts", &post_id, AT).unwrap();
+        dequeue(&connection, "app_posts", &post_id, AT).unwrap();
         assert_eq!(pending_count(&connection).unwrap(), 1);
 
         dequeue(
             &connection,
-            "posts",
+            "app_posts",
             &post_id,
             "2026-10-25T12:00:01.000000Z",
         )
@@ -816,12 +818,12 @@ pub(crate) mod tests {
     #[test]
     fn prune_removes_posts_the_user_can_no_longer_see() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         let mine = write_post(&connection, ME, "mine", &[], AT).unwrap();
         assert_eq!(prune(&connection, ME).unwrap(), 0);
 
         // Leaving the community arrives as a deleted membership
-        let mut left = realm_rows()[3].clone();
+        let mut left = server_rows()[3].clone();
         left.row["deleted_at"] = json!(AT);
         left.row["deleted_by_id"] = json!(ME);
         apply_rows(&connection, ME, &[left]).unwrap();
@@ -831,7 +833,7 @@ pub(crate) mod tests {
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].id, mine);
         let rows: i64 = connection
-            .query_row("SELECT count(*) FROM posts_communities", [], |row| {
+            .query_row("SELECT count(*) FROM app_posts_communities", [], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -855,10 +857,10 @@ pub(crate) mod tests {
     #[test]
     fn a_pulled_row_never_overwrites_a_queued_local_edit() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         let mine = write_post(&connection, ME, "local edit", &[], AT).unwrap();
 
-        let mut from_server = realm_rows()[5].clone();
+        let mut from_server = server_rows()[5].clone();
         from_server.row["id"] = json!(mine);
         from_server.row["author_id"] = json!(ME);
         from_server.row["body"] = json!("server copy");
@@ -866,7 +868,7 @@ pub(crate) mod tests {
 
         assert_eq!(applied.rows, 0);
         assert_eq!(
-            row_json(&connection, "posts", &mine).unwrap().unwrap()["body"],
+            row_json(&connection, "app_posts", &mine).unwrap().unwrap()["body"],
             json!("local edit")
         );
     }
@@ -876,14 +878,14 @@ pub(crate) mod tests {
         let connection = open_in_memory().unwrap();
         assert!(pending_backfills(&connection).unwrap().is_empty());
 
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         assert_eq!(
             pending_backfills(&connection).unwrap(),
             vec![COMMUNITY.to_string()]
         );
 
         // The same membership again adds nothing
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         assert_eq!(pending_backfills(&connection).unwrap().len(), 1);
 
         remove_backfill(&connection, COMMUNITY).unwrap();
@@ -893,9 +895,9 @@ pub(crate) mod tests {
     #[test]
     fn a_removed_row_of_an_unknown_post_is_skipped_and_prune_follows_a_removal() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
 
-        let mut removed = realm_rows()[6].clone();
+        let mut removed = server_rows()[6].clone();
         removed.row["deleted_at"] = json!(AT);
         removed.row["deleted_by_id"] = json!(OTHER);
         apply_rows(&connection, ME, &[removed.clone()]).unwrap();
@@ -906,7 +908,7 @@ pub(crate) mod tests {
         let applied = apply_rows(&connection, ME, &[removed]).unwrap();
         assert_eq!(applied.rows, 0);
         let rows: i64 = connection
-            .query_row("SELECT count(*) FROM posts_communities", [], |row| {
+            .query_row("SELECT count(*) FROM app_posts_communities", [], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -916,7 +918,7 @@ pub(crate) mod tests {
     #[test]
     fn reset_drops_every_row_the_cursor_the_outbox_and_the_backfills() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         write_post(&connection, ME, "queued", &[], AT).unwrap();
         save_cursor(
             &connection,
@@ -939,10 +941,10 @@ pub(crate) mod tests {
     #[test]
     fn a_failed_push_is_counted_on_the_entry_and_a_long_body_is_refused() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         let mine = write_post(&connection, ME, "draft", &[], AT).unwrap();
 
-        record_failure(&connection, "posts", &mine, "invalid: body").unwrap();
+        record_failure(&connection, "app_posts", &mine, "invalid: body").unwrap();
         let (attempts, last_error): (i64, String) = connection
             .query_row(
                 "SELECT attempts, last_error FROM sync_outbox WHERE row_id = ?1",
@@ -951,7 +953,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!((attempts, last_error.as_str()), (1, "invalid: body"));
-        assert!(queued(&connection, "posts", &mine).unwrap());
+        assert!(queued(&connection, "app_posts", &mine).unwrap());
 
         let long = "x".repeat(MAX_BODY_CHARS + 1);
         assert!(write_post(&connection, ME, &long, &[], AT).is_err());
@@ -961,12 +963,12 @@ pub(crate) mod tests {
     #[test]
     fn edits_only_the_users_own_post_and_queues_it() {
         let connection = open_in_memory().unwrap();
-        apply_rows(&connection, ME, &realm_rows()).unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
         let mine = write_post(&connection, ME, "draft", &[], AT).unwrap();
         let later = "2026-10-25T13:00:00.000000Z";
 
         edit_post(&connection, ME, &mine, "final", later).unwrap();
-        let row = row_json(&connection, "posts", &mine).unwrap().unwrap();
+        let row = row_json(&connection, "app_posts", &mine).unwrap().unwrap();
         assert_eq!(row["body"], json!("final"));
         assert_eq!(row["updated_at"], json!(later));
         assert_eq!(pending_count(&connection).unwrap(), 1);

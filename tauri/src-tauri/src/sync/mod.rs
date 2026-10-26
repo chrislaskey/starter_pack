@@ -1,9 +1,9 @@
-//! Offline-first realms on the device, see `phoenix/docs/design/offline-sync.md`.
+//! Offline-first communities on the device, see
+//! `phoenix/docs/design/offline-sync.md`.
 //!
-//! The device keeps a small identity store, `identity.json` in the app's
-//! data directory: the user and the realms they are connected to, with
-//! their hosts, from the `identity.realms.list` request on the websocket
-//! API. Each realm has its own SQLite file under `realms/<slug>.db` with
+//! The device keeps the user it is logged in as in `profile.json` in the
+//! app's data directory, from the `auth.user.get` request on the
+//! websocket API, and the synced tables in one SQLite file, `app.db`, with
 //! the same tables as the server, see `schema`. The pages read only from
 //! that file, so they work with the network off.
 //!
@@ -11,14 +11,14 @@
 //! `sync_outbox`. A sync, see `worker`, pushes the outbox, pulls what
 //! changed on the server, backfills a community the user just joined, and
 //! prunes what the user can no longer see. One runs after every local
-//! write, when a realm is opened, on demand, and every half minute.
+//! write, when the page is opened, on demand, and every half minute.
 //!
 //! ```text
-//! mod.rs     the identity store, the commands and the timer
-//! schema.rs  opening a realm's file: the embedded client migrations
-//! store.rs   reads and local writes on a file, applying server rows
+//! mod.rs     the profile, the commands and the timer
+//! schema.rs  opening the file: the embedded client migrations
+//! store.rs   reads and local writes on the file, applying server rows
 //! http.rs    the three sync endpoints over HTTP with the API token
-//! worker.rs  one sync of one realm
+//! worker.rs  one sync
 //! ```
 
 pub mod http;
@@ -26,11 +26,10 @@ pub mod schema;
 pub mod store;
 pub mod worker;
 
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -43,50 +42,34 @@ use worker::SyncReport;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The connected user and their realm directory, as `identity.realms.list`
-/// returns them.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Identity {
-    pub user: Profile,
-    pub realms: Vec<RealmInfo>,
-}
-
+/// The user this device is logged in as, as `auth.user.get` returns them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
     pub email: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RealmInfo {
-    pub id: String,
-    pub slug: String,
-    pub kind: String,
-    pub host: String,
-}
-
-/// A realm as a page shows it, read from the realm's file only.
+/// The communities page, read from the device's file only.
 #[derive(Debug, Serialize)]
-pub struct RealmPage {
-    pub realm: RealmInfo,
+pub struct CommunitiesPage {
     pub communities: Vec<Community>,
     pub posts: Vec<FeedPost>,
     pub pending: i64,
     pub cursor: Option<Cursor>,
 }
 
-/// The identity store and the realm files on this device.
+/// The profile and the file on this device.
 pub struct Device {
     dir: PathBuf,
-    identity: Mutex<Option<Identity>>,
-    /// One lock per realm, so two syncs of a realm never overlap.
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    profile: Mutex<Option<Profile>>,
+    /// Held during a sync, so two syncs never overlap.
+    sync_lock: tokio::sync::Mutex<()>,
 }
 
 impl Device {
     pub fn open(data_dir: PathBuf) -> Self {
-        let path = data_dir.join("identity.json");
-        let identity = match fs::read_to_string(&path) {
+        let path = data_dir.join("profile.json");
+        let profile = match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents)
                 .map_err(|error| log::warn!("Ignoring {}: {error}", path.display()))
                 .ok(),
@@ -99,66 +82,42 @@ impl Device {
 
         Self {
             dir: data_dir,
-            identity: Mutex::new(identity),
-            locks: Mutex::new(HashMap::new()),
+            profile: Mutex::new(profile),
+            sync_lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    fn lock(&self, slug: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(slug.to_string())
-            .or_default()
-            .clone()
-    }
-
-    pub fn identity(&self) -> Option<Identity> {
-        self.identity
+    pub fn profile(&self) -> Option<Profile> {
+        self.profile
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    pub fn save_identity(&self, identity: &Identity) -> Result<(), String> {
+    pub fn save_profile(&self, profile: &Profile) -> Result<(), String> {
         fs::create_dir_all(&self.dir).map_err(|error| error.to_string())?;
-        let contents = serde_json::to_string_pretty(identity).map_err(|error| error.to_string())?;
-        fs::write(self.dir.join("identity.json"), contents).map_err(|error| error.to_string())?;
-        *self.identity.lock().unwrap_or_else(PoisonError::into_inner) = Some(identity.clone());
+        let contents = serde_json::to_string_pretty(profile).map_err(|error| error.to_string())?;
+        fs::write(self.dir.join("profile.json"), contents).map_err(|error| error.to_string())?;
+        *self.profile.lock().unwrap_or_else(PoisonError::into_inner) = Some(profile.clone());
         Ok(())
     }
 
-    pub fn realm(&self, slug: &str) -> Result<RealmInfo, String> {
-        self.identity()
-            .and_then(|identity| identity.realms.into_iter().find(|realm| realm.slug == slug))
-            .ok_or_else(|| format!("This device knows no realm {slug}"))
+    /// The synced tables' file.
+    pub fn db_path(&self) -> PathBuf {
+        self.dir.join("app.db")
     }
 
-    /// The realm's file. The slug is the server's, so it is checked
-    /// before it becomes part of a path.
-    pub fn realm_path(&self, slug: &str) -> Result<PathBuf, String> {
-        let plain = |character: char| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        };
-        if slug.is_empty() || !slug.chars().all(plain) {
-            return Err(format!("{slug:?} is not a realm slug"));
-        }
-        Ok(self.dir.join("realms").join(format!("{slug}.db")))
-    }
-
-    /// Forgets the identity and every realm file, on log out.
+    /// Forgets the profile and the file, on log out.
     pub fn forget_all(&self) -> Result<(), String> {
-        *self.identity.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        match fs::remove_file(self.dir.join("identity.json")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+        *self.profile.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        for path in [self.dir.join("profile.json"), self.db_path()] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
         }
-        match fs::remove_dir_all(self.dir.join("realms")) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }
+        Ok(())
     }
 }
 
@@ -170,152 +129,131 @@ pub fn now_iso8601() -> String {
         .to_string()
 }
 
-/// The user's realm directory, refreshed from the server when connected,
-/// else as last saved on this device.
+/// The user this device is logged in as, refreshed from the server when
+/// connected, else as last saved on this device.
 #[tauri::command]
-pub async fn list_realms(state: State<'_, AppState>) -> Result<Identity, String> {
-    match crate::request(&state.control, "identity.realms.list".into(), json!({})).await {
+pub async fn get_profile(state: State<'_, AppState>) -> Result<Profile, String> {
+    match crate::request(&state.control, "auth.user.get".into(), json!({})).await {
         Ok(reply) => {
-            let identity: Identity =
+            let profile: Profile =
                 serde_json::from_value(reply).map_err(|error| error.to_string())?;
-            state.device.save_identity(&identity)?;
-            Ok(identity)
+            state.device.save_profile(&profile)?;
+            Ok(profile)
         }
         Err(error) => state
             .device
-            .identity()
-            .ok_or_else(|| format!("Not connected, and this device knows no realms yet: {error}")),
+            .profile()
+            .ok_or_else(|| format!("Not connected, and this device knows no user yet: {error}")),
     }
 }
 
-/// A realm's communities and feed, from its file on this device.
+/// The user's communities and feed, from the file on this device.
 #[tauri::command]
-pub fn get_realm_page(state: State<'_, AppState>, slug: String) -> Result<RealmPage, String> {
-    page(&state.device, &slug)
+pub fn get_communities_page(state: State<'_, AppState>) -> Result<CommunitiesPage, String> {
+    page(&state.device)
 }
 
-/// Writes a post into the realm's file, in the communities given, and
-/// starts a sync in the background. Returns the page as it is now.
+/// Writes a post into the file, in the communities given, and starts a
+/// sync in the background. Returns the page as it is now.
 #[tauri::command]
 pub async fn write_post(
     app: AppHandle,
     state: State<'_, AppState>,
-    slug: String,
     body: String,
     community_ids: Vec<String>,
-) -> Result<RealmPage, String> {
+) -> Result<CommunitiesPage, String> {
     let device = &state.device;
-    let identity = device.identity().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.realm_path(&slug)?)?;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
     store::write_post(
         &connection,
-        &identity.user.id,
+        &profile.id,
         &body,
         &community_ids,
         &now_iso8601(),
     )?;
     drop(connection);
 
-    spawn_sync(app, slug.clone());
-    page(device, &slug)
+    spawn_sync(app);
+    page(device)
 }
 
-/// Edits the user's own post in the realm's file and starts a sync.
+/// Edits the user's own post in the file and starts a sync.
 #[tauri::command]
 pub async fn edit_post(
     app: AppHandle,
     state: State<'_, AppState>,
-    slug: String,
     post_id: String,
     body: String,
-) -> Result<RealmPage, String> {
+) -> Result<CommunitiesPage, String> {
     let device = &state.device;
-    let identity = device.identity().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.realm_path(&slug)?)?;
-    store::edit_post(
-        &connection,
-        &identity.user.id,
-        &post_id,
-        &body,
-        &now_iso8601(),
-    )?;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
+    store::edit_post(&connection, &profile.id, &post_id, &body, &now_iso8601())?;
     drop(connection);
 
-    spawn_sync(app, slug.clone());
-    page(device, &slug)
+    spawn_sync(app);
+    page(device)
 }
 
-/// Syncs the realm now and returns what happened.
+/// Syncs now and returns what happened.
 #[tauri::command]
-pub async fn sync_realm(app: AppHandle, slug: String) -> Result<SyncReport, String> {
-    run_sync(&app, &slug).await
+pub async fn sync_now(app: AppHandle) -> Result<SyncReport, String> {
+    run_sync(&app).await
 }
 
-fn page(device: &Device, slug: &str) -> Result<RealmPage, String> {
-    let identity = device.identity().ok_or("Not logged in on this device")?;
-    let realm = device.realm(slug)?;
-    let connection = schema::open(&device.realm_path(slug)?)?;
+fn page(device: &Device) -> Result<CommunitiesPage, String> {
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
 
-    Ok(RealmPage {
-        realm,
-        communities: store::member_communities(&connection, &identity.user.id)?,
-        posts: store::feed(&connection, &identity.user.id)?,
+    Ok(CommunitiesPage {
+        communities: store::member_communities(&connection, &profile.id)?,
+        posts: store::feed(&connection, &profile.id)?,
         pending: store::pending_count(&connection)?,
         cursor: store::cursor(&connection)?,
     })
 }
 
-/// One sync of one realm, reported to the main window as a `realm-synced`
-/// event with the report or the error.
-pub async fn run_sync(app: &AppHandle, slug: &str) -> Result<SyncReport, String> {
+/// One sync, reported to the main window as a `synced` event with the
+/// report or the error.
+pub async fn run_sync(app: &AppHandle) -> Result<SyncReport, String> {
     let state = app.state::<AppState>();
     let device = &state.device;
-    let identity = device.identity().ok_or("Not logged in on this device")?;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
     let token = state.tokens.get().ok_or("Not logged in")?;
-    let realm = device.realm(slug)?;
-    let server = http::SyncServer::new(&state.config, &realm.host, &token)?;
-    let lock = device.lock(slug);
-    let _one_sync_at_a_time = lock.lock().await;
-    let mut connection = schema::open(&device.realm_path(slug)?)?;
+    let server = http::SyncServer::new(&state.config, &token)?;
+    let _one_sync_at_a_time = device.sync_lock.lock().await;
+    let mut connection = schema::open(&device.db_path())?;
 
-    let result = worker::sync_realm(&server, &mut connection, &identity.user.id).await;
+    let result = worker::sync(&server, &mut connection, &profile.id).await;
 
     if let Err(error) = &result {
-        log::warn!("Sync of {slug} failed: {error}");
+        log::warn!("Sync failed: {error}");
     }
-    let event =
-        json!({"slug": slug, "report": result.as_ref().ok(), "error": result.as_ref().err()});
-    if let Err(error) = app.emit_to(MAIN_WINDOW, "realm-synced", event) {
+    let event = json!({"report": result.as_ref().ok(), "error": result.as_ref().err()});
+    if let Err(error) = app.emit_to(MAIN_WINDOW, "synced", event) {
         log::warn!("Could not emit the sync report: {error}");
     }
     result
 }
 
-fn spawn_sync(app: AppHandle, slug: String) {
+fn spawn_sync(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let _ = run_sync(&app, &slug).await;
+        let _ = run_sync(&app).await;
     });
 }
 
-/// Syncs every known realm every half minute while logged in.
+/// Syncs every half minute while logged in, once the device knows its user.
 pub async fn run_timer(app: AppHandle) {
     loop {
         tokio::time::sleep(SYNC_INTERVAL).await;
 
-        let realms = {
+        let ready = {
             let state = app.state::<AppState>();
-            if state.tokens.get().is_none() {
-                continue;
-            }
-            state
-                .device
-                .identity()
-                .map(|identity| identity.realms)
-                .unwrap_or_default()
+            state.tokens.get().is_some() && state.device.profile().is_some()
         };
-
-        for realm in realms {
-            let _ = run_sync(&app, &realm.slug).await;
+        if ready {
+            let _ = run_sync(&app).await;
         }
     }
 }

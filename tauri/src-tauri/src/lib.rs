@@ -15,9 +15,9 @@
 //! background task (see `phoenix`) holds a websocket connection to the API
 //! with it for as long as the app runs.
 //!
-//! The main window also has the realms page, where the user's realms work
-//! offline-first from one SQLite file per realm and sync with the server,
-//! see `sync`; a tmux example page, see `tmux_example`; and ⌃⌘T opens the
+//! The main window also has the communities page, where the user's
+//! communities work offline-first from one SQLite file and sync with the
+//! server, see `sync`; a tmux example page, see `tmux_example`; and ⌃⌘T opens the
 //! quick search popup anywhere on the Mac, see `quick_search`.
 
 mod claude_code;
@@ -124,11 +124,11 @@ pub fn run() {
             close_quick_search,
             list_quick_search_items,
             paste_quick_search_item,
-            sync::list_realms,
-            sync::get_realm_page,
+            sync::get_profile,
+            sync::get_communities_page,
             sync::write_post,
             sync::edit_post,
-            sync::sync_realm
+            sync::sync_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -164,8 +164,8 @@ fn set_api_token(app: AppHandle, state: State<'_, AppState>, token: String) -> R
 }
 
 /// Deletes the API token on the server when connected, then forgets it
-/// locally either way, which disconnects, along with the realm files and
-/// the identity on this device.
+/// locally either way, which disconnects, along with the synced file and
+/// the profile on this device.
 #[tauri::command]
 async fn log_out(state: State<'_, AppState>) -> Result<(), String> {
     if state.tokens.get().is_some() {

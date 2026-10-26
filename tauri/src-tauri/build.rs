@@ -25,11 +25,11 @@ fn main() {
         "close_quick_search",
         "list_quick_search_items",
         "paste_quick_search_item",
-        "list_realms",
-        "get_realm_page",
+        "get_profile",
+        "get_communities_page",
         "write_post",
         "edit_post",
-        "sync_realm",
+        "sync_now",
     ]);
 
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
@@ -39,7 +39,7 @@ fn main() {
 /// Writes `client_migrations.rs` into `OUT_DIR`: the SQLite migrations the
 /// Phoenix server exports for clients (`phoenix/priv/client_migrations`,
 /// see its README), each as `(version, name, sql)`, oldest first, so the
-/// app applies them to a realm's file with `include_str!`.
+/// app applies them to the device's file with `include_str!`.
 fn embed_client_migrations() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
     let dir = Path::new(&manifest_dir).join("../../phoenix/priv/client_migrations");

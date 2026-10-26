@@ -1,6 +1,6 @@
-<!-- The realms page: the user's realms, and for the chosen one its communities
-     and feed, read from the realm's file on this device. Writing a post
-     works with the network off; a sync pushes it when the server is back. -->
+<!-- The communities page: the user's communities and feed, read from the
+     file on this device. Writing a post works with the network off; a sync
+     pushes it when the server is back. -->
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
@@ -9,8 +9,7 @@
   import Header from "$phoenix/components/Header.svelte";
   import ThemeToggle from "$phoenix/components/ThemeToggle.svelte";
 
-  let identity = $state();
-  let slug = $state("");
+  let profile = $state();
   let page = $state();
   let body = $state("");
   let communityIds = $state([]);
@@ -22,37 +21,32 @@
     return `Synced: ${report.pushed} pushed, ${report.rejected} rejected, ${report.pulled} pulled, ${report.backfilled} backfilled, ${report.pruned} pruned, ${report.pending} pending`;
   }
 
-  async function loadRealms() {
+  async function load() {
     try {
-      identity = await invoke("list_realms");
+      profile = await invoke("get_profile");
       error = "";
-      if (!slug && identity.realms[0]) await select(identity.realms[0].slug);
     } catch (problem) {
       error = String(problem);
+      return;
     }
-  }
-
-  async function select(next) {
-    slug = next;
-    communityIds = [];
     await refresh();
     sync();
   }
 
   async function refresh() {
-    if (!slug) return;
+    if (!profile) return;
     try {
-      page = await invoke("get_realm_page", { slug });
+      page = await invoke("get_communities_page");
     } catch (problem) {
       error = String(problem);
     }
   }
 
   async function sync() {
-    if (!slug) return;
+    if (!profile) return;
     syncing = true;
     try {
-      lastSync = describe(await invoke("sync_realm", { slug }));
+      lastSync = describe(await invoke("sync_now"));
     } catch (problem) {
       lastSync = `Sync failed, working offline: ${problem}`;
     } finally {
@@ -64,7 +58,7 @@
   async function post(event) {
     event.preventDefault();
     try {
-      page = await invoke("write_post", { slug, body, communityIds });
+      page = await invoke("write_post", { body, communityIds });
       body = "";
       error = "";
     } catch (problem) {
@@ -87,7 +81,7 @@
   async function saveEdit(event) {
     event.preventDefault();
     try {
-      page = await invoke("edit_post", { slug, postId: editingId, body: editingBody });
+      page = await invoke("edit_post", { postId: editingId, body: editingBody });
       editingId = "";
       error = "";
     } catch (problem) {
@@ -96,12 +90,11 @@
   }
 
   onMount(() => {
-    const unlisten = listen("realm-synced", (event) => {
-      if (event.payload.slug !== slug) return;
+    const unlisten = listen("synced", (event) => {
       lastSync = event.payload.error ? `Sync failed, working offline: ${event.payload.error}` : describe(event.payload.report);
       refresh();
     });
-    loadRealms();
+    load();
     return () => {
       unlisten.then((stop) => stop());
     };
@@ -110,9 +103,9 @@
 
 <main class="page">
   <Header>
-    Realms
+    Communities
     {#snippet subtitle()}
-      {identity ? `Logged in as ${identity.user.email}` : "Loading the realm directory…"}
+      {profile ? `Logged in as ${profile.email}` : "Loading…"}
     {/snippet}
     {#snippet actions()}
       <ThemeToggle />
@@ -123,19 +116,6 @@
     <p class="error">{error}</p>
   {/if}
 
-  {#if identity}
-    <section class="actions" id="realm-picker">
-      {#each identity.realms as realm (realm.id)}
-        <Button variant={realm.slug === slug ? "primary" : undefined} onclick={() => select(realm.slug)}>
-          {realm.slug}
-        </Button>
-      {/each}
-      {#if identity.realms.length === 0}
-        <p class="muted">You are not connected to any realm yet.</p>
-      {/if}
-    </section>
-  {/if}
-
   {#if page}
     <section class="actions">
       <Button onclick={sync} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</Button>
@@ -143,7 +123,7 @@
     </section>
 
     <section>
-      <h2>Your communities in {page.realm.slug}</h2>
+      <h2>Your communities</h2>
       {#if page.communities.length === 0}
         <p class="muted">Join a community in the web UI; it appears here on the next sync.</p>
       {/if}

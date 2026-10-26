@@ -1,4 +1,4 @@
-//! A realm's SQLite file on the device: the server's client migrations,
+//! The device's SQLite file: the server's client migrations,
 //! embedded at build time from `phoenix/priv/client_migrations` by
 //! `build.rs`, plus the two client-only tables its README describes.
 
@@ -43,7 +43,7 @@ pub fn open(path: &Path) -> Result<Connection, String> {
     prepare(connection)
 }
 
-/// An in-memory realm file, for tests.
+/// An in-memory file, for tests.
 #[cfg(test)]
 pub fn open_in_memory() -> Result<Connection, String> {
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
@@ -106,11 +106,11 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         for table in [
-            "users",
-            "communities",
-            "users_communities",
-            "posts",
-            "posts_communities",
+            "app_users",
+            "app_communities",
+            "app_users_communities",
+            "app_posts",
+            "app_posts_communities",
             "sync_state",
             "sync_outbox",
         ] {
@@ -119,7 +119,6 @@ mod tests {
                 "{table} is missing from {tables:?}"
             );
         }
-        assert!(!tables.contains(&"realm".to_string()));
 
         // Opening again changes nothing
         prepare(connection).unwrap();

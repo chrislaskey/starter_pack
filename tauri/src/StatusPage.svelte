@@ -139,7 +139,7 @@
 
   <section>
     <h2>Examples</h2>
-    <p><a href="realms.html">Your realms, offline-first →</a></p>
+    <p><a href="communities.html">Your communities, offline-first →</a></p>
     <p><a href="tmux-example.html">tmux sessions in your terminal app →</a></p>
   </section>
 
