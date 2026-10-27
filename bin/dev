@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# Starts the Phoenix server and the desktop app in dev mode, on ports taken
+# from PORT so several worktrees can run at the same time.
+#
+# Run `bin/dev --help` for the commands.
+
+set -eo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+help() {
+  cat <<USAGE
+Starts the Phoenix server and the desktop app in dev mode, on ports taken
+from PORT so several worktrees can run at the same time.
+
+Usage: $0 [COMMAND] [TAURI ARGS...]
+
+Commands:
+  all       Phoenix in the background, then the Tauri window; closing the
+            window stops Phoenix too. The default.
+  phoenix   The Phoenix server only (\`mix phx.server\`).
+  tauri     The desktop app only, connecting to the Phoenix on PORT.
+  ports     Print the ports the commands would use, without starting anything.
+  help      Show this help. Also -h and --help.
+
+Ports:
+  PORT unset   Phoenix on 4000 and Vite on 1420, as the READMEs say.
+  PORT set     Phoenix on PORT and Vite, which the Tauri window loads in dev,
+               on PORT + 1000, so consecutive ports never meet. Code Reviewer
+               sets a distinct PORT in each session's tmux environment, so
+               each worktree's apps run on ports of their own. The SQLite
+               database is a file in the worktree, so it is already one per
+               worktree.
+
+Phoenix reads PORT itself (phoenix/config/runtime.exs; it wins over a PORT in
+phoenix/.env). The app is pointed at Phoenix through PHOENIX_URL, and Tauri at
+Vite through its dev URL. API_SOCKET defaults to true, which the app needs to
+connect; set it to false to run the server without the API.
+
+Extra arguments go to \`cargo tauri dev\`.
+
+Examples:
+  bin/dev                   # both, on 4000 and 1420
+  PORT=4003 bin/dev         # both, on 4003 and 5003, as in a Code Reviewer session
+  bin/dev phoenix           # the server alone, say in a second tmux window
+USAGE
+}
+
+fail() {
+  echo "$0: $*" >&2
+  exit 1
+}
+
+case "${PORT:-}" in
+  '')
+    phoenix_port=4000
+    vite_port=1420
+    ;;
+  *[!0-9]*)
+    fail "PORT must be a number, got '$PORT'"
+    ;;
+  *)
+    phoenix_port="$PORT"
+    vite_port=$((PORT + 1000))
+    ;;
+esac
+if [ "$phoenix_port" -lt 1024 ] || [ "$vite_port" -gt 65535 ]; then
+  fail "PORT must be between 1024 and 64535, got '$phoenix_port'"
+fi
+
+print_ports() {
+  echo "Phoenix  http://localhost:$phoenix_port"
+  echo "Vite     http://localhost:$vite_port"
+}
+
+start_phoenix() {
+  cd "$ROOT/phoenix"
+  echo "bin/dev: Phoenix on http://localhost:$phoenix_port"
+  PORT="$phoenix_port" API_SOCKET="${API_SOCKET:-true}" exec mix phx.server
+}
+
+start_tauri() {
+  cd "$ROOT/tauri"
+  if [ ! -d node_modules ]; then
+    pnpm install
+  fi
+  echo "bin/dev: Vite on http://localhost:$vite_port, the app connecting to http://localhost:$phoenix_port"
+  local config
+  config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"pnpm dev --port $vite_port\"}}"
+  PHOENIX_URL="http://localhost:$phoenix_port" exec cargo tauri dev --config "$config" ${1+"$@"}
+}
+
+start_all() {
+  (start_phoenix) &
+  local phoenix_pid=$!
+  # Stops Phoenix when the Tauri window closes, or this script is interrupted.
+  trap 'kill "$phoenix_pid" 2>/dev/null || true' EXIT
+  (start_tauri ${1+"$@"})
+}
+
+command="${1:-all}"
+if [ $# -gt 0 ]; then
+  shift
+fi
+
+case "$command" in
+  all) start_all ${1+"$@"} ;;
+  phoenix) start_phoenix ;;
+  tauri) start_tauri ${1+"$@"} ;;
+  ports) print_ports ;;
+  help|-h|--help) help ;;
+  *)
+    echo "Usage: $0 [all|phoenix|tauri|ports|help] [TAURI ARGS...]" >&2
+    echo "Run \`$0 --help\` for what each command does." >&2
+    exit 1
+    ;;
+esac

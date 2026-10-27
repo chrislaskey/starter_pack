@@ -60,6 +60,9 @@ cd phoenix && mix phx.server
 cd tauri && pnpm install && cargo tauri dev
 ```
 
+Or `bin/dev` at the root, which starts both with the ports and `PHOENIX_URL`
+derived from `PORT` (see `bin/dev --help`), as a Code Reviewer session needs.
+
 The app connects to `http://localhost:4000` by default. Set `PHOENIX_URL` to
 match the server's port or to use another server, and add its URL to `src-tauri/capabilities/phoenix.json`
 so its `/client/new` page may hand the app a token.
