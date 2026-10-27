@@ -108,7 +108,8 @@ Two differences from Elixir to keep in mind:
 ## Styling
 
 The files keep the template's Tailwind, daisyUI and `hero-*` classes. The
-daisyUI plugin, the light and dark themes and the `dark` variant are in
+daisyUI plugin, the light and dark themes, the `dark` variant and the
+font (Plus Jakarta Sans, vendored in `priv/static/fonts`) are in
 `assets/css/theme.css`, which `assets/css/app.css` imports and the other
 apps import too, so a component looks the same everywhere. Put anything
 only LiveView needs in `app.css`.

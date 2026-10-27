@@ -160,7 +160,7 @@ defmodule App.Web.UserSessionControllerTest do
       assert redirected_to(conn) == ~p"/users/log-in"
     end
 
-    test "requires a logged in user", %{conn: conn} do
+    test "requires a logged in user" do
       conn = post(build_conn(), ~p"/users/delete")
       assert redirected_to(conn) == ~p"/users/log-in"
     end

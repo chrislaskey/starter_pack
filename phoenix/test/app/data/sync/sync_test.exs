@@ -20,10 +20,6 @@ defmodule App.Data.SyncTest do
     %{author: author, other: other, community: community}
   end
 
-  defp post_row(scope, body, community_id) do
-    %{"body" => body, "author_id" => scope.user.id, "community_id" => community_id}
-  end
-
   # A post written on a device, in the community: the post row and its
   # posts_communities row, queued together.
   defp write_post(client, body, community_id, opts \\ []) do

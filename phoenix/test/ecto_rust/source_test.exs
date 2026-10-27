@@ -3,6 +3,10 @@ defmodule EctoRust.SourceTest.Marked do
   use Ecto.Schema
   import Ecto.Changeset
 
+  # Source reads the mark from this file, and nothing reads the attribute.
+  # Persisting it keeps Elixir from warning that it is unused.
+  Module.register_attribute(__MODULE__, :universal_changeset, persist: true)
+
   embedded_schema do
     field :name, :string
   end
@@ -12,6 +16,7 @@ defmodule EctoRust.SourceTest.Marked do
     record
     |> cast(params, [:name])
     |> maybe(params)
+    |> maybe()
   end
 
   defp maybe(changeset, _params), do: changeset
@@ -33,7 +38,7 @@ defmodule EctoRust.SourceTest do
     assert source.function == :changeset
     assert source.arity == 3
     assert source.file == "test/ecto_rust/source_test.exs"
-    assert source.line == 11
+    assert source.line == 15
     assert [{:def, _, _}] = source.clauses
 
     assert Map.keys(source.defs) |> Enum.sort() == [

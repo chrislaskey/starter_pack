@@ -21,7 +21,7 @@ defmodule App.Web.CommunityLiveTest do
     assert has_element?(view, "#community-page h1", community.name)
   end
 
-  test "refuses a non-member", %{conn: conn, scope: scope} do
+  test "refuses a non-member", %{conn: conn} do
     community = community_fixture()
 
     assert {:error, {:redirect, %{to: "/communities", flash: flash}}} =

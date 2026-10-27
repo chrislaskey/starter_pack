@@ -79,7 +79,9 @@ files here: change the component in Phoenix and run `mix app.svelte` there.
 They're styled like on the web: `src/app.css` runs Tailwind v4 with
 Phoenix's daisyUI theme (`../phoenix/assets/css/theme.css`) over those
 files only, and makes the `hero-*` icon classes from the `heroicons` npm
-package (`vendor/heroicons.js`). `vite.config.js` points the theme's
+package (`vendor/heroicons.js`). The theme also sets the font, Plus Jakarta
+Sans, vendored in `../phoenix/priv/static/fonts` and served from `/fonts`
+through the `src/public/fonts` symlink, so it works offline. `vite.config.js` points the theme's
 daisyUI imports, which name Phoenix's mix deps, at the `daisyui` npm
 package, so building needs no Elixir. Keep `tailwindcss` and `daisyui` at
 the versions in Phoenix's `config/config.exs` and `mix.exs`. The app's own

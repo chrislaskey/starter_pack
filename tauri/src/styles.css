@@ -8,7 +8,6 @@
   --disconnected: #9a9a9a;
   --pending: #e0a800;
   --joined: #2da44e;
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
   color: var(--fg);
   background-color: var(--bg);
