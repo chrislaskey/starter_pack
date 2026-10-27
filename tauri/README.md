@@ -91,6 +91,11 @@ also define, like `card`, `status`, `label`, `stack`, `container` or
 `grow`: once a Phoenix component uses one, its styles apply to the app's
 elements too.
 
+Each page loads its stylesheet with a `<link>` in its HTML `<head>`, not an
+`import` in its JS entry. In dev, Vite only injects imported CSS once the
+module runs, so the page first paints unstyled and flashes white on every
+navigation.
+
 The status page header has Phoenix's theme toggle. Like on the web, its
 buttons dispatch a `phx:set-theme` event, and Phoenix's theme script,
 `phoenix/assets/js/theme_script.js`, sets `data-theme` on `<html>` and keeps
