@@ -45,7 +45,6 @@ export default defineConfig({
     alias: [
       { find: "$phoenix", replacement: PHOENIX_WEB },
       { find: /^daisyui\/packages\/bundle\/daisyui$/, replacement: resolve(DAISYUI, "index.js") },
-      { find: /^daisyui\/packages\/bundle\/daisyui-theme$/, replacement: resolve(DAISYUI, "theme/index.js") },
     ],
     // Phoenix's files have no node_modules above them, so resolve Svelte here.
     dedupe: ["svelte"],
