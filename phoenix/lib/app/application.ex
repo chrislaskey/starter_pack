@@ -14,6 +14,7 @@ defmodule App.Application do
       {Ecto.Migrator, repos: Application.fetch_env!(:app, :ecto_repos), skip: skip_migrations?()},
       {DNSCluster, query: Application.get_env(:app, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: App.PubSub},
+      App.Web.Presence,
       # Start a worker by calling: App.Worker.start_link(arg)
       # {App.Worker, arg},
       # Start to serve requests, typically the last entry

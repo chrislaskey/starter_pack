@@ -87,6 +87,8 @@ defmodule App.Router do
       live "/users/register", UserLive.Registration, :new
       live "/users/log-in", UserLive.Login, :new
       live "/users/log-in/:token", UserLive.Confirmation, :new
+      live "/explorations", ExplorationsLive
+      live "/explorations/:slug", ExplorationsLive
     end
 
     post "/users/log-in", UserSessionController, :create

@@ -1,0 +1,9 @@
+{
+  "name": "app",
+  "private": true,
+  "dependencies": {
+    "d3": "^7.9.0",
+    "simplex-noise": "^4.0.3",
+    "three": "^0.186.1"
+  }
+}
