@@ -11,7 +11,7 @@ with it, built 2026-10-25 as phase 6 of
 ## Code
 
 ```
-src/communities.html, src/communities/ the communities page
+src/communities/                       the communities page, at /communities (src/lib/router.js)
 src-tauri/src/sync/
   mod.rs      the profile, the commands and the half-minute timer
   schema.rs   opening the file: the embedded client migrations

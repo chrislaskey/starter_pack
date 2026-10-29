@@ -1,4 +1,4 @@
-//! The tmux example page (`src/tmux-example.html`): guesses which shell,
+//! The tmux example page (`/tmux-example`, `src/tmux-example/`): guesses which shell,
 //! terminal app and tmux the user has, shows their tmux sessions with what
 //! runs in each pane and their Claude Code sessions, creates sessions running
 //! a command and shows them in the terminal app.

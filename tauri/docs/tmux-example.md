@@ -1,6 +1,6 @@
 # tmux example
 
-`src/tmux-example.html` lists the user's tmux sessions with what runs in
+The `/tmux-example` page (`src/tmux-example/`) lists the user's tmux sessions with what runs in
 each pane, creates sessions running a command, and opens them in the
 user's terminal app. The "tmux example" section of `README.md` describes
 what it does and how; the code is `src-tauri/src/tmux_example.rs` with the
@@ -21,8 +21,8 @@ app builds and runs as before:
 4. The four `allow-*-tmux-*` lines in `src-tauri/capabilities/default.json`.
 5. `NSAppleEventsUsageDescription` in `src-tauri/Info.plist`, which only
    the terminal app control needs.
-6. `src/tmux-example.html` and `src/tmux-example/`, and the `tmux_example`
-   entry in `vite.config.js`.
+6. `src/tmux-example/`, its route in `src/lib/router.js` and its path in
+   `src/lib/routes.js`, and its styles' import in `src/app.css`.
 7. The "Examples" section with the link in `src/StatusPage.svelte`.
 8. This file and the "tmux example" section of `README.md`.
 

@@ -1,7 +1,8 @@
 /* Tailwind and daisyUI with Phoenix's theme, for the Svelte components
-   Phoenix generates ($phoenix/...), so they look like they do on the web.
-   The app's own styles go in the base layer, so the components' utility
-   classes win over them. */
+   Phoenix generates ($phoenix/...), so they look like they do on the web,
+   then the main window's pages' styles: the pages share one document, so
+   one stylesheet. The app's own styles go in the base layer, so the
+   components' utility classes win over them. */
 
 @import "tailwindcss" source(none);
 @import "../../phoenix/assets/css/theme.css";
@@ -12,3 +13,4 @@
 @plugin "../vendor/heroicons.js";
 
 @import "./styles.css" layer(base);
+@import "./tmux-example/styles.css" layer(base);

@@ -13,10 +13,10 @@ const PHOENIX_WEB = resolve(import.meta.dirname, "../phoenix/lib/app/web");
 // in the daisyUI repository. The same files are in the npm package.
 const DAISYUI = dirname(fileURLToPath(import.meta.resolve("daisyui")));
 
-// Phoenix's theme script, the one its root layout inlines. Each page's
+// Phoenix's theme script, the one its root layout inlines. Each HTML entry's
 // `<!-- phoenix-theme-script -->` marker becomes an inline classic script with
 // the file's contents, so it runs before the first paint, in dev and in
-// builds. A page without the marker is left alone.
+// builds. An entry without the marker is left alone.
 const THEME_SCRIPT = resolve(import.meta.dirname, "../phoenix/assets/js/theme_script.js");
 const THEME_SCRIPT_MARKER = "<!-- phoenix-theme-script -->";
 
@@ -35,9 +35,13 @@ function phoenixThemeScript() {
   };
 }
 
-// One HTML entry per page of the main window. `cargo tauri dev` loads the
-// dev server (see `build.devUrl` in src-tauri/tauri.conf.json), and
-// `cargo tauri build` bundles `dist/`.
+// One HTML entry per window: src/index.html for the main window, whose
+// router (src/lib/router.js) shows the page at the address, and
+// src/quick-search.html for the popup. The dev server answers any other
+// path with index.html, and so does the bundled app (Tauri's asset protocol
+// falls back to it). `cargo tauri dev` loads the dev server (see
+// `build.devUrl` in src-tauri/tauri.conf.json), and `cargo tauri build`
+// bundles `dist/`.
 export default defineConfig({
   root: "src",
   plugins: [phoenixThemeScript(), tailwindcss(), svelte()],
@@ -62,8 +66,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(import.meta.dirname, "src/index.html"),
-        tmux_example: resolve(import.meta.dirname, "src/tmux-example.html"),
-        communities: resolve(import.meta.dirname, "src/communities.html"),
         quick_search: resolve(import.meta.dirname, "src/quick-search.html"),
       },
     },

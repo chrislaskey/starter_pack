@@ -10,6 +10,7 @@
   import { setAppEmitContext } from "../lib/app-emit.js";
   import { log } from "../lib/log.svelte.js";
   import LogList from "../lib/LogList.svelte";
+  import { homeUrl } from "../lib/routes.js";
   import ClaudeCodeSession from "./ClaudeCodeSession.svelte";
   import TmuxSession from "./TmuxSession.svelte";
 
@@ -116,7 +117,7 @@
 <svelte:window onfocus={refreshStatus} />
 
 <main class="page wide">
-  <p><a href="index.html">← Back</a></p>
+  <p><a href={homeUrl()}>← Back</a></p>
   <Header>
     tmux example
     {#snippet subtitle()}

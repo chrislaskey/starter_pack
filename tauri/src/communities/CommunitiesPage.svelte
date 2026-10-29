@@ -8,6 +8,7 @@
   import Button from "$phoenix/components/Button.svelte";
   import Header from "$phoenix/components/Header.svelte";
   import ThemeToggle from "$phoenix/components/ThemeToggle.svelte";
+  import { homeUrl } from "../lib/routes.js";
 
   let profile = $state();
   let page = $state();
@@ -172,7 +173,7 @@
   {/if}
 
   <section>
-    <p><a href="index.html">← Status</a></p>
+    <p><a href={homeUrl()}>← Status</a></p>
   </section>
 </main>
 

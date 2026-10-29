@@ -4,9 +4,10 @@ A [Tauri](https://tauri.app) shell around the Phoenix server in `../phoenix`.
 
 The app has two windows:
 
-* **main**, a local page (`src/`) with a connection indicator for the
-  websocket API, and buttons to log in, open the web UI, send a test request
-  and log out. It links to the [tmux example](#tmux-example).
+* **main**, a local Svelte app (`src/`): the status page with a connection
+  indicator for the websocket API, and buttons to log in, open the web UI,
+  send a test request and log out, linking to the [communities](docs/offline-sync.md)
+  and [tmux example](#tmux-example) pages.
 * **phoenix**, the Phoenix web UI loaded from the server
 
 ## How it connects
@@ -94,10 +95,38 @@ also define, like `card`, `status`, `label`, `stack`, `container` or
 `grow`: once a Phoenix component uses one, its styles apply to the app's
 elements too.
 
-Each page loads its stylesheet with a `<link>` in its HTML `<head>`, not an
-`import` in its JS entry. In dev, Vite only injects imported CSS once the
-module runs, so the page first paints unstyled and flashes white on every
-navigation.
+## Pages and routing
+
+The main window is one document, `src/index.html`, and a client-side router
+(`src/lib/router.js`, [sv-router](https://sv-router.dev)) shows the page at
+the path, swapped in place without a page load, so switching pages never
+flashes white:
+
+| Path | Shows |
+| --- | --- |
+| `/` | `StatusPage.svelte` |
+| `/communities` | `communities/CommunitiesPage.svelte` |
+| `/tmux-example` | `tmux-example/TmuxExamplePage.svelte` |
+
+The paths are real paths, not hashes, and mirror the Phoenix app's where a
+page has a counterpart, so a web app and the desktop app can share routes.
+`src/lib/routes.js` is the one module that spells out every path (and would
+hold a page's query parameters); pages link to each other with plain
+`<a href>` links through it, which the router intercepts, and code that
+navigates calls `navigateToUrl` in `router.js`. Every path is reloadable:
+the dev server and the bundled app both answer any path with `index.html`
+(Tauri's asset protocol falls back to it). A page is loaded the first time
+it is visited, so each page's code stays a chunk of its own, and
+`src/lib/RemountPageOnNavigation.svelte` gives every address a new instance
+of its page, so a page reads its query once, when it mounts. The quick
+search popup is a window of its own with its own entry, `src/quick-search.html`.
+
+The document loads its stylesheet with a `<link>` in its `<head>`, not an
+`import` in its JS entry: in dev, Vite only injects imported CSS once the
+module runs, so the first paint would be unstyled. `src/app.css` imports
+every page's styles. The main window's `backgroundColor` in
+`tauri.conf.json` is the light theme's page colour, for the moment before
+the first paint on launch.
 
 The status page header has Phoenix's theme toggle. Like on the web, its
 buttons dispatch a `phx:set-theme` event, and Phoenix's theme script,
@@ -118,7 +147,7 @@ for now.
 
 ## tmux example
 
-`src/tmux-example.html` (`src/tmux-example/`) is an example of driving the
+`/tmux-example` (`src/tmux-example/`) is an example of driving the
 user's tmux from the app (`docs/tmux-example.md` says how to remove it). It:
 
 1. Guesses the user's shell, terminal app (the first installed of iTerm2,
@@ -179,15 +208,18 @@ Graphics calls in `src-tauri/src/macos/`.
 ## Layout
 
 ```
-src/                     the main window, a Svelte app with one HTML entry per page
-  index.html, main.js    the status page, mounting StatusPage.svelte
-  tmux-example.html      the tmux example page, mounting tmux-example/
-  tmux-example/          the tmux example page's components and styles
-  quick-search.html      the quick search popup, mounting quick-search/
+src/                     the main window, a Svelte app with one document and a router
+  index.html, main.js    the document, mounting the router
+  StatusPage.svelte      the status page, at /
+  communities/           the communities page, at /communities
+  tmux-example/          the tmux example page, at /tmux-example, and its styles
+  quick-search.html      the quick search popup, a window of its own, mounting quick-search/
   public/                files served as they are: the quick search sample images
-  lib/                   shared by both pages: the log, the app:emit handler
-  app.css, styles.css    Tailwind with Phoenix's theme, and the app's own styles
-vite.config.js           the Vite build: the pages, Tailwind, the $phoenix alias
+  lib/                   shared by the pages: routes.js (every path), router.js (the
+                         router and navigateToUrl), RemountPageOnNavigation.svelte,
+                         the log, the app:emit handler
+  app.css, styles.css    Tailwind with Phoenix's theme, the app's own and every page's styles
+vite.config.js           the Vite build: the two entries, Tailwind, the $phoenix alias
                          and the dev server port
 vendor/heroicons.js      the Tailwind plugin making the hero-* icon classes
 src-tauri/
