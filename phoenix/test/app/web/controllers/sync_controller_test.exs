@@ -36,22 +36,27 @@ defmodule App.Web.SyncControllerTest do
     assert %{"rows" => rows, "next" => nil, "cursor" => %{"last_synced_at" => _, "id" => _}} = pulled
     assert existing.id in for(%{"table" => "app_posts", "row" => row} <- rows, do: row["id"])
 
-    now = DateTime.to_iso8601(DateTime.utc_now())
     id = Ecto.UUID.generate(version: 7)
 
     pushed =
       conn
       |> post_json(~p"/sync/push", %{
-        "rows" => [
+        "events" => [
           %{
+            "id" => Ecto.UUID.generate(version: 7),
             "table" => "app_posts",
-            "row" => %{"id" => id, "body" => "over http", "author_id" => scope.user.id, "updated_at" => now}
+            "row_id" => id,
+            "type" => "create",
+            "base_version" => 0,
+            "changes" => %{"body" => "over http"}
           }
         ]
       })
       |> json_response(200)
 
-    assert %{"accepted" => [%{"table" => "app_posts", "id" => ^id}], "rejected" => []} = pushed
+    assert %{"events" => [%{"row_id" => ^id, "status" => "applied", "version" => 1}], "rejected" => []} =
+             pushed
+
     assert Posts.get(id).body == "over http"
 
     backfilled = conn |> post_json(~p"/sync/backfill/#{community.id}", %{}) |> json_response(200)
@@ -70,8 +75,9 @@ defmodule App.Web.SyncControllerTest do
     assert conn |> post_json(~p"/sync/pull", body) |> json_response(400)
   end
 
-  test "rejects a push without a list of rows", %{conn: conn} do
+  test "rejects a push without lists of rows and events", %{conn: conn} do
     assert conn |> post_json(~p"/sync/push", %{"rows" => "nope"}) |> json_response(400)
+    assert conn |> post_json(~p"/sync/push", %{"events" => "nope"}) |> json_response(400)
   end
 
   test "refuses a backfill of a community the user is not a member of", %{conn: conn} do

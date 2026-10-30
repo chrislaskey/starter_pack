@@ -2,8 +2,9 @@ defmodule App.Data.Synced do
   @moduledoc """
   Marks a schema as synced: its table exists on every client with the
   same columns, and its rows travel through `App.Data.Sync`. A synced
-  table carries the four sync columns of `docs/design/offline-sync.md`:
-  `updated_at`, `last_synced_at`, `deleted_at` and `deleted_by_id`.
+  table carries the sync columns of `docs/design/offline-sync.md`:
+  `version`, `updated_at`, `last_synced_at`, `deleted_at` and
+  `deleted_by_id`.
 
       use App.Data.Synced
 

@@ -7,8 +7,8 @@
 //! the same tables as the server, see `schema`. The pages read only from
 //! that file, so they work with the network off.
 //!
-//! A local write, see `store`, upserts the row and queues it in
-//! `sync_outbox`. A sync, see `worker`, pushes the outbox, pulls what
+//! A local write, see `store`, upserts the row and queues it: in
+//! `sync_outbox`, or for a post as an event in `sync_events`. A sync, see `worker`, pushes the outbox, pulls what
 //! changed on the server, backfills a community the user just joined, and
 //! prunes what the user can no longer see. One runs after every local
 //! write, when the page is opened, on demand, and every half minute.
@@ -37,7 +37,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{AppState, MAIN_WINDOW};
-use store::{Community, Cursor, FeedPost};
+use store::{Community, Conflict, Cursor, FeedPost};
 use worker::SyncReport;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -55,6 +55,7 @@ pub struct CommunitiesPage {
     pub communities: Vec<Community>,
     pub posts: Vec<FeedPost>,
     pub pending: i64,
+    pub conflicts: Vec<Conflict>,
     pub cursor: Option<Cursor>,
 }
 
@@ -196,6 +197,48 @@ pub async fn edit_post(
     page(device)
 }
 
+/// Deletes the user's own post in the file and starts a sync.
+#[tauri::command]
+pub async fn delete_post(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    post_id: String,
+) -> Result<CommunitiesPage, String> {
+    let device = &state.device;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
+    store::delete_post(&connection, &profile.id, &post_id, &now_iso8601())?;
+    drop(connection);
+
+    spawn_sync(app);
+    page(device)
+}
+
+/// `reapply` queues the change again and starts a sync, `ignore` lets it go.
+#[tauri::command]
+pub async fn resolve_conflict(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    event_id: String,
+    resolution: String,
+) -> Result<CommunitiesPage, String> {
+    let reapply = match resolution.as_str() {
+        "reapply" => true,
+        "ignore" => false,
+        other => return Err(format!("Unknown resolution {other}")),
+    };
+    let device = &state.device;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
+    store::resolve_conflict(&connection, &profile.id, &event_id, reapply, &now_iso8601())?;
+    drop(connection);
+
+    if reapply {
+        spawn_sync(app);
+    }
+    page(device)
+}
+
 /// Syncs now and returns what happened.
 #[tauri::command]
 pub async fn sync_now(app: AppHandle) -> Result<SyncReport, String> {
@@ -210,6 +253,7 @@ fn page(device: &Device) -> Result<CommunitiesPage, String> {
         communities: store::member_communities(&connection, &profile.id)?,
         posts: store::feed(&connection, &profile.id)?,
         pending: store::pending_count(&connection)?,
+        conflicts: store::conflicts(&connection)?,
         cursor: store::cursor(&connection)?,
     })
 }

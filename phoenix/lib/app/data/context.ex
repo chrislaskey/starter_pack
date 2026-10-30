@@ -204,7 +204,7 @@ defmodule App.Data.Context do
       def update(record, params, options \\ []) do
         record
         |> change(params, options)
-        |> App.Repo.update()
+        |> App.Repo.update(stale_error_field: :version)
       end
 
       # Get or create
@@ -257,7 +257,7 @@ defmodule App.Data.Context do
         if App.Data.Context.soft_delete?(schema(), options) do
           record
           |> App.Data.Context.soft_delete_changeset(schema(), options)
-          |> App.Repo.update()
+          |> App.Repo.update(stale_error_field: :version)
         else
           App.Repo.delete(record)
         end
@@ -290,7 +290,11 @@ defmodule App.Data.Context do
           |> App.Data.Context.filters(filters(), options, &filter/3)
 
         if App.Data.Context.soft_delete?(schema(), options) do
-          App.Repo.update_all(query, set: App.Data.Context.soft_delete_fields(schema(), options))
+          App.Repo.update_all(
+            query,
+            [set: App.Data.Context.soft_delete_fields(schema(), options)] ++
+              App.Data.Context.version_inc(schema())
+          )
         else
           App.Repo.delete_all(query)
         end
@@ -353,9 +357,14 @@ defmodule App.Data.Context do
     params = Map.new(Keyword.take(fields, [:deleted_at, :deleted_by_id]))
 
     cond do
-      Keyword.has_key?(options, :changesets) -> changeset(schema, record, params, options)
-      function_exported?(schema, :delete_changeset, 3) -> schema.delete_changeset(record, params, options)
-      true -> Ecto.Changeset.change(record, fields)
+      Keyword.has_key?(options, :changesets) ->
+        changeset(schema, record, params, options)
+
+      function_exported?(schema, :delete_changeset, 3) ->
+        schema.delete_changeset(record, params, options) |> lock_version()
+
+      true ->
+        record |> Ecto.Changeset.change(fields) |> lock_version()
     end
   end
 
@@ -468,17 +477,39 @@ defmodule App.Data.Context do
     Ecto.Query.order_by(query, ^Keyword.new([{direction, field}]))
   end
 
+  # Helpers - Versions
+
+  @doc """
+  Increments `version` on an update of a stored row, which then fails
+  with a `:version` error if the row changed since it was read.
+  """
+  def lock_version(%Ecto.Changeset{data: %schema{} = data} = changeset) do
+    if :version in schema.__schema__(:fields) and Ecto.get_meta(data, :state) == :loaded,
+      do: Ecto.Changeset.optimistic_lock(changeset, :version),
+      else: changeset
+  end
+
+  @doc """
+  The `update_all/3` option that increments `version`, when the schema has it.
+  """
+  def version_inc(schema) do
+    if :version in schema.__schema__(:fields), do: [inc: [version: 1]], else: []
+  end
+
   # Helpers - Changesets
 
   def changeset(schema, record, params, options) do
-    case Keyword.get(options, :changesets) do
-      nil ->
-        schema.changeset(record, params, options)
+    changeset =
+      case Keyword.get(options, :changesets) do
+        nil ->
+          schema.changeset(record, params, options)
 
-      changesets ->
-        changesets
-        |> List.wrap()
-        |> Enum.reduce(record, fn changeset, record -> changeset.(record, params, options) end)
-    end
+        changesets ->
+          changesets
+          |> List.wrap()
+          |> Enum.reduce(record, fn changeset, record -> changeset.(record, params, options) end)
+      end
+
+    lock_version(changeset)
   end
 end

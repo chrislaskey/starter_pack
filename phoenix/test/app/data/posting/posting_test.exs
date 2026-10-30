@@ -7,6 +7,7 @@ defmodule App.Data.PostingTest do
 
   alias App.Data.Memberships
   alias App.Data.PostCommunity
+  alias App.Data.PostEvents
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.PostsCommunities
@@ -151,6 +152,61 @@ defmodule App.Data.PostingTest do
       assert feed_ids(reader) == []
       assert feed_ids(author) == []
       assert [%PostCommunity{deleted_at: nil}] = PostsCommunities.list(filters: [post_id: post.id])
+    end
+  end
+
+  describe "versions and events" do
+    test "writing and deleting a post each record an event with the version it produced", %{
+      author: author,
+      one: one
+    } do
+      post = post_fixture(author, [one.id], %{body: "hello"})
+      assert post.version == 1
+
+      {:ok, deleted} = Posting.delete(author, post)
+      assert deleted.version == 2
+
+      assert [
+               %{type: :create, base_version: 0, version: 1, changes: %{"body" => "hello"}},
+               %{type: :update, base_version: 1, version: 2, changes: %{"deleted_at" => _}}
+             ] = PostEvents.list(filters: [post_id: post.id])
+    end
+
+    test "a write from a stale copy of a row is refused", %{author: author, one: one} do
+      post = post_fixture(author, [one.id])
+      {:ok, _edited} = Posts.update(post, %{body: "first"})
+
+      assert {:error, changeset} = Posts.update(post, %{body: "from the stale copy"})
+      assert changeset.errors[:version]
+      assert {:error, _changeset} = Posting.delete(author, post)
+      assert Posts.get(post.id).body == "first"
+    end
+
+    test "a device's edit of a field nobody else changed merges with a newer server version",
+         %{author: author, one: one} do
+      post = post_fixture(author, [one.id], %{body: "hello"})
+
+      event = fn base_version, changes ->
+        %{
+          id: Ecto.UUID.generate(version: 7),
+          row_id: post.id,
+          type: :update,
+          base_version: base_version,
+          base: %{"body" => "hello"},
+          changes: changes
+        }
+      end
+
+      {:ok, %{conflicts: %{}}, _post} = Posting.apply_event(author, event.(1, %{"body" => "edited"}))
+
+      {:ok, %{conflicts: conflicts, version: 2}, post} =
+        Posting.apply_event(author, event.(1, %{"body" => "mine"}))
+
+      assert conflicts == %{"body" => %{"yours" => "mine", "server" => "edited"}}
+      assert post.body == "edited"
+
+      assert {:error, "not_editable: author_id", _post} =
+               Posting.apply_event(author, event.(2, %{"author_id" => Ecto.UUID.generate()}))
     end
   end
 end

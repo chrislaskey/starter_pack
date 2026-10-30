@@ -20,6 +20,7 @@ defmodule App.Data.PostCommunity do
     belongs_to :community, App.Data.Community
     belongs_to :membership, App.Data.UserCommunity, foreign_key: :users_communities_id
     field :last_synced_at, :utc_datetime_usec
+    field :version, :integer, default: 1
     field :deleted_at, :utc_datetime_usec
     field :deleted_by_id, Ecto.UUID
 

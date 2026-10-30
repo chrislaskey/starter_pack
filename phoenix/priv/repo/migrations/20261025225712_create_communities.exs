@@ -6,6 +6,7 @@ defmodule App.Repo.Migrations.CreateCommunities do
       add :id, :uuid, primary_key: true
       add :name, :string, null: false
       add :last_synced_at, :utc_datetime_usec, null: false
+      add :version, :bigint, null: false, default: 1
       add :deleted_at, :utc_datetime_usec
       add :deleted_by_id, :uuid
 
@@ -21,6 +22,7 @@ defmodule App.Repo.Migrations.CreateCommunities do
 
       add :role, :string, null: false
       add :last_synced_at, :utc_datetime_usec, null: false
+      add :version, :bigint, null: false, default: 1
       add :deleted_at, :utc_datetime_usec
       add :deleted_by_id, :uuid
 

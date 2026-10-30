@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use super::store::{Cursor, WireRow};
+use super::store::{Cursor, WireEvent, WireRow};
 use crate::config::Config;
 
 const PAGE_SIZE: usize = 200;
@@ -37,6 +37,8 @@ pub struct Page {
 pub struct PushResponse {
     pub accepted: Vec<Accepted>,
     pub rejected: Vec<Rejected>,
+    #[serde(default)]
+    pub events: Vec<EventAnswer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +46,7 @@ pub struct Accepted {
     pub table: String,
     pub id: String,
     pub last_synced_at: String,
+    pub version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +56,19 @@ pub struct Rejected {
     pub reason: String,
     /// The server's version of the row, to apply, or nothing when the
     /// server has none.
+    pub server: Option<WireRow>,
+}
+
+/// The server's answer to one event.
+#[derive(Debug, Deserialize)]
+pub struct EventAnswer {
+    pub id: String,
+    /// `applied`, `conflict` or `rejected`
+    pub status: String,
+    /// `{field: {"yours": ..., "server": ...}}`
+    #[serde(default)]
+    pub conflicts: Map<String, Value>,
+    pub reason: Option<String>,
     pub server: Option<WireRow>,
 }
 
@@ -82,8 +98,13 @@ impl SyncServer {
         .await
     }
 
-    pub async fn push(&self, rows: Vec<WireRow>) -> Result<PushResponse, String> {
-        self.post("/sync/push", &json!({"rows": rows})).await
+    pub async fn push(
+        &self,
+        rows: Vec<WireRow>,
+        events: Vec<WireEvent>,
+    ) -> Result<PushResponse, String> {
+        self.post("/sync/push", &json!({"rows": rows, "events": events}))
+            .await
     }
 
     pub async fn backfill(

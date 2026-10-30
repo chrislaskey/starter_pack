@@ -105,7 +105,8 @@ defmodule App.Data.Memberships do
   defp revive_rows(%UserCommunity{id: id}, left_at) do
     App.Repo.update_all(
       from(pc in PostCommunity, where: pc.users_communities_id == ^id and pc.deleted_at == ^left_at),
-      set: [deleted_at: nil, deleted_by_id: nil, last_synced_at: DateTime.utc_now()]
+      set: [deleted_at: nil, deleted_by_id: nil, last_synced_at: DateTime.utc_now()],
+      inc: [version: 1]
     )
   end
 end

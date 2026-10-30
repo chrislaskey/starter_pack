@@ -129,6 +129,8 @@ pub fn run() {
             sync::get_communities_page,
             sync::write_post,
             sync::edit_post,
+            sync::delete_post,
+            sync::resolve_conflict,
             sync::sync_now
         ])
         .run(tauri::generate_context!())

@@ -4,7 +4,7 @@ defmodule App.Web.SyncController do
   `App.Data.Sync`, with the API token as a bearer token:
 
       POST /sync/pull                    {"cursor": ..., "after": ..., "limit": n}
-      POST /sync/push                    {"rows": [{"table": ..., "row": {...}}]}
+      POST /sync/push                    {"rows": [{"table": ..., "row": {...}}], "events": [...]}
       POST /sync/backfill/:community_id  {"after": ..., "limit": n}
 
   Like the websocket API, they refuse every request unless
@@ -30,11 +30,16 @@ defmodule App.Web.SyncController do
     end
   end
 
-  def push(conn, %{"rows" => rows}) when is_list(rows) do
-    json(conn, Sync.push(conn.assigns.current_scope, rows))
-  end
+  def push(conn, params) do
+    rows = Map.get(params, "rows", [])
+    events = Map.get(params, "events", [])
 
-  def push(conn, _params), do: bad_request(conn, "rows must be a list")
+    if is_list(rows) and is_list(events) do
+      json(conn, Sync.push(conn.assigns.current_scope, rows, events))
+    else
+      bad_request(conn, "rows and events must be lists")
+    end
+  end
 
   def backfill(conn, %{"community_id" => community_id} = params) do
     case Sync.backfill(conn.assigns.current_scope, community_id, params) do

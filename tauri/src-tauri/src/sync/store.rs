@@ -2,10 +2,11 @@
 //!
 //! Server rows are applied as upserts, column for column, exactly as they
 //! come off the wire. A local write upserts the row with a client-generated
-//! UUIDv7 and the device's time as `updated_at`, and queues it in
-//! `sync_outbox` for the next push. `last_synced_at` is the server's and
-//! never written here, except as a placeholder on a new local row until
-//! the push response brings the real one, since the column is not null.
+//! UUIDv7 and the device's time as `updated_at`, and queues it for the
+//! next push: in `sync_outbox`, or as an event in `sync_events` for an
+//! `EVENT_SOURCED` table. `last_synced_at` and `version` are the server's,
+//! with placeholders on a new local row: the time, and version 0. See
+//! `phoenix/docs/design/offline-sync-client.md`.
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -22,6 +23,41 @@ pub const TABLES: [&str; 5] = [
     "app_posts",
     "app_posts_communities",
 ];
+
+pub const EVENT_SOURCED: [&str; 1] = ["app_posts"];
+
+/// An event on the wire, see `App.Data.Sync`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WireEvent {
+    pub id: String,
+    pub table: String,
+    pub row_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub base_version: i64,
+    pub base: Map<String, Value>,
+    pub changes: Map<String, Value>,
+}
+
+/// A change the server kept its own values over.
+#[derive(Clone, Debug, Serialize)]
+pub struct Conflict {
+    pub id: String,
+    pub table: String,
+    pub row_id: String,
+    pub made_at: String,
+    pub summary: String,
+    pub row_exists: bool,
+    pub fields: Vec<ConflictField>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConflictField {
+    pub field: String,
+    pub yours: Value,
+    /// The value on this device now
+    pub server: Value,
+}
 
 /// A row on the wire: the table and its columns, see `App.Data.Sync`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -297,19 +333,20 @@ pub fn row_json(
         .map_err(sql_error)
 }
 
-pub fn set_last_synced_at(
+pub fn set_synced(
     connection: &Connection,
     table: &str,
     id: &str,
     at: &str,
+    version: i64,
 ) -> Result<(), String> {
     if !TABLES.contains(&table) {
         return Err(format!("unknown table {table}"));
     }
     connection
         .execute(
-            &format!("UPDATE \"{table}\" SET last_synced_at = ?1 WHERE id = ?2"),
-            params![at, id],
+            &format!("UPDATE \"{table}\" SET last_synced_at = ?1, version = ?2 WHERE id = ?3"),
+            params![at, version, id],
         )
         .map_err(sql_error)?;
     Ok(())
@@ -344,8 +381,8 @@ pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
         .map_err(sql_error)
 }
 
-/// Drops every synced row and the cursor, for a resync from nothing. The
-/// outbox stays: what is queued is pushed before any pull.
+/// Drops every synced row, the cursor and the outbox, for a resync from
+/// nothing. The events stay.
 pub fn reset(connection: &Connection) -> Result<(), String> {
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
     for table in TABLES.iter().rev() {
@@ -423,11 +460,12 @@ pub fn queue(connection: &Connection, table: &str, id: &str, now: &str) -> Resul
     Ok(())
 }
 
-/// Whether the row has a local change waiting to be pushed.
+/// Whether the row has an outbox entry or a pending event.
 pub fn queued(connection: &Connection, table: &str, id: &str) -> Result<bool, String> {
     connection
         .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sync_outbox WHERE table_name = ?1 AND row_id = ?2)",
+            "SELECT EXISTS (SELECT 1 FROM sync_outbox WHERE table_name = ?1 AND row_id = ?2)
+                 OR EXISTS (SELECT 1 FROM sync_events WHERE table_name = ?1 AND row_id = ?2 AND status = 'pending')",
             params![table, id],
             |row| row.get(0),
         )
@@ -469,8 +507,280 @@ pub fn dequeue(
 
 pub fn pending_count(connection: &Connection) -> Result<i64, String> {
     connection
-        .query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get(0))
+        .query_row(
+            "SELECT (SELECT count(*) FROM sync_outbox)
+                  + (SELECT count(*) FROM sync_events WHERE status = 'pending')",
+            [],
+            |row| row.get(0),
+        )
         .map_err(sql_error)
+}
+
+// The events
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_event(
+    connection: &Connection,
+    table: &str,
+    row_id: &str,
+    kind: &str,
+    base_version: i64,
+    base: Map<String, Value>,
+    changes: Map<String, Value>,
+    made_at: &str,
+) -> Result<String, String> {
+    if !EVENT_SOURCED.contains(&table) {
+        return Err(format!("{table} is not event-sourced"));
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    connection
+        .execute(
+            "INSERT INTO sync_events (id, table_name, row_id, type, base_version, base, changes, made_at, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')",
+            params![
+                id,
+                table,
+                row_id,
+                kind,
+                base_version,
+                Value::Object(base).to_string(),
+                Value::Object(changes).to_string(),
+                made_at
+            ],
+        )
+        .map_err(sql_error)?;
+    Ok(id)
+}
+
+/// The pending events, in the order they were made.
+pub fn pending_events(connection: &Connection) -> Result<Vec<WireEvent>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, table_name, row_id, type, base_version, base, changes FROM sync_events
+             WHERE status = 'pending' ORDER BY made_at, id",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                WireEvent {
+                    id: row.get(0)?,
+                    table: row.get(1)?,
+                    row_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    base_version: row.get(4)?,
+                    base: Map::new(),
+                    changes: Map::new(),
+                },
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+
+    rows.into_iter()
+        .map(|(event, base, changes)| {
+            Ok(WireEvent {
+                base: json_object(&base)?,
+                changes: json_object(&changes)?,
+                ..event
+            })
+        })
+        .collect()
+}
+
+fn json_object(text: &str) -> Result<Map<String, Value>, String> {
+    match serde_json::from_str(text).map_err(|error| error.to_string())? {
+        Value::Object(map) => Ok(map),
+        other => Err(format!("expected a JSON object, got {other}")),
+    }
+}
+
+pub fn delete_event(connection: &Connection, id: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM sync_events WHERE id = ?1", [id])
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+pub fn mark_conflict(
+    connection: &Connection,
+    id: &str,
+    conflicts: &Map<String, Value>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE sync_events SET status = 'conflict', conflicts = ?2 WHERE id = ?1",
+            params![id, Value::Object(conflicts.clone()).to_string()],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+pub fn record_event_failure(connection: &Connection, id: &str, error: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE sync_events SET attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
+            params![id, error],
+        )
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+/// Newest first.
+pub fn conflicts(connection: &Connection) -> Result<Vec<Conflict>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, table_name, row_id, made_at, coalesce(conflicts, '{}') FROM sync_events
+             WHERE status = 'conflict' ORDER BY made_at DESC, id DESC",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+
+    rows.into_iter()
+        .map(|(id, table, row_id, made_at, conflicts)| {
+            let current = row_json(connection, &table, &row_id)?;
+            let fields: Vec<ConflictField> = json_object(&conflicts)?
+                .into_iter()
+                .map(|(field, conflict)| ConflictField {
+                    server: match &current {
+                        Some(row) => row.get(&field).cloned().unwrap_or(Value::Null),
+                        None => conflict.get("server").cloned().unwrap_or(Value::Null),
+                    },
+                    yours: conflict.get("yours").cloned().unwrap_or(Value::Null),
+                    field,
+                })
+                .collect();
+            let body = current
+                .as_ref()
+                .and_then(|row| row.get("body"))
+                .or_else(|| {
+                    fields
+                        .iter()
+                        .find(|field| field.field == "body")
+                        .map(|field| &field.yours)
+                })
+                .and_then(Value::as_str)
+                .unwrap_or("");
+
+            Ok(Conflict {
+                summary: body.lines().next().unwrap_or("").to_string(),
+                row_exists: current.is_some(),
+                id,
+                table,
+                row_id,
+                made_at,
+                fields,
+            })
+        })
+        .collect()
+}
+
+/// Lets the conflict go, or reapplies it as a new event from the row's
+/// current version.
+pub fn resolve_conflict(
+    connection: &Connection,
+    user_id: &str,
+    event_id: &str,
+    reapply: bool,
+    now: &str,
+) -> Result<(), String> {
+    let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+    let conflict: Option<(String, String, String)> = transaction
+        .query_row(
+            "SELECT table_name, row_id, coalesce(conflicts, '{}') FROM sync_events
+             WHERE id = ?1 AND status = 'conflict'",
+            [event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let (table, row_id, conflicts) = conflict.ok_or("That change is already resolved")?;
+
+    if reapply {
+        let row = row_json(&transaction, &table, &row_id)?
+            .ok_or("It is gone from this device, so the change can only be let go")?;
+        let mut base = Map::new();
+        let mut changes = Map::new();
+        for (field, conflict) in json_object(&conflicts)? {
+            base.insert(
+                field.clone(),
+                row.get(&field).cloned().unwrap_or(Value::Null),
+            );
+            changes.insert(field, conflict.get("yours").cloned().unwrap_or(Value::Null));
+        }
+        let version = row.get("version").and_then(Value::as_i64).unwrap_or(0);
+
+        update_fields(&transaction, &table, &row_id, user_id, &changes, now)?;
+        queue_event(
+            &transaction,
+            &table,
+            &row_id,
+            "update",
+            version,
+            base,
+            changes,
+            now,
+        )?;
+    }
+
+    delete_event(&transaction, event_id)?;
+    transaction.commit().map_err(sql_error)
+}
+
+fn update_fields(
+    connection: &Connection,
+    table: &str,
+    id: &str,
+    user_id: &str,
+    changes: &Map<String, Value>,
+    now: &str,
+) -> Result<(), String> {
+    let known = columns(connection, table)?;
+    let mut values = changes.clone();
+    values.insert("updated_at".into(), Value::from(now));
+    if let Some(deleted_at) = changes.get("deleted_at") {
+        let by = if deleted_at.is_null() {
+            Value::Null
+        } else {
+            Value::from(user_id)
+        };
+        values.insert("deleted_by_id".into(), by);
+    }
+
+    let fields: Vec<(&String, &Value)> = values
+        .iter()
+        .filter(|(column, _)| {
+            known.contains(column)
+                && !["id", "version", "last_synced_at"].contains(&column.as_str())
+        })
+        .collect();
+    let sets: Vec<String> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, (column, _))| format!("\"{column}\" = ?{}", index + 2))
+        .collect();
+    let sql = format!("UPDATE \"{table}\" SET {} WHERE id = ?1", sets.join(", "));
+    let parameters = std::iter::once(SqlValue::Text(id.to_string()))
+        .chain(fields.iter().map(|(_, value)| to_sql(value)));
+    connection
+        .execute(&sql, params_from_iter(parameters))
+        .map_err(sql_error)?;
+    Ok(())
 }
 
 // Local writes
@@ -489,12 +799,23 @@ pub fn write_post(
     let post_id = uuid::Uuid::now_v7().to_string();
     transaction
         .execute(
-            "INSERT INTO app_posts (id, author_id, body, last_synced_at, inserted_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?4)",
+            "INSERT INTO app_posts (id, author_id, body, version, last_synced_at, inserted_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?4, ?4)",
             params![post_id, user_id, body, now],
         )
         .map_err(sql_error)?;
-    queue(&transaction, "app_posts", &post_id, now)?;
+    let mut changes = Map::new();
+    changes.insert("body".into(), Value::from(body.as_str()));
+    queue_event(
+        &transaction,
+        "app_posts",
+        &post_id,
+        "create",
+        0,
+        Map::new(),
+        changes,
+        now,
+    )?;
 
     for community_id in community_ids {
         let membership: Option<String> = transaction
@@ -510,8 +831,8 @@ pub fn write_post(
         let row_id = uuid::Uuid::now_v7().to_string();
         transaction
             .execute(
-                "INSERT INTO app_posts_communities (id, post_id, community_id, users_communities_id, last_synced_at, inserted_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5)",
+                "INSERT INTO app_posts_communities (id, post_id, community_id, users_communities_id, version, last_synced_at, inserted_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, ?5)",
                 params![row_id, post_id, community_id, membership, now],
             )
             .map_err(sql_error)?;
@@ -522,7 +843,7 @@ pub fn write_post(
     Ok(post_id)
 }
 
-/// Edits the user's own post, queued for the next push.
+/// Edits the user's own post, queued as an event.
 pub fn edit_post(
     connection: &Connection,
     user_id: &str,
@@ -531,17 +852,60 @@ pub fn edit_post(
     now: &str,
 ) -> Result<(), String> {
     let body = checked_body(user_id, body)?;
-    let changed = connection
-        .execute(
-            "UPDATE app_posts SET body = ?1, updated_at = ?2
-             WHERE id = ?3 AND author_id = ?4 AND deleted_at IS NULL",
-            params![body, now, post_id, user_id],
-        )
-        .map_err(sql_error)?;
-    if changed == 0 {
-        return Err("Not your post, or it is gone".into());
-    }
-    queue(connection, "app_posts", post_id, now)
+    change_own_post(connection, user_id, post_id, "body", Value::from(body), now)
+}
+
+/// Deletes the user's own post, queued as an event.
+pub fn delete_post(
+    connection: &Connection,
+    user_id: &str,
+    post_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    change_own_post(
+        connection,
+        user_id,
+        post_id,
+        "deleted_at",
+        Value::from(now),
+        now,
+    )
+}
+
+fn change_own_post(
+    connection: &Connection,
+    user_id: &str,
+    post_id: &str,
+    field: &str,
+    value: Value,
+    now: &str,
+) -> Result<(), String> {
+    let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+    let row = row_json(&transaction, "app_posts", post_id)?
+        .filter(|row| {
+            row.get("author_id").and_then(Value::as_str) == Some(user_id)
+                && row.get("deleted_at").is_none_or(Value::is_null)
+        })
+        .ok_or("Not your post, or it is gone")?;
+    let version = row.get("version").and_then(Value::as_i64).unwrap_or(0);
+
+    let mut base = Map::new();
+    base.insert(field.into(), row.get(field).cloned().unwrap_or(Value::Null));
+    let mut changes = Map::new();
+    changes.insert(field.into(), value);
+
+    update_fields(&transaction, "app_posts", post_id, user_id, &changes, now)?;
+    queue_event(
+        &transaction,
+        "app_posts",
+        post_id,
+        "update",
+        version,
+        base,
+        changes,
+        now,
+    )?;
+    transaction.commit().map_err(sql_error)
 }
 
 /// The server's rules for a post, `App.Data.Post.changeset/3`, run here so
@@ -597,6 +961,7 @@ pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, Str
         .prepare(
             "SELECT p.id, p.body, p.author_id, coalesce(u.email, ''), p.inserted_at,
                     EXISTS (SELECT 1 FROM sync_outbox o WHERE o.table_name = 'app_posts' AND o.row_id = p.id)
+                    OR EXISTS (SELECT 1 FROM sync_events e WHERE e.table_name = 'app_posts' AND e.row_id = p.id AND e.status = 'pending')
              FROM app_posts p
              LEFT JOIN app_users u ON u.id = p.author_id
              WHERE p.deleted_at IS NULL
@@ -763,11 +1128,15 @@ pub(crate) mod tests {
         let post_id =
             write_post(&connection, ME, "  mine  ", &[COMMUNITY.to_string()], AT).unwrap();
 
+        let events = pending_events(&connection).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].row_id, post_id);
+        assert_eq!(events[0].kind, "create");
+        assert_eq!(events[0].base_version, 0);
+        assert_eq!(events[0].changes["body"], json!("  mine  "));
         let outbox = outbox(&connection).unwrap();
-        assert_eq!(outbox.len(), 2);
-        assert_eq!(outbox[0].table, "app_posts");
-        assert_eq!(outbox[0].id, post_id);
-        assert_eq!(outbox[1].table, "app_posts_communities");
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].table, "app_posts_communities");
         assert_eq!(pending_count(&connection).unwrap(), 2);
 
         // The body is kept as typed, as the server keeps it
@@ -778,6 +1147,7 @@ pub(crate) mod tests {
         assert_eq!(row["author_id"], json!(ME));
         assert_eq!(row["updated_at"], json!(AT));
         assert_eq!(row["deleted_at"], Value::Null);
+        assert_eq!(row["version"], json!(0));
 
         let posts = feed(&connection, ME).unwrap();
         let post = posts.iter().find(|post| post.id == post_id).unwrap();
@@ -800,22 +1170,21 @@ pub(crate) mod tests {
     fn dequeue_keeps_an_entry_edited_after_the_push_started() {
         let connection = open_in_memory().unwrap();
         apply_rows(&connection, ME, &server_rows()).unwrap();
-        let post_id = write_post(&connection, ME, "draft", &[], AT).unwrap();
 
         queue(
             &connection,
-            "app_posts",
-            &post_id,
+            "app_communities",
+            COMMUNITY,
             "2026-10-25T12:00:01.000000Z",
         )
         .unwrap();
-        dequeue(&connection, "app_posts", &post_id, AT).unwrap();
+        dequeue(&connection, "app_communities", COMMUNITY, AT).unwrap();
         assert_eq!(pending_count(&connection).unwrap(), 1);
 
         dequeue(
             &connection,
-            "app_posts",
-            &post_id,
+            "app_communities",
+            COMMUNITY,
             "2026-10-25T12:00:01.000000Z",
         )
         .unwrap();
@@ -923,7 +1292,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reset_drops_every_row_the_cursor_the_outbox_and_the_backfills() {
+    fn reset_drops_every_row_the_cursor_the_outbox_and_the_backfills_but_keeps_the_events() {
         let connection = open_in_memory().unwrap();
         apply_rows(&connection, ME, &server_rows()).unwrap();
         write_post(&connection, ME, "queued", &[], AT).unwrap();
@@ -941,7 +1310,8 @@ pub(crate) mod tests {
         assert!(feed(&connection, ME).unwrap().is_empty());
         assert!(member_communities(&connection, ME).unwrap().is_empty());
         assert_eq!(cursor(&connection).unwrap(), None);
-        assert_eq!(pending_count(&connection).unwrap(), 0);
+        assert!(outbox(&connection).unwrap().is_empty());
+        assert_eq!(pending_events(&connection).unwrap().len(), 1);
         assert!(pending_backfills(&connection).unwrap().is_empty());
     }
 
@@ -951,10 +1321,11 @@ pub(crate) mod tests {
         apply_rows(&connection, ME, &server_rows()).unwrap();
         let mine = write_post(&connection, ME, "draft", &[], AT).unwrap();
 
-        record_failure(&connection, "app_posts", &mine, "invalid: body").unwrap();
+        let event = &pending_events(&connection).unwrap()[0];
+        record_event_failure(&connection, &event.id, "invalid: body").unwrap();
         let (attempts, last_error): (i64, String) = connection
             .query_row(
-                "SELECT attempts, last_error FROM sync_outbox WHERE row_id = ?1",
+                "SELECT attempts, last_error FROM sync_events WHERE row_id = ?1",
                 [&mine],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -981,10 +1352,180 @@ pub(crate) mod tests {
         let row = row_json(&connection, "app_posts", &mine).unwrap().unwrap();
         assert_eq!(row["body"], json!("final"));
         assert_eq!(row["updated_at"], json!(later));
-        assert_eq!(pending_count(&connection).unwrap(), 1);
+        assert_eq!(
+            row["version"],
+            json!(0),
+            "the client never changes a version"
+        );
+
+        let events = pending_events(&connection).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].kind, "update");
+        assert_eq!(events[1].base_version, 0);
+        assert_eq!(events[1].base["body"], json!("draft"));
+        assert_eq!(events[1].changes["body"], json!("final"));
 
         let theirs = "01a17558-0000-7000-8000-0000000000a1";
         assert!(edit_post(&connection, ME, theirs, "mine now", later).is_err());
         assert!(edit_post(&connection, ME, &mine, "  ", later).is_err());
+    }
+
+    /// The fixture post, as mine, at version 3.
+    fn my_synced_post(connection: &Connection) -> String {
+        let mut post = server_rows()[5].clone();
+        post.row["author_id"] = json!(ME);
+        post.row.insert("version".into(), json!(3));
+        apply_rows(connection, ME, &server_rows()).unwrap();
+        apply_rows(connection, ME, &[post.clone()]).unwrap();
+        post.row["id"].as_str().unwrap().to_string()
+    }
+
+    fn conflict_on_body(connection: &Connection, post_id: &str, server: &str) -> String {
+        edit_post(connection, ME, post_id, "mine", AT).unwrap();
+        let event = pending_events(connection).unwrap().pop().unwrap();
+        let mut conflicts = Map::new();
+        conflicts.insert("body".into(), json!({"yours": "mine", "server": server}));
+        mark_conflict(connection, &event.id, &conflicts).unwrap();
+
+        let mut row = row_json(connection, "app_posts", post_id).unwrap().unwrap();
+        row.insert("body".into(), json!(server));
+        row.insert("version".into(), json!(4));
+        apply_rows(
+            connection,
+            ME,
+            &[WireRow {
+                table: "app_posts".into(),
+                row,
+            }],
+        )
+        .unwrap();
+        event.id
+    }
+
+    #[test]
+    fn edits_and_deletes_queue_events_from_the_version_on_the_device() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+
+        edit_post(&connection, ME, &post_id, "edited", AT).unwrap();
+        delete_post(&connection, ME, &post_id, AT).unwrap();
+
+        let events = pending_events(&connection).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].base_version, 3);
+        assert_eq!(events[0].base["body"], json!("hello"));
+        assert_eq!(events[1].base["deleted_at"], Value::Null);
+        assert_eq!(events[1].changes["deleted_at"], json!(AT));
+
+        let row = row_json(&connection, "app_posts", &post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["deleted_by_id"], json!(ME));
+        assert!(
+            feed(&connection, ME)
+                .unwrap()
+                .iter()
+                .all(|post| post.id != post_id)
+        );
+        assert!(
+            delete_post(&connection, ME, &post_id, AT).is_err(),
+            "already gone"
+        );
+    }
+
+    #[test]
+    fn a_pulled_row_never_overwrites_a_post_with_a_pending_event_but_does_one_with_a_conflict() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+        edit_post(&connection, ME, &post_id, "local edit", AT).unwrap();
+
+        let mut from_server = server_rows()[5].clone();
+        from_server.row["author_id"] = json!(ME);
+        from_server.row["body"] = json!("server copy");
+        assert_eq!(
+            apply_rows(&connection, ME, &[from_server.clone()])
+                .unwrap()
+                .rows,
+            0
+        );
+
+        let event = &pending_events(&connection).unwrap()[0];
+        mark_conflict(&connection, &event.id, &Map::new()).unwrap();
+        assert_eq!(apply_rows(&connection, ME, &[from_server]).unwrap().rows, 1);
+        assert_eq!(pending_count(&connection).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_conflict_shows_the_value_on_the_device_now_next_to_the_persons() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+        let event_id = conflict_on_body(&connection, &post_id, "from the laptop");
+
+        let conflicts = conflicts(&connection).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        let conflict = &conflicts[0];
+        assert_eq!(conflict.id, event_id);
+        assert_eq!(conflict.row_id, post_id);
+        assert!(conflict.row_exists);
+        assert_eq!(conflict.summary, "from the laptop");
+        assert_eq!(conflict.fields.len(), 1);
+        assert_eq!(conflict.fields[0].field, "body");
+        assert_eq!(conflict.fields[0].yours, json!("mine"));
+        assert_eq!(conflict.fields[0].server, json!("from the laptop"));
+        assert_eq!(pending_count(&connection).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_conflict_let_go_sends_nothing() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+        let event_id = conflict_on_body(&connection, &post_id, "from the laptop");
+
+        resolve_conflict(&connection, ME, &event_id, false, AT).unwrap();
+
+        assert!(conflicts(&connection).unwrap().is_empty());
+        assert!(pending_events(&connection).unwrap().is_empty());
+        let row = row_json(&connection, "app_posts", &post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["body"], json!("from the laptop"));
+        assert!(resolve_conflict(&connection, ME, &event_id, false, AT).is_err());
+    }
+
+    #[test]
+    fn a_conflict_reapplied_is_a_new_event_from_the_servers_version() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+        let event_id = conflict_on_body(&connection, &post_id, "from the laptop");
+
+        resolve_conflict(&connection, ME, &event_id, true, AT).unwrap();
+
+        assert!(conflicts(&connection).unwrap().is_empty());
+        let events = pending_events(&connection).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_ne!(events[0].id, event_id);
+        assert_eq!(events[0].kind, "update");
+        assert_eq!(events[0].base_version, 4);
+        assert_eq!(events[0].base["body"], json!("from the laptop"));
+        assert_eq!(events[0].changes["body"], json!("mine"));
+        let row = row_json(&connection, "app_posts", &post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["body"], json!("mine"));
+    }
+
+    #[test]
+    fn a_conflict_on_a_post_that_is_gone_can_only_be_let_go() {
+        let connection = open_in_memory().unwrap();
+        let post_id = my_synced_post(&connection);
+        let event_id = conflict_on_body(&connection, &post_id, "from the laptop");
+        delete_row(&connection, "app_posts", &post_id).unwrap();
+
+        let conflict = &conflicts(&connection).unwrap()[0];
+        assert!(!conflict.row_exists);
+        assert_eq!(conflict.summary, "mine");
+        assert!(resolve_conflict(&connection, ME, &event_id, true, AT).is_err());
+        resolve_conflict(&connection, ME, &event_id, false, AT).unwrap();
+        assert!(conflicts(&connection).unwrap().is_empty());
     }
 }

@@ -19,7 +19,7 @@
   let error = $state("");
 
   function describe(report) {
-    return `Synced: ${report.pushed} pushed, ${report.rejected} rejected, ${report.pulled} pulled, ${report.backfilled} backfilled, ${report.pruned} pruned, ${report.pending} pending`;
+    return `Synced: ${report.pushed} pushed, ${report.rejected} rejected, ${report.conflicts} not saved, ${report.pulled} pulled, ${report.backfilled} backfilled, ${report.pruned} pruned, ${report.pending} pending`;
   }
 
   async function load() {
@@ -90,6 +90,33 @@
     }
   }
 
+  async function remove(post) {
+    if (!confirm("Delete this post?")) return;
+    try {
+      page = await invoke("delete_post", { postId: post.id });
+      error = "";
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  let showConflicts = $state(false);
+
+  async function resolve(conflict, resolution) {
+    try {
+      page = await invoke("resolve_conflict", { eventId: conflict.id, resolution });
+      if (page.conflicts.length === 0) showConflicts = false;
+      error = "";
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  function shown(value) {
+    if (value === null || value === undefined) return "(none)";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  }
+
   onMount(() => {
     const unlisten = listen("synced", (event) => {
       lastSync = event.payload.error ? `Sync failed, working offline: ${event.payload.error}` : describe(event.payload.report);
@@ -122,6 +149,45 @@
       <Button onclick={sync} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</Button>
       <span class="muted">{lastSync}{page.pending ? ` · ${page.pending} change(s) waiting to sync` : ""}</span>
     </section>
+
+    {#if page.conflicts.length}
+      <section id="conflicts" class="conflicts">
+        <p>
+          <strong>
+            {page.conflicts.length === 1 ? "1 change was" : `${page.conflicts.length} changes were`} not saved on the server.
+          </strong>
+          Someone else changed the same thing first.
+          <button type="button" class="link" onclick={() => (showConflicts = !showConflicts)}>
+            {showConflicts ? "Hide details" : "See details"}
+          </button>
+        </p>
+        {#if showConflicts}
+          <ul>
+            {#each page.conflicts as conflict (conflict.id)}
+              <li>
+                <p class="muted">
+                  {conflict.summary || "A post"} · changed {conflict.made_at.slice(0, 19).replace("T", " ")}
+                </p>
+                {#each conflict.fields as field (field.field)}
+                  <dl>
+                    <dt>Your change to {field.field}</dt>
+                    <dd>{shown(field.yours)}</dd>
+                    <dt>Now on the server</dt>
+                    <dd>{conflict.row_exists ? shown(field.server) : "(the post is gone)"}</dd>
+                  </dl>
+                {/each}
+                <div class="actions">
+                  {#if conflict.row_exists}
+                    <Button variant="primary" type="button" onclick={() => resolve(conflict, "reapply")}>Reapply</Button>
+                  {/if}
+                  <Button type="button" onclick={() => resolve(conflict, "ignore")}>Let it go</Button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
 
     <section>
       <h2>Your communities</h2>
@@ -163,7 +229,10 @@
             {:else}
               <p>{post.body}</p>
               {#if post.mine}
-                <Button type="button" onclick={() => startEdit(post)}>Edit</Button>
+                <div class="actions">
+                  <Button type="button" onclick={() => startEdit(post)}>Edit</Button>
+                  <Button type="button" onclick={() => remove(post)}>Delete</Button>
+                </div>
               {/if}
             {/if}
           </li>
@@ -208,6 +277,39 @@
   }
   .feed li.pending {
     opacity: 0.7;
+  }
+  .conflicts {
+    max-width: 40rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-warning, #d97706);
+    border-radius: 0.5rem;
+  }
+  .conflicts ul {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    gap: 1rem;
+  }
+  .conflicts dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    margin: 0.5rem 0;
+  }
+  .conflicts dt {
+    font-weight: 600;
+  }
+  .conflicts dd {
+    margin: 0;
+    white-space: pre-wrap;
+  }
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    text-decoration: underline;
+    cursor: pointer;
+    color: inherit;
   }
   .error {
     color: var(--color-error, #b91c1c);

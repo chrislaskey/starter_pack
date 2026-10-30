@@ -22,6 +22,7 @@ defmodule App.Data.AppUser do
     field :email, :string
     field :joined_at, :utc_datetime_usec
     field :last_synced_at, :utc_datetime_usec
+    field :version, :integer, default: 1
     field :deleted_at, :utc_datetime_usec
     field :deleted_by_id, Ecto.UUID
 

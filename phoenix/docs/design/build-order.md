@@ -105,8 +105,9 @@ reference for every rule the generator will later copy.
 
 Builds
 
-- `app_posts` (id, author_id, body), with the four sync columns and soft
-  delete.
+- `app_posts` (id, author_id, body), with the sync columns and soft
+  delete, and `app_post_events`, the server-only log of every change to a
+  post.
 - `app_posts_communities` (post_id, community_id, users_communities_id), with
   a plain unique index on (post_id, community_id): adding a post back
   revives the row rather than inserting a new one, like rejoining does
@@ -142,21 +143,25 @@ Everything the server needs for offline clients, driven and tested with
 
 Builds
 
-- The four sync columns on every synced table: `updated_at` (usec),
-  `last_synced_at` (server-set in the write transaction, not null),
-  `deleted_at`, `deleted_by_id`. A synced-table marker on each schema.
+- The sync columns on every synced table: `version` (server-set, the MVCC
+  version), `updated_at` (usec), `last_synced_at` (server-set in the write
+  transaction, not null), `deleted_at`, `deleted_by_id`. A synced-table
+  marker on each schema.
 - Auth exactly as the websocket `/api` does it: the same API token from
   `user_tokens`, sent as `Authorization: Bearer` on HTTP instead of in the
   websocket upgrade header. One token, two transports.
 - `POST /sync/pull`: rows visible to the user with `last_synced_at` later
   than the cursor minus the overlap buffer, ordered by `(last_synced_at,
   id)`, paged, every returned `app_posts_communities` row carrying its post.
-- `POST /sync/push`: one transaction per batch, dependency order, every row
-  authorized against the scope, `updated_at` parsed and rejected unless UTC
-  with six fractional digits and bounded by the server clock, last write
-  wins on `updated_at`, membership and `app_posts_communities` rows
-  server-wins. Response lists accepted rows with their new `last_synced_at`
-  and rejected rows with the server's version.
+- `POST /sync/push`: one transaction per batch of rows and events,
+  dependency order, everything authorized against the scope, datetimes
+  rejected unless UTC with six fractional digits and bounded by the server
+  clock. Rows apply only at the server's `version`; membership and
+  `app_posts_communities` rows are server-wins. Posts change only through
+  events, merged field by field, with a field someone else changed first
+  returned as a conflict. Response lists accepted rows with their new
+  `last_synced_at` and `version`, rejected rows with the server's version,
+  and an answer per event.
 - `POST /sync/backfill/:community_id`: every live `app_posts_communities` row
   for the community, each carrying its post, paged. Called by a client when
   it sees a new membership for its own user. See "What backfill means."
@@ -164,10 +169,13 @@ Builds
   and pulling in interleaved orders.
 
 Delivers: a shell script can create a post on "device A," pull it on
-"device B," edit on both, and end with both matching the server.
+"device B," edit on both, and end with both matching the server and the
+later device holding its edit as a conflict.
 
-Proves: the Monday-Wednesday-Friday conflict resolves to Wednesday; a
-future-dated `updated_at` is bounded to server time; a row pushed for a
+Proves: the same field edited on two devices keeps the edit that reached
+the server first and returns the other as a conflict; different fields
+both apply; a retried event applies once; a future-dated deletion is
+bounded to server time; a row pushed for a
 community the user left is rejected; an `app_posts_communities` row for a newly
 joined community arrives with its post; the backfill returns a community's
 existing posts; the overlap buffer re-delivers without duplicating.
@@ -180,7 +188,7 @@ that one community, regardless of cursor, once, right after it learns of
 the new membership.
 
 Deferred: the purge job and purge horizon (phase 7), the websocket nudge,
-attachments, `server_seq`, column-level LWW.
+attachments, `server_seq`.
 
 ## Phase 5: Client schema export
 
@@ -212,10 +220,13 @@ Builds
 
 - A profile on the device: the user's id and email from the `auth.user.get`
   request, kept for offline use.
-- One SQLite file, created from the exported migrations, plus `sync_state`
-  and `sync_outbox`.
+- One SQLite file, created from the exported migrations, plus `sync_state`,
+  `sync_outbox` and `sync_events`.
 - Local writes: upsert the row with a client-generated UUIDv7 and
-  `updated_at` from the device clock, and upsert the outbox entry.
+  `updated_at` from the device clock, and upsert the outbox entry, or for
+  a post queue an event.
+- Conflicts: "N changes were not saved on the server," each to reapply
+  or let go.
 - A sync worker: push the outbox, pull with the cursor, apply
   rows, run the reachability prune, request a backfill when a new
   membership for this user arrives. "Full resync required" is added in
@@ -229,7 +240,8 @@ Proves: edits made offline appear on the web after reconnecting; a post
 removed from a community on the web disappears from the device; joining a
 community on the web fills the device with that community's posts;
 rejoining restores them; the same post edited on both sides while offline
-converges to the later edit.
+keeps the edit that reached the server first, and the other reapplied
+reaches both.
 
 Deferred: mobile apps, one device on several deployments, background sync,
 realtime.
@@ -276,5 +288,5 @@ Worth doing, none of it needed to prove the design.
   one login across deployments.
 - **Permissions in the database** replacing the role strings.
 - **Postgres**, when a deployment's write rate demands it. The overlap buffer becomes mandatory then.
-- **`server_seq`, column-level last write wins, edit history.** The design
-  leaves room; nothing requires them.
+- **`server_seq`, more event-sourced resources.** The design leaves room;
+  nothing requires them.

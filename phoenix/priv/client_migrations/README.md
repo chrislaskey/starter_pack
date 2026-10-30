@@ -37,8 +37,9 @@ and an old one both end up current.
 
 ## Tables the client adds itself
 
-Two tables exist only on the client and are not exported, see "Client
-bookkeeping" in `docs/design/offline-sync.md`:
+Three tables exist only on the client and are not exported, see "Client
+bookkeeping" in `docs/design/offline-sync.md` and
+`docs/design/offline-sync-client.md`:
 
 ```sql
 CREATE TABLE sync_state (
@@ -54,6 +55,21 @@ CREATE TABLE sync_outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   PRIMARY KEY (table_name, row_id)
+);
+
+CREATE TABLE sync_events (
+  id TEXT PRIMARY KEY,            -- UUIDv7 from the device
+  table_name TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  type TEXT NOT NULL,             -- 'create' | 'update'
+  base_version INTEGER NOT NULL,
+  base TEXT NOT NULL,             -- JSON
+  changes TEXT NOT NULL,          -- JSON
+  made_at TEXT NOT NULL,
+  status TEXT NOT NULL,           -- 'pending' | 'conflict'
+  conflicts TEXT,                 -- JSON
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT
 );
 ```
 

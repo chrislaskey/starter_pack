@@ -25,6 +25,7 @@ defmodule App.Data.Post do
     belongs_to :author, App.Data.AppUser
     field :body, :string
     field :last_synced_at, :utc_datetime_usec
+    field :version, :integer, default: 1
     field :deleted_at, :utc_datetime_usec
     field :deleted_by_id, Ecto.UUID
 
@@ -47,6 +48,24 @@ defmodule App.Data.Post do
 
   defp put_author(changeset, nil), do: changeset
   defp put_author(changeset, author_id), do: put_change(changeset, :author_id, author_id)
+
+  @doc """
+  The fields an `update` event may change, see `App.Data.Posting.apply_event/2`.
+  """
+  def event_changeset(post, params, options \\ []) do
+    post
+    |> changeset(params, options)
+    |> cast(params, [:deleted_at])
+    |> put_deleted_by(Keyword.get(options, :deleted_by_id))
+  end
+
+  defp put_deleted_by(changeset, user_id) do
+    case fetch_change(changeset, :deleted_at) do
+      {:ok, nil} -> put_change(changeset, :deleted_by_id, nil)
+      {:ok, _at} -> put_change(changeset, :deleted_by_id, user_id)
+      :error -> changeset
+    end
+  end
 
   @doc """
   Deleting a post: a soft delete, with no cascade of its own since reads

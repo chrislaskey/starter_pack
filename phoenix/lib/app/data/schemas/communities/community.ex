@@ -15,6 +15,7 @@ defmodule App.Data.Community do
   schema "app_communities" do
     field :name, :string
     field :last_synced_at, :utc_datetime_usec
+    field :version, :integer, default: 1
     field :deleted_at, :utc_datetime_usec
     field :deleted_by_id, Ecto.UUID
 

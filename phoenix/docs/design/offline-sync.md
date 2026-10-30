@@ -7,8 +7,16 @@ server and one file per server on the device.
 
 Decisions already made that this doc builds on:
 
-- Resources have one clear primary owner, so **last write wins (LWW)** is an
-  acceptable conflict policy.
+- **Conflicts are decided by versions, not clocks.** Every synced row has
+  an MVCC `version` that only the server increments. A client sends back the
+  version its change started from, and a change from an older version is a
+  conflict. No device's clock decides anything. See "Leak 2" and
+  "Event-sourced resources."
+- **Most resources are plain MVCC; a few important or collaborative ones
+  are event-sourced.** Posts are the first: devices send their edits as
+  events, the server merges them field by field, and a field both sides
+  changed keeps the server's value while the device's value comes back as
+  a conflict the user can reapply or let go.
 - **Soft deletes** everywhere, with `deleted_at` and `deleted_by_id`, and a
   separate job that purges rows deleted more than **90 days** ago. A client
   away longer than that does a full resync.
@@ -53,7 +61,8 @@ definition serves both and the sync code is the same shape everywhere.
 
 | Column | Who sets it | Meaning |
 | --- | --- | --- |
-| `updated_at` | the client that made the edit | The time the edit was made, from that client's clock, guarded by the server. Decides last write wins. |
+| `version` | the server only | The MVCC version, 1 for a new row, incremented by the server on every write. Decides conflicts. A client copies it and sends it back as the version its change started from. A row created on a device and not yet pushed has 0. |
+| `updated_at` | the client that made the edit | The time the edit was made, from that client's clock, guarded by the server. Shown to people; decides nothing. |
 | `last_synced_at` | the server only | The time the server last wrote the row, from the server's clock. The pull cursor. |
 | `deleted_at` | the client that deleted | Soft delete. Same clock and guard as `updated_at`. |
 | `deleted_by_id` | the client that deleted | Who deleted it. |
@@ -127,55 +136,119 @@ Recommendation: `last_synced_at` plus buffer as the cursor, ordered by
 Postgres and the buffer proves awkward. The rest of this doc says
 `last_synced_at` for the cursor; `server_seq` substitutes everywhere.
 
-### Leak 2: whose clock decides LWW
+### Leak 2: whose clock decides a conflict
 
-The cursor column answers "what changed since my last pull." It is assigned
-by the server, so it is consistent. It cannot also answer "which of two edits
-to the same row wins," because it only records when each edit arrived, not
-when it was made. Those are two columns with two jobs: `last_synced_at` for
-the cursor and `updated_at` for LWW. There are three ways to fill `updated_at`.
+The baseline decided conflicts by last write wins on `updated_at`, the
+time a device said it made the edit. Device clocks drift and can be set
+on purpose, and an edit made offline on Monday and synced on Friday
+carries Monday no matter what happened on the server in between. A
+server-side bound stops a clock reading 2031 from winning forever, but a
+slow clock still loses edits silently, and nothing tells the user. Hybrid
+logical clocks fix the ordering between always-connected servers, but a
+device's offline edit still cannot have seen the edits it missed, and a
+device with a fast clock can push every later write forward.
 
-In every option the winner rule is the same: when two versions of a row meet,
-the one with the later `updated_at` wins. The options differ only in what
-goes into `updated_at`.
+So conflicts are decided by **versions**, MVCC, and no clock is trusted:
 
-- **The time the server received the row.** The last push to reach the
-  server wins. One column serves both jobs, which is simplest. Worked
-  example: a phone edits a post offline on Monday, a laptop edits the same
-  post online on Wednesday, the phone syncs on Friday. The phone's row is
-  received on Friday, Friday is later than Wednesday, so the Monday edit
-  overwrites the Wednesday edit.
-- **The time the client made the edit.** The client sends the time from its
-  own clock when the edit happened. Same example: the phone's row carries
-  Monday, the laptop's row carries Wednesday, Wednesday is later, so the
-  Wednesday edit stays and the phone receives it back on Friday. This is the
-  behavior a person with two devices expects.
+- Every synced row carries a `version`. The server sets 1 on insert and
+  increments it on every write, inside the write transaction. In Phoenix
+  `App.Data.Context` does this for every update of a stored row with
+  `Ecto.Changeset.optimistic_lock/3`, so a server-side write from a stale
+  copy, such as a form loaded before someone else saved, fails with a
+  `:version` error instead of overwriting.
+- A client never changes a version. It copies the server's with the row,
+  and a change it pushes carries the version it started from.
+- **Plain resources.** A pushed row applies when its `version` is still
+  the server's. Otherwise someone else wrote the row first: the push is
+  refused with reason `conflict` and the server's row, which the client
+  applies. A retried push of a row that already applied gets the same
+  answer, the server's row, which is the client's own edit.
+- **Event-sourced resources** keep every change, and merge field by field,
+  below.
 
-  Device clocks are unreliable, so the server guards the value before
-  storing it. If the client's time is later than the server's current time,
-  the server stores its own current time instead. If the client's time is
-  absurdly old, the server rejects the row. This guard does not pick the
-  winner; it only stops a device whose clock reads 2031 from winning every
-  conflict forever. A device whose clock runs slow can still lose to an
-  edit that was really made earlier, so this is a best effort, not a
-  guarantee.
-- **Hybrid logical clock (HLC).** A 64-bit value combining wall time and a
-  counter, advanced on every local write and on every message received. It
-  orders edits causally across devices, survives bad clocks, and is one
-  integer column. This is what the CRDT-based engines use internally.
+`updated_at` stays, guarded by the server as before, for showing people
+when something was edited. It decides nothing.
 
-Recommendation: the time the client made the edit, guarded by the server as
-above. With a clear primary owner the common conflict is the same person on
-two devices, and they expect their latest edit to stick. If arrival order is
-acceptable, drop `updated_at` from the protocol and use the server receive
-time for both jobs. Either way keep the column a plain timestamp so switching
-to an HLC later is a column change, not a redesign.
+The pull cursor is a separate question, Leak 1, and stays
+`last_synced_at`. `server_seq` is still the way to drop timestamps there
+too.
 
-LWW is row-level in the baseline. Two devices editing different fields of the
-same row means one edit is lost. Column-level LWW stores a per-field clock,
-usually as a JSON map, and merges field by field. It is a meaningful upgrade
-for forms with many independent fields and not worth it for a post with a
-title and a body. Decide per resource type, default to row-level.
+### Event-sourced resources
+
+For resources where losing an edit matters or several people edit the same
+row, posts first, the server keeps an append-only log of changes,
+`app_post_events`, next to the current row, and devices send their edits
+as events rather than rows. The row is still what pulls send and what
+every read uses; the log is its history and the record of what was not
+applied.
+
+An event is one change a person made, sent once and answered once:
+
+```json
+{
+  "id": "0192f7c0-...",             // generated by the device, the idempotency key
+  "table": "app_posts",
+  "row_id": "0192f7a1-...",
+  "type": "update",                 // or "create", with base_version 0
+  "base_version": 3,                // the row's version the change started from
+  "base": {"body": "old"},          // the changed fields' values as the device saw them
+  "changes": {"body": "new"}        // the values the person chose
+}
+```
+
+One event per save, holding every field the save changed, not one per
+field. The server applies it, `App.Data.Posting.apply_event/2` merged by
+`App.Data.Sync.Merge`:
+
+1. **Already recorded** under this id: the same answer again, nothing
+   applied twice.
+2. **At the server's version**: every change applies.
+3. **Behind it**, field by field: a field whose server value is still
+   the device's `base` value applies, since nobody else changed it. A
+   field the server already holds the device's value for is skipped. Any
+   other field was changed by someone else after the device read it. **The
+   change that reached the server first stays**, and the device's value is
+   a conflict.
+4. The fields that applied are written in one update, which increments
+   the version once, and the event is recorded with what applied, the
+   conflicts, and the version after it. An event that applied nothing
+   is still recorded.
+
+Each event is answered with its status, `applied`, `conflict` or
+`rejected`, the version after it, the conflicts as
+`{"body": {"yours": ..., "server": ...}}`, and the row as it now stands.
+
+A worked example. A post at version 3 has a body and a `deleted_at`. The
+phone, offline, edits the body. The laptop, online, also edits the body
+and the server is at version 4. The phone syncs:
+
+- An event changing only `deleted_at`, deleting the post, applies, since
+  `deleted_at` is still the phone's base value. Version 5, nothing lost.
+- An event changing the body conflicts: the laptop's body stays, and the
+  answer carries the phone's body as `yours`. The phone keeps the
+  conflict and shows "1 change was not saved on the server". The person
+  can **reapply** it, which is a new event from version 4 with the
+  laptop's body as its base, so it applies unless someone changed the
+  body yet again, or **let it go**.
+
+Why `base` values and not only the version: a device that edits the same
+post twice offline sends two events from the same version. The second
+must not conflict with the first. Comparing against `base`, which for the
+second event is the first event's value, handles this without the server
+knowing which device sent what. The cost, a field changed away and back
+again counts as unchanged, is the right answer for a person anyway.
+
+Every write to a post, from the web app too, records an event in the same
+transaction as the row. `app_post_events` is server-only and never
+synced; a device keeps its own events until the server answers them, and
+the conflicted ones until the person resolves them, see
+`offline-sync-client.md`. Events go with their post when the purge
+hard-deletes it.
+
+Making another resource event-sourced is: an events table like
+`app_post_events`, an `apply_event/2` in its flow with the fields an event
+may change, and an entry in `@event_sourced` in `App.Data.Sync`. A plain
+row pushed for an event-sourced table is refused with `events_only`.
 
 ### Leak 3: soft deletes and the purge horizon
 
@@ -282,9 +355,10 @@ The baseline sends dirty rows. Details that matter:
   count and the server's reason, which is also what a pending-changes count
   or a debugging screen reads from.
 
-  This is not the append-only change log in alternative B. It stores no
-  payload and no history, because with last write wins only the row's
-  current state matters. One entry per row, three small columns.
+  This is for plain resources, where only the row's current state matters.
+  It stores no payload and no history. One entry per row, three small
+  columns. Event-sourced resources queue events instead, see
+  `offline-sync-client.md`.
 - **Dependency order.** Parents before children: communities before posts,
   posts before `app_posts_communities` rows and comments. Either push in table order or have the
   server apply the whole batch in one transaction with deferred foreign key
@@ -295,10 +369,10 @@ The baseline sends dirty rows. Details that matter:
   to a community it is not in, or edit a post it does not own. Rejected rows
   come back in the response with the server's authoritative version, and the
   client overwrites its local copy. This means **permission rows are
-  server-wins, not LWW**: `app_posts_communities` rows, memberships, and roles are never accepted
-  on timestamp alone.
-- **Idempotency.** Upsert by primary key. A retried push after a network
-  failure is harmless.
+  server-wins**: `app_posts_communities` rows, memberships, and roles are never accepted
+  on a matching version alone.
+- **Idempotency.** A retried row gets the server's row back, its own
+  edit; a retried event gets its recorded answer. Neither applies twice.
 - **Attachments.** Binary data does not go through row sync. The client
   uploads the file to object storage first, gets a key, and the row carries
   the key. A row referencing an unuploaded file is not pushed.
@@ -310,12 +384,15 @@ In the file on the device:
 ```sql
 sync_state   (last_pulled_at, last_pulled_id, server_purge_horizon)
 sync_outbox  (table_name, row_id, queued_at, attempts, last_error)
+sync_events  (id, table_name, row_id, type, base_version, base, changes,
+              made_at, status, conflicts, attempts, last_error)
 ```
 
 `last_pulled_at` and `last_pulled_id` together are the cursor: the
 `last_synced_at` and `id` of the last row received. `sync_outbox` is the set
-of rows with local changes not yet accepted by the server. Every synced
-table carries the same four columns on both sides, listed under "Columns on
+of rows with local changes not yet accepted by the server, and
+`sync_events` the changes to event-sourced rows, pending or in conflict.
+Every synced table carries the same sync columns on both sides, listed under "Columns on
 every synced table" above, and nothing device-only. The profile on the
 device, the user's id and email, is a cached copy with no sync cursor.
 
@@ -346,8 +423,8 @@ Three rules keep the export clean:
   migrations that touch marked tables. Server-only tables such as
   `users`, `users_tokens`, `app_purges` and `sync_counter` never reach a
   device.
-- **Client-only tables are hand-written on the client.** `sync_state` and
-  `sync_outbox` are not Ecto schemas. Each client platform owns one small
+- **Client-only tables are hand-written on the client.** `sync_state`,
+  `sync_outbox` and `sync_events` are not Ecto schemas. Each client platform owns one small
   migration for them.
 - **Column types are whatever the SQLite adapter emits.** Binary ids are
   `TEXT`, datetimes are `TEXT`, booleans are `INTEGER`. The clients do not
@@ -360,8 +437,9 @@ Ecto already provides. Rejected.
 
 ## Datetime format
 
-Last write wins compares `updated_at` values written by different platforms,
-so the format has to be identical everywhere. Phoenix leads: the SQLite
+Datetimes written by different platforms are compared, by the pull cursor
+and by the field merge of `deleted_at`, so the format has to be identical
+everywhere. Phoenix leads: the SQLite
 adapter writes UTC datetimes as ISO 8601 text, and that text is the format.
 
 ```
@@ -500,7 +578,9 @@ Alternative A. The baseline design with four refinements:
    transaction, pulled with an overlap buffer and ordered by
    `(last_synced_at, id)`. Clients copy it from the server and never write
    it. A client-side outbox of row pointers tracks what needs pushing.
-2. LWW on a client-supplied `updated_at`, bounded by the server's clock.
+2. MVCC versions decide conflicts, never a clock. Plain resources refuse a
+   row from an older version; event-sourced resources, posts first, merge
+   field by field and return the rest as conflicts for the person.
    Permission rows are server-wins.
 3. Inline soft deletes with partial unique indexes, a purge job, and a
    recorded purge horizon that forces a full resync for stale clients.
@@ -519,7 +599,8 @@ express the visibility rule (D).
 Still open. Answered ones have moved to the decisions at the top.
 
 - **Which resource types have many independently edited fields?** Those are
-  candidates for column-level LWW. None expected at the start.
+  candidates for event sourcing, which merges field by field. Posts are
+  the first.
 - **Is undo or edit history a product feature?** If yes, alternative B earns
   its cost. Not at the start.
 - **How big is a user's visible subset of a public deployment?** Determines

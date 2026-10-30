@@ -1,6 +1,6 @@
 //! The device's SQLite file: the server's client migrations,
 //! embedded at build time from `phoenix/priv/client_migrations` by
-//! `build.rs`, plus the two client-only tables its README describes.
+//! `build.rs`, plus the client-only tables its README describes.
 
 use std::fs;
 use std::path::Path;
@@ -32,6 +32,21 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
 CREATE TABLE IF NOT EXISTS sync_backfills (
   community_id TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS sync_events (
+  id TEXT PRIMARY KEY,
+  table_name TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  base_version INTEGER NOT NULL,
+  base TEXT NOT NULL,
+  changes TEXT NOT NULL,
+  made_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  conflicts TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS sync_events_row ON sync_events (table_name, row_id);
 "#;
 
 /// Opens the file, creating and migrating it when needed.
@@ -113,6 +128,7 @@ mod tests {
             "app_posts_communities",
             "sync_state",
             "sync_outbox",
+            "sync_events",
         ] {
             assert!(
                 tables.contains(&table.to_string()),

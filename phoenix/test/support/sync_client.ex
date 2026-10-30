@@ -7,8 +7,14 @@ defmodule App.SyncClient do
 
       phone = SyncClient.new(scope)
       phone = SyncClient.pull(phone)
-      phone = SyncClient.write(phone, "app_posts", %{"body" => "hello", "author_id" => user.id})
+      {phone, post_id} = SyncClient.create(phone, "app_posts", %{"body" => "hello"})
+      phone = SyncClient.change(phone, "app_posts", post_id, %{"body" => "edited"})
+      phone = SyncClient.write(phone, "app_users_communities", %{...})
       {phone, response} = SyncClient.push(phone)
+
+  Posts change through `create/3` and `change/4`, which queue events;
+  other rows through `write/4` and `delete/4`. `conflicts` holds the
+  events the server answered with conflicts, until `resolve/3`.
 
   `clock_offset` shifts the device's clock, in seconds, for the edits it
   makes.
@@ -16,7 +22,14 @@ defmodule App.SyncClient do
 
   alias App.Data.Sync
 
-  defstruct scope: nil, cursor: nil, rows: %{}, outbox: [], clock_offset: 0, last_pull: []
+  defstruct scope: nil,
+            cursor: nil,
+            rows: %{},
+            outbox: [],
+            events: [],
+            conflicts: [],
+            clock_offset: 0,
+            last_pull: []
 
   def new(scope, opts \\ []) do
     %__MODULE__{scope: scope, clock_offset: Keyword.get(opts, :clock_offset, 0)}
@@ -52,7 +65,7 @@ defmodule App.SyncClient do
       # The server purged tombstones this device never saw: start over
       pull_pages(%{client | rows: %{}, cursor: nil}, nil, limit)
     else
-      client = Enum.reduce(response["rows"], client, &apply_row(&2, &1))
+      client = Enum.reduce(response["rows"], client, &apply_server_row(&2, &1))
 
       case response["next"] do
         nil -> %{client | cursor: response["cursor"]}
@@ -73,7 +86,7 @@ defmodule App.SyncClient do
     {:ok, response} = Sync.backfill(client.scope, community_id, params)
     response = wire(response)
     client = %{client | last_pull: client.last_pull ++ [response]}
-    client = Enum.reduce(response["rows"], client, &apply_row(&2, &1))
+    client = Enum.reduce(response["rows"], client, &apply_server_row(&2, &1))
 
     case response["next"] do
       nil -> client
@@ -82,22 +95,21 @@ defmodule App.SyncClient do
   end
 
   @doc """
-  A local write: upserts the row with a client-generated id and
-  `updated_at` from the device clock, and queues it for the next push.
-  The columns not given keep the client's current values, or nil.
+  A local write of a row that is not event-sourced: upserts the row with
+  a client-generated id and `updated_at` from the device clock, and
+  queues it for the next push. The columns not given keep the client's
+  current values, or nil. A new row has version 0, not yet on the server;
+  the client never changes a version itself.
   """
   def write(%__MODULE__{} = client, table, columns, opts \\ []) do
     id = columns["id"] || Ecto.UUID.generate(version: 7)
     now = device_time(client, Keyword.get(opts, :at))
-    current = row(client, table, id) || %{"id" => id, "inserted_at" => now}
 
     row =
-      current
+      client
+      |> local_row(table, id, now)
       |> Map.merge(columns)
       |> Map.put("updated_at", now)
-      |> Map.put_new("deleted_at", nil)
-      |> Map.put_new("deleted_by_id", nil)
-      |> Map.put_new("last_synced_at", nil)
 
     client
     |> put_row(table, row)
@@ -113,32 +125,141 @@ defmodule App.SyncClient do
   end
 
   @doc """
-  Pushes the outbox and applies the response: an accepted row gets its
-  `last_synced_at`, a rejected row is replaced by the server's version,
-  or dropped when the server has none. Returns the client and the
-  response.
+  A new row of an event-sourced table, by the user: written locally at
+  version 0 and queued as a `create` event. Returns the client and the
+  row's id.
+  """
+  def create(%__MODULE__{scope: scope} = client, table, changes, opts \\ []) do
+    id = Ecto.UUID.generate(version: 7)
+    now = device_time(client, Keyword.get(opts, :at))
+
+    row =
+      client
+      |> local_row(table, id, now)
+      |> Map.merge(changes)
+      |> Map.put("author_id", scope.user.id)
+
+    event = new_event(table, id, "create", 0, %{}, changes)
+    {client |> put_row(table, row) |> queue_event(event), id}
+  end
+
+  @doc """
+  A change to a row of an event-sourced table: the row changes at once,
+  and the event records the version and the values the change started
+  from, as `base`, and the new values.
+  """
+  def change(%__MODULE__{} = client, table, id, changes, opts \\ []) do
+    now = device_time(client, Keyword.get(opts, :at))
+    current = row(client, table, id)
+    base = Map.take(current, Map.keys(changes))
+    event = new_event(table, id, "update", current["version"], base, changes)
+
+    client
+    |> put_row(table, current |> Map.merge(changes) |> Map.put("updated_at", now))
+    |> queue_event(event)
+  end
+
+  @doc """
+  Resolves a conflicted event: `:ignore` lets the client's values go,
+  `:reapply` queues them again as a new event, starting from the row as
+  the server has it now.
+  """
+  def resolve(%__MODULE__{} = client, event_id, how) when how in [:ignore, :reapply] do
+    {[conflict], rest} = Enum.split_with(client.conflicts, &(&1["id"] == event_id))
+    client = %{client | conflicts: rest}
+
+    case how do
+      :ignore ->
+        client
+
+      :reapply ->
+        yours = Map.new(conflict["conflicts"], fn {field, %{"yours" => value}} -> {field, value} end)
+        change(client, conflict["table"], conflict["row_id"], yours)
+    end
+  end
+
+  @doc """
+  Pushes the outbox and the events, and applies the response. An
+  accepted row gets its `last_synced_at` and `version`; a rejected row is
+  replaced by the server's version, or dropped when the server has none.
+  An answered event leaves the queue, into `conflicts` when it has any,
+  and the server's row replaces the client's once no event for it is
+  still queued. Returns the client and the response.
   """
   def push(%__MODULE__{} = client) do
     rows = for {table, id} <- client.outbox, do: %{"table" => table, "row" => row(client, table, id)}
-    response = wire(Sync.push(client.scope, rows))
+    events = Enum.map(client.events, &Map.delete(&1, "conflicts"))
+    response = wire(Sync.push(client.scope, rows, events))
+    client = %{client | outbox: []}
 
     client =
-      Enum.reduce(response["accepted"], client, fn %{"table" => table, "id" => id, "last_synced_at" => at},
-                                                   client ->
-        put_row(client, table, Map.put(row(client, table, id), "last_synced_at", at))
+      Enum.reduce(response["accepted"], client, fn %{"table" => table, "id" => id} = accepted, client ->
+        row = Map.merge(row(client, table, id), Map.take(accepted, ["last_synced_at", "version"]))
+        put_row(client, table, row)
       end)
 
     client =
       Enum.reduce(response["rejected"], client, fn %{"table" => table, "id" => id, "server" => server},
                                                    client ->
         client = drop_row(client, table, id)
-        if server, do: apply_row(client, server), else: client
+        if server, do: apply_server_row(client, server), else: client
       end)
 
-    {%{client | outbox: []}, response}
+    client =
+      Enum.reduce(response["events"], client, fn answer, client ->
+        {[event], rest} = Enum.split_with(client.events, &(&1["id"] == answer["id"]))
+        client = %{client | events: rest}
+
+        case answer["status"] do
+          "conflict" ->
+            %{client | conflicts: client.conflicts ++ [Map.put(event, "conflicts", answer["conflicts"])]}
+
+          _ ->
+            client
+        end
+      end)
+
+    client =
+      Enum.reduce(response["events"], client, fn
+        %{"server" => nil, "table" => table, "row_id" => id}, client -> drop_row(client, table, id)
+        %{"server" => server}, client -> apply_server_row(client, server)
+      end)
+
+    {client, response}
   end
 
-  defp apply_row(client, %{"table" => table, "row" => row}), do: put_row(client, table, row)
+  # A row from the server never replaces one with a change still queued
+  defp apply_server_row(client, %{"table" => table, "row" => %{"id" => id} = row}) do
+    if {table, id} in client.outbox or Enum.any?(client.events, &(&1["row_id"] == id)),
+      do: client,
+      else: put_row(client, table, row)
+  end
+
+  defp local_row(client, table, id, now) do
+    row(client, table, id) ||
+      %{
+        "id" => id,
+        "version" => 0,
+        "inserted_at" => now,
+        "deleted_at" => nil,
+        "deleted_by_id" => nil,
+        "last_synced_at" => nil
+      }
+  end
+
+  defp new_event(table, row_id, type, base_version, base, changes) do
+    %{
+      "id" => Ecto.UUID.generate(version: 7),
+      "table" => table,
+      "row_id" => row_id,
+      "type" => type,
+      "base_version" => base_version,
+      "base" => base,
+      "changes" => changes
+    }
+  end
+
+  defp queue_event(client, event), do: %{client | events: client.events ++ [event]}
 
   defp put_row(client, table, %{"id" => id} = row) do
     %{client | rows: Map.update(client.rows, table, %{id => row}, &Map.put(&1, id, row))}

@@ -21,15 +21,14 @@ defmodule App.Data.Sync do
 
   ## Push
 
-  One transaction per batch, rows applied parents first. Every datetime
-  is checked for the exact format, `updated_at` and `deleted_at` are
-  bounded by the server clock, and every row is authorized against the
-  scope. Posts and communities are last write wins on `updated_at`.
-  Memberships and `posts_communities` rows are server-wins: they go
-  through `App.Data.Memberships` and `App.Data.Posting`, and the server's
-  version comes back. The response lists `accepted` rows with their new
-  `last_synced_at`, and `rejected` rows with a reason and `server`, the
-  server's version of the row or nil, which the client applies.
+  One transaction per batch of `rows` and `events`, parents first. Every
+  datetime is checked for the exact format, client datetimes are bounded
+  by the server clock, and everything is authorized against the scope.
+  Rows apply when their `version` is still the server's. Memberships and
+  `posts_communities` rows are server-wins. Posts change only through
+  events, merged field by field by `App.Data.Posting.apply_event/2`.
+  The response lists `accepted` and `rejected` rows, and an answer per
+  event. See `docs/design/offline-sync.md`.
 
   ## Backfill
 
@@ -230,26 +229,46 @@ defmodule App.Data.Sync do
 
   ## Push
 
-  def push(%Scope{} = scope, rows) when is_list(rows) do
+  def push(%Scope{} = scope, rows, events \\ []) when is_list(rows) and is_list(events) do
     {:ok, results} =
-      App.Repo.transact(fn -> {:ok, Enum.map(sort_parents_first(rows), &apply_row(scope, &1))} end)
+      App.Repo.transact(fn ->
+        {:ok,
+         Enum.flat_map(batches(rows, events), fn
+           {:row, row} -> [apply_row(scope, row)]
+           {:event, event} -> [apply_event(scope, event)]
+         end)}
+      end)
 
     %{
       "accepted" =>
         for(
-          {:accepted, table, id, at} <- results,
-          do: %{"table" => table, "id" => id, "last_synced_at" => at}
+          {:accepted, table, id, row} <- results,
+          do: %{
+            "table" => table,
+            "id" => id,
+            "last_synced_at" => row.last_synced_at,
+            "version" => row.version
+          }
         ),
       "rejected" =>
         for {:rejected, table, id, reason, server} <- results do
           %{"table" => table, "id" => id, "reason" => reason, "server" => server}
-        end
+        end,
+      "events" => for({:event, answer} <- results, do: answer)
     }
   end
 
-  defp sort_parents_first(rows) do
+  defp batches(rows, events) do
     order = @tables |> Enum.map(&elem(&1, 0)) |> Enum.with_index() |> Map.new()
-    Enum.sort_by(rows, &Map.get(order, table_of(&1), map_size(order)))
+    rank = fn table, kind -> {Map.get(order, table, map_size(order)), kind} end
+
+    Enum.sort_by(
+      Enum.map(events, &{:event, &1}) ++ Enum.map(rows, &{:row, &1}),
+      fn
+        {:event, event} -> rank.(table_of(event), 0)
+        {:row, row} -> rank.(table_of(row), 1)
+      end
+    )
   end
 
   defp apply_row(scope, %{"table" => table, "row" => %{"id" => id} = row}) do
@@ -332,14 +351,8 @@ defmodule App.Data.Sync do
     end
   end
 
-  defp apply_row(%Scope{user: user} = scope, "app_posts", context, incoming) do
-    existing = context.get(incoming.id, include_deleted: true)
-
-    if incoming.author_id == user.id and (existing == nil or existing.author_id == user.id) do
-      write(scope, "app_posts", Post, existing, incoming)
-    else
-      {:rejected, "app_posts", incoming.id, "not_author", existing && encode({"app_posts", existing})}
-    end
+  defp apply_row(_scope, "app_posts", _context, incoming) do
+    {:rejected, "app_posts", incoming.id, "events_only", nil}
   end
 
   # Server-wins: the client's row is an intent, applied through the flow,
@@ -400,23 +413,19 @@ defmodule App.Data.Sync do
     end
   end
 
-  # Last write wins on `updated_at`, bounded by the server clock, written
-  # with the server's `last_synced_at`. The same `updated_at` again is a
-  # retried push, accepted as it stands.
   defp write(%Scope{user: user}, table, schema, existing, incoming) do
     now = DateTime.utc_now()
     incoming = bound(incoming, now, user)
-    order = existing && DateTime.compare(incoming.updated_at, existing.updated_at)
 
     cond do
-      order == :lt ->
-        {:rejected, table, incoming.id, "stale", encode({table, existing})}
+      existing == nil ->
+        write_row(table, schema, existing, %{incoming | version: 1}, now)
 
-      order == :eq ->
-        {:accepted, table, incoming.id, existing.last_synced_at}
+      incoming.version == existing.version ->
+        write_row(table, schema, existing, %{incoming | version: existing.version + 1}, now)
 
       true ->
-        write_row(table, schema, existing, incoming, now)
+        {:rejected, table, incoming.id, "conflict", encode({table, existing})}
     end
   end
 
@@ -434,7 +443,7 @@ defmodule App.Data.Sync do
       conflict_target: [:id]
     )
 
-    {:accepted, table, incoming.id, now}
+    {:accepted, table, incoming.id, %{last_synced_at: now, version: incoming.version}}
   end
 
   # No datetime from a client is later than now, and a client deletes
@@ -449,6 +458,97 @@ defmodule App.Data.Sync do
 
   defp earliest(nil, _now), do: nil
   defp earliest(datetime, now), do: if(DateTime.compare(datetime, now) == :gt, do: now, else: datetime)
+
+  ## Events
+
+  @event_sourced %{"app_posts" => {Post, Posting}}
+
+  defp apply_event(scope, event) do
+    answer = %{
+      "id" => string_of(event, "id"),
+      "table" => table_of(event),
+      "row_id" => string_of(event, "row_id")
+    }
+
+    {:event, Map.merge(answer, event_result(scope, table_of(event), event))}
+  end
+
+  defp event_result(scope, table, event) do
+    with {:ok, schema, flow} <- event_flow(table),
+         {:ok, checked} <- check_event(schema, event) do
+      case flow.apply_event(scope, checked) do
+        {:ok, recorded, row} ->
+          %{
+            "status" => if(recorded.conflicts == %{}, do: "applied", else: "conflict"),
+            "version" => recorded.version,
+            "conflicts" => recorded.conflicts,
+            "server" => encode({table, row})
+          }
+
+        {:error, reason, row} ->
+          event_rejected(reason, row && encode({table, row}))
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          event_rejected("invalid: #{inspect(changeset.errors)}", nil)
+      end
+    else
+      {:error, reason} -> event_rejected(reason, nil)
+    end
+  end
+
+  defp event_rejected(reason, server), do: %{"status" => "rejected", "reason" => reason, "server" => server}
+
+  defp event_flow(table) do
+    case Map.fetch(@event_sourced, table) do
+      {:ok, {schema, flow}} -> {:ok, schema, flow}
+      :error -> {:error, "not_event_sourced"}
+    end
+  end
+
+  # A deletion time is bounded like a row's.
+  defp check_event(
+         schema,
+         %{"id" => id, "row_id" => row_id, "type" => type, "base_version" => base_version} = event
+       )
+       when type in ["create", "update"] and is_integer(base_version) and base_version >= 0 do
+    base = Map.get(event, "base") || %{}
+    changes = Map.get(event, "changes")
+
+    with {:ok, id} <- Ecto.UUID.cast(id),
+         {:ok, row_id} <- Ecto.UUID.cast(row_id),
+         true <- is_map(base) and is_map(changes) and map_size(changes) > 0,
+         :ok <- check_datetimes(schema, base),
+         :ok <- check_datetimes(schema, changes) do
+      {:ok,
+       %{
+         id: id,
+         row_id: row_id,
+         type: String.to_existing_atom(type),
+         base_version: base_version,
+         base: base,
+         changes: bound_changes(changes)
+       }}
+    else
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _ -> {:error, "malformed"}
+    end
+  end
+
+  defp check_event(_schema, _event), do: {:error, "malformed"}
+
+  defp bound_changes(%{"deleted_at" => at} = changes) when is_binary(at) do
+    now = DateTime.utc_now()
+    Map.put(changes, "deleted_at", at |> parse_datetime!() |> earliest(now) |> DateTime.to_iso8601())
+  end
+
+  defp bound_changes(changes), do: changes
+
+  defp string_of(map, key) do
+    case map do
+      %{^key => value} when is_binary(value) -> value
+      _ -> nil
+    end
+  end
 
   ## Rows on the wire
 

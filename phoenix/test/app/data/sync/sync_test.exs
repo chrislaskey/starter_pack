@@ -6,6 +6,7 @@ defmodule App.Data.SyncTest do
   import App.Data.UsersFixtures
 
   alias App.Data.Memberships
+  alias App.Data.PostEvents
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.Sync
@@ -20,18 +21,10 @@ defmodule App.Data.SyncTest do
     %{author: author, other: other, community: community}
   end
 
-  # A post written on a device, in the community: the post row and its
-  # posts_communities row, queued together.
+  # A post written on a device, in the community: the post's create event
+  # and its posts_communities row, queued together.
   defp write_post(client, body, community_id, opts \\ []) do
-    post_id = Ecto.UUID.generate(version: 7)
-
-    client =
-      SyncClient.write(
-        client,
-        "app_posts",
-        %{"id" => post_id, "body" => body, "author_id" => client.scope.user.id},
-        opts
-      )
+    {client, post_id} = SyncClient.create(client, "app_posts", %{"body" => body}, opts)
 
     # The membership as the device knows it, which may be stale
     user_id = client.scope.user.id
@@ -54,6 +47,19 @@ defmodule App.Data.SyncTest do
       )
 
     {client, post_id}
+  end
+
+  # An edit made on the server, as the web app or another device would,
+  # from the version the server has
+  defp edit_on_server(scope, post, changes) do
+    Posting.apply_event(scope, %{
+      id: Ecto.UUID.generate(version: 7),
+      row_id: post.id,
+      type: :update,
+      base_version: Posts.get(post.id, include_deleted: true).version,
+      base: %{},
+      changes: changes
+    })
   end
 
   test "every synced schema is marked and listed, parents first" do
@@ -147,47 +153,144 @@ defmodule App.Data.SyncTest do
   end
 
   describe "push/2" do
-    test "the Monday-Wednesday-Friday conflict resolves to Wednesday", %{author: author, community: community} do
-      sunday = DateTime.add(DateTime.utc_now(), -6, :day)
-      monday = DateTime.add(DateTime.utc_now(), -5, :day)
-      wednesday = DateTime.add(DateTime.utc_now(), -3, :day)
-
-      {phone, post_id} = write_post(SyncClient.new(author), "draft", community.id, at: sunday)
+    test "a post is created by an event, and an edit from the version the server has applies",
+         %{author: author, community: community} do
+      {phone, post_id} = write_post(SyncClient.new(author), "draft", community.id)
 
       {phone,
        %{
-         "accepted" => [%{"table" => "app_posts"}],
+         "events" => [%{"row_id" => ^post_id, "status" => "applied", "version" => 1}],
          "rejected" => [%{"table" => "app_posts_communities", "reason" => "server_wins"}]
-       }} =
-        SyncClient.push(phone)
+       }} = SyncClient.push(phone)
 
-      laptop = SyncClient.pull(SyncClient.new(author))
-      assert SyncClient.row(laptop, "app_posts", post_id)["body"] == "draft"
+      assert SyncClient.row(phone, "app_posts", post_id)["version"] == 1
 
-      laptop = SyncClient.write(laptop, "app_posts", %{"id" => post_id, "body" => "wednesday"}, at: wednesday)
-      {_laptop, %{"accepted" => [%{"id" => ^post_id}]}} = SyncClient.push(laptop)
+      phone = SyncClient.change(phone, "app_posts", post_id, %{"body" => "edited"})
+      {phone, %{"events" => [%{"status" => "applied", "version" => 2}]}} = SyncClient.push(phone)
 
-      phone = SyncClient.write(phone, "app_posts", %{"id" => post_id, "body" => "monday"}, at: monday)
+      assert Posts.get(post_id).body == "edited"
+      assert SyncClient.row(phone, "app_posts", post_id)["version"] == 2
 
-      {phone, %{"rejected" => [%{"id" => ^post_id, "reason" => "stale", "server" => server}]}} =
-        SyncClient.push(phone)
-
-      assert server["row"]["body"] == "wednesday"
-      assert SyncClient.row(phone, "app_posts", post_id)["body"] == "wednesday"
-      assert Posts.get(post_id).body == "wednesday"
+      assert [%{type: :create, base_version: 0, version: 1}, %{type: :update, base_version: 1, version: 2}] =
+               PostEvents.list(filters: [post_id: post_id])
     end
 
-    test "a future-dated updated_at is bounded to server time", %{author: author, community: community} do
-      phone = SyncClient.new(author, clock_offset: 24 * 60 * 60)
-      {phone, post_id} = write_post(phone, "from the future", community.id)
-      before = DateTime.utc_now()
+    test "the same field edited on two devices keeps the edit that reached the server first, and the other becomes a conflict",
+         %{author: author, community: community} do
+      post = post_fixture(author, [community.id], %{body: "draft"})
+      phone = SyncClient.pull(SyncClient.new(author))
+      laptop = SyncClient.pull(SyncClient.new(author))
 
-      {_phone, %{"accepted" => [%{"id" => ^post_id, "last_synced_at" => at}]}} = SyncClient.push(phone)
+      # The phone is offline all along; the laptop edits and syncs first
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "from the phone"})
+      laptop = SyncClient.change(laptop, "app_posts", post.id, %{"body" => "from the laptop"})
+      {_laptop, %{"events" => [%{"status" => "applied", "version" => 2}]}} = SyncClient.push(laptop)
 
-      post = Posts.get(post_id)
-      assert DateTime.compare(post.updated_at, DateTime.utc_now()) != :gt
-      assert DateTime.compare(post.updated_at, before) != :lt
-      assert {:ok, _, 0} = DateTime.from_iso8601(at)
+      {phone, %{"events" => [answer]}} = SyncClient.push(phone)
+
+      assert %{
+               "status" => "conflict",
+               "version" => 2,
+               "conflicts" => %{"body" => %{"yours" => "from the phone", "server" => "from the laptop"}}
+             } = answer
+
+      assert Posts.get(post.id).body == "from the laptop"
+      assert SyncClient.row(phone, "app_posts", post.id)["body"] == "from the laptop"
+      assert [%{"conflicts" => %{"body" => _}}] = phone.conflicts
+
+      # The rejected change is in the post's history with nothing applied
+      assert %{changes: changes, conflicts: %{"body" => _}, version: 2} =
+               PostEvents.get(answer["id"])
+
+      assert changes == %{}
+    end
+
+    test "a conflict reapplied from the server's version wins, and one ignored changes nothing",
+         %{author: author, community: community} do
+      post = post_fixture(author, [community.id], %{body: "draft"})
+      phone = SyncClient.pull(SyncClient.new(author))
+
+      {:ok, _event, _post} = edit_on_server(author, post, %{"body" => "on the server"})
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "mine"})
+      {phone, _response} = SyncClient.push(phone)
+      [conflict] = phone.conflicts
+
+      ignored = SyncClient.resolve(phone, conflict["id"], :ignore)
+      assert ignored.conflicts == [] and ignored.events == []
+
+      phone = SyncClient.resolve(phone, conflict["id"], :reapply)
+      assert [%{"base_version" => 2, "base" => %{"body" => "on the server"}}] = phone.events
+      {phone, %{"events" => [%{"status" => "applied", "version" => 3}]}} = SyncClient.push(phone)
+
+      assert Posts.get(post.id).body == "mine"
+      assert phone.conflicts == []
+    end
+
+    test "different fields edited on two devices both apply", %{author: author, community: community} do
+      post = post_fixture(author, [community.id], %{body: "draft"})
+      phone = SyncClient.pull(SyncClient.new(author))
+
+      {:ok, _event, _post} = edit_on_server(author, post, %{"body" => "edited on the laptop"})
+
+      deleted_at = DateTime.to_iso8601(DateTime.utc_now())
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"deleted_at" => deleted_at})
+      {_phone, %{"events" => [answer]}} = SyncClient.push(phone)
+
+      assert %{"status" => "applied", "version" => 3, "conflicts" => %{}} = answer
+      deleted = Posts.get(post.id, include_deleted: true)
+      assert deleted.body == "edited on the laptop"
+      assert DateTime.to_iso8601(deleted.deleted_at) == deleted_at
+      assert deleted.deleted_by_id == author.user.id
+    end
+
+    test "edits made one after another offline do not conflict with each other",
+         %{author: author, community: community} do
+      post = post_fixture(author, [community.id], %{body: "draft"})
+      phone = SyncClient.pull(SyncClient.new(author))
+
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "first"})
+      {phone, %{"events" => [%{"status" => "applied"}]}} = SyncClient.push(phone)
+
+      # Queued from version 1 again, before the push answered
+      phone = %{phone | rows: put_in(phone.rows, ["app_posts", post.id, "version"], 1)}
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "second"})
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "third"})
+      {phone, %{"events" => answers}} = SyncClient.push(phone)
+
+      assert Enum.map(answers, & &1["status"]) == ["applied", "applied"]
+      assert Posts.get(post.id).body == "third"
+      assert phone.conflicts == []
+    end
+
+    test "a retried event gets the same answer and applies nothing twice",
+         %{author: author, other: other, community: community} do
+      post = post_fixture(author, [community.id], %{body: "draft"})
+      phone = SyncClient.pull(SyncClient.new(author))
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"body" => "once"})
+      [event] = phone.events
+
+      assert %{"events" => [%{"status" => "applied", "version" => 2}]} = wire(Sync.push(author, [], [event]))
+      assert %{"events" => [%{"status" => "applied", "version" => 2}]} = wire(Sync.push(author, [], [event]))
+      assert Posts.get(post.id).version == 2
+      assert length(PostEvents.list(filters: [post_id: post.id])) == 2
+
+      assert %{"events" => [%{"status" => "rejected", "reason" => "event_id_taken"}]} =
+               wire(Sync.push(other, [], [event]))
+    end
+
+    test "a future-dated deletion in an event is bounded to server time", %{
+      author: author,
+      community: community
+    } do
+      post = post_fixture(author, [community.id])
+      phone = SyncClient.pull(SyncClient.new(author, clock_offset: 24 * 60 * 60))
+      future = DateTime.utc_now() |> DateTime.add(1, :day) |> DateTime.to_iso8601()
+      phone = SyncClient.change(phone, "app_posts", post.id, %{"deleted_at" => future})
+
+      {_phone, %{"events" => [%{"status" => "applied"}]}} = SyncClient.push(phone)
+
+      deleted = Posts.get(post.id, include_deleted: true)
+      assert DateTime.compare(deleted.deleted_at, DateTime.utc_now()) != :gt
     end
 
     test "a row pushed for a community the user left is rejected", %{author: author, community: community} do
@@ -197,7 +300,7 @@ defmodule App.Data.SyncTest do
       {phone, post_id} = write_post(phone, "too late", community.id)
       {phone, response} = SyncClient.push(phone)
 
-      assert [%{"table" => "app_posts", "id" => ^post_id}] = response["accepted"]
+      assert [%{"row_id" => ^post_id, "status" => "applied"}] = response["events"]
 
       assert [%{"table" => "app_posts_communities", "reason" => "not_a_member", "server" => nil}] =
                response["rejected"]
@@ -228,37 +331,54 @@ defmodule App.Data.SyncTest do
       assert Memberships.member?(author, community.id)
     end
 
-    test "a datetime in the wrong format is rejected", %{author: author} do
-      phone =
-        SyncClient.write(SyncClient.new(author), "app_posts", %{"body" => "x", "author_id" => author.user.id})
+    test "a datetime in the wrong format is rejected, in a row and in an event", %{author: author} do
+      row = %{"id" => Ecto.UUID.generate(version: 7), "name" => "x", "updated_at" => "2026-10-25T22:31:55Z"}
 
-      [{"app_posts", id}] = phone.outbox
-      row = Map.put(SyncClient.row(phone, "app_posts", id), "updated_at", "2026-10-25T22:31:55Z")
+      assert %{"rejected" => [%{"reason" => "bad_datetime: updated_at"}]} =
+               Sync.push(author, [%{"table" => "app_communities", "row" => row}])
 
-      assert %{"rejected" => [%{"id" => ^id, "reason" => "bad_datetime: updated_at"}]} =
-               Sync.push(author, [%{"table" => "app_posts", "row" => row}])
+      phone = SyncClient.new(author)
+      {phone, _id} = SyncClient.create(phone, "app_posts", %{"body" => "x"})
+      [event] = phone.events
+      event = %{event | "type" => "update", "changes" => %{"deleted_at" => "2026-10-25T22:31:55Z"}}
+
+      assert %{"events" => [%{"status" => "rejected", "reason" => "bad_datetime: deleted_at"}]} =
+               Sync.push(author, [], [event])
     end
 
-    test "another user's post and an app user row are refused", %{author: author, other: other} do
+    test "another user's post, a post as a row, and an app user row are refused",
+         %{author: author, other: other} do
       theirs = post_fixture(other, [])
       now = DateTime.to_iso8601(DateTime.utc_now())
 
-      assert %{"rejected" => [%{"reason" => "not_author", "server" => %{"row" => %{"body" => body}}}]} =
-               wire(
-                 Sync.push(author, [
-                   %{
-                     "table" => "app_posts",
-                     "row" => %{
-                       "id" => theirs.id,
-                       "body" => "mine now",
-                       "author_id" => author.user.id,
-                       "updated_at" => now
-                     }
-                   }
-                 ])
-               )
+      event = %{
+        "id" => Ecto.UUID.generate(version: 7),
+        "table" => "app_posts",
+        "row_id" => theirs.id,
+        "type" => "update",
+        "base_version" => theirs.version,
+        "base" => %{"body" => theirs.body},
+        "changes" => %{"body" => "mine now"}
+      }
+
+      assert %{
+               "events" => [
+                 %{
+                   "status" => "rejected",
+                   "reason" => "not_author",
+                   "server" => %{"row" => %{"body" => body}}
+                 }
+               ]
+             } =
+               wire(Sync.push(author, [], [event]))
 
       assert body == theirs.body
+
+      row = %{"id" => theirs.id, "body" => "mine now", "author_id" => author.user.id, "updated_at" => now}
+
+      assert %{"rejected" => [%{"reason" => "events_only"}]} =
+               wire(Sync.push(author, [%{"table" => "app_posts", "row" => row}]))
+
       assert Posts.get(theirs.id).body == theirs.body
 
       assert %{"rejected" => [%{"reason" => "server_wins", "server" => %{"row" => %{"email" => email}}}]} =
@@ -368,52 +488,58 @@ defmodule App.Data.SyncTest do
 
       assert %{"accepted" => [], "rejected" => rejected} = wire(Sync.push(author, rows))
       # Applied parents first: the membership, then the post, then its community row
-      assert Enum.map(rejected, & &1["reason"]) == ["not_own_membership", "not_author", "not_author"]
+      assert Enum.map(rejected, & &1["reason"]) == ["not_own_membership", "events_only", "not_author"]
       assert Posts.list(filters: [author_id: other.user.id]) == [theirs]
       assert Posting.communities_of(other, theirs) == []
     end
 
-    test "applies parents before children whatever the order sent, and accepts a retried push as it stands",
+    test "applies a post's event before its community row whatever the order sent, and a retried row gets the server's version",
          %{author: author, community: community} do
       now = DateTime.to_iso8601(DateTime.utc_now())
       post_id = Ecto.UUID.generate(version: 7)
       membership = Memberships.membership(author, community.id)
 
-      rows = [
-        %{
-          "table" => "app_posts_communities",
-          "row" => %{
-            "id" => Ecto.UUID.generate(version: 7),
-            "post_id" => post_id,
-            "community_id" => community.id,
-            "users_communities_id" => membership.id,
-            "updated_at" => now
-          }
-        },
-        %{
-          "table" => "app_posts",
-          "row" => %{
-            "id" => post_id,
-            "body" => "child first",
-            "author_id" => author.user.id,
-            "updated_at" => now
-          }
+      row = %{
+        "table" => "app_posts_communities",
+        "row" => %{
+          "id" => Ecto.UUID.generate(version: 7),
+          "post_id" => post_id,
+          "community_id" => community.id,
+          "users_communities_id" => membership.id,
+          "updated_at" => now
         }
-      ]
+      }
+
+      event = %{
+        "id" => Ecto.UUID.generate(version: 7),
+        "table" => "app_posts",
+        "row_id" => post_id,
+        "type" => "create",
+        "base_version" => 0,
+        "changes" => %{"body" => "child first"}
+      }
 
       assert %{
-               "accepted" => [%{"table" => "app_posts"}],
+               "events" => [%{"row_id" => ^post_id, "status" => "applied"}],
                "rejected" => [%{"table" => "app_posts_communities", "reason" => "server_wins"}]
-             } =
-               wire(Sync.push(author, rows))
+             } = wire(Sync.push(author, [row], [event]))
 
       assert [_row] = Posting.communities_of(author, Posts.get(post_id))
 
-      assert %{"accepted" => [%{"table" => "app_posts", "id" => ^post_id}]} =
-               wire(Sync.push(author, [List.last(rows)]))
+      community_id = Ecto.UUID.generate(version: 7)
+
+      community_row = %{
+        "table" => "app_communities",
+        "row" => %{"id" => community_id, "name" => "N", "updated_at" => now}
+      }
+
+      assert %{"accepted" => [%{"version" => 1}]} = wire(Sync.push(author, [community_row]))
+
+      assert %{"rejected" => [%{"reason" => "server_wins", "server" => %{"row" => %{"version" => 1}}}]} =
+               wire(Sync.push(author, [community_row]))
     end
 
-    test "a community is created from a client but never changed, and a client's inserted_at and deleted_by_id are bounded",
+    test "a community is created from a client but never changed",
          %{author: author, community: community} do
       now = DateTime.utc_now()
       future = now |> DateTime.add(365, :day) |> DateTime.to_iso8601()
@@ -440,31 +566,6 @@ defmodule App.Data.SyncTest do
                )
 
       assert name == community.name
-
-      post_id = Ecto.UUID.generate(version: 7)
-
-      assert %{"accepted" => [_]} =
-               wire(
-                 Sync.push(author, [
-                   %{
-                     "table" => "app_posts",
-                     "row" => %{
-                       "id" => post_id,
-                       "body" => "x",
-                       "author_id" => author.user.id,
-                       "inserted_at" => future,
-                       "updated_at" => future,
-                       "deleted_at" => future,
-                       "deleted_by_id" => Ecto.UUID.generate(version: 7)
-                     }
-                   }
-                 ])
-               )
-
-      post = Posts.get(post_id, include_deleted: true)
-      assert DateTime.compare(post.inserted_at, DateTime.utc_now()) != :gt
-      assert DateTime.compare(post.deleted_at, DateTime.utc_now()) != :gt
-      assert post.deleted_by_id == author.user.id
     end
 
     test "a row that is not a map, and a cursor that is not a datetime, are refused without crashing", %{
