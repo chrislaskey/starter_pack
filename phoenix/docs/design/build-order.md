@@ -17,7 +17,7 @@ Two rules for reading this:
 | 0 | Groundwork | UUIDv7 ids, soft-delete columns, pinned SQLite formats |
 | 1 | App users | `app_` tables, and the app's own view of each user |
 | 2 | Communities | Membership rows, join, leave, rejoin |
-| 3 | First resource | A tiny post, in the communities its author chose, hand-written |
+| 3 | First resource | A tiny post, in the communities its owner chose, hand-written |
 | 4 | Sync server | Push, pull, and backfill over HTTP, driven by `curl` |
 | 5 | Client schema export | Generated SQLite migrations for clients, kept fresh by a test |
 | 6 | First offline client | Desktop app syncs offline-first |
@@ -100,37 +100,37 @@ public joinability, invitations, nested communities (never).
 ## Phase 3: First resource
 
 The smallest resource that exercises the whole model: a post, written by one
-author, visible in the communities the author chose. Hand-written, as the
+owner, visible in the communities the owner chose. Hand-written, as the
 reference for every rule the generator will later copy.
 
 Builds
 
-- `app_posts` (id, author_id, body), with the sync columns and soft
+- `app_posts` (id, owner_id, body), with the sync columns and soft
   delete, and `app_post_events`, the server-only log of every change to a
   post.
 - `app_posts_communities` (post_id, community_id, users_communities_id), with
   a plain unique index on (post_id, community_id): adding a post back
   revives the row rather than inserting a new one, like rejoining does
   for `app_users_communities`.
-- Add to and remove from a community, author only. Adding back clears
+- Add to and remove from a community, owner only. Adding back clears
   `deleted_at` on the same row.
 - The visibility query: inside a community scope, a join on
   `app_posts_communities`; across communities, "rows for communities where the
-  user has a live membership, or authored by the user."
-- A post in zero communities is visible only to its author.
+  user has a live membership, or owned by the user."
+- A post in zero communities is visible only to its owner.
 - The leave cascade extended to the member's `app_posts_communities` rows,
   using the membership's `deleted_at`. Rejoin revives exactly those rows.
 - Minimal web UI: write a post, tick the communities it is in, read a
   community's feed.
 
-Delivers: a post written once appears in the communities its author chose
+Delivers: a post written once appears in the communities its owner chose
 and nowhere else.
 
 Proves: a post in two of three communities is invisible in the third; a
 post by another user in no shared community is invisible; removing a post
-from one community leaves it in the others; leaving removes the author's
+from one community leaves it in the others; leaving removes the owner's
 posts from that community and rejoining within the window brings them
-back; a row the author removed on purpose does not come back on rejoin; a
+back; a row the owner removed on purpose does not come back on rejoin; a
 soft-deleted post is gone from every feed with no cascade of its own.
 
 Deferred: a title or any other field, comments, reactions, moderation of
@@ -156,12 +156,15 @@ Builds
 - `POST /sync/push`: one transaction per batch of rows and events,
   dependency order, everything authorized against the scope, datetimes
   rejected unless UTC with six fractional digits and bounded by the server
-  clock. Rows apply only at the server's `version`; membership and
-  `app_posts_communities` rows are server-wins. Posts change only through
-  events, merged field by field, with a field someone else changed first
-  returned as a conflict. Response lists accepted rows with their new
+  clock. Membership and `app_posts_communities` rows are server-wins.
+  Posts and profiles change only through events, merged field by field,
+  with a field someone else changed first returned as a conflict. Response lists accepted rows with their new
   `last_synced_at` and `version`, rejected rows with the server's version,
   and an answer per event.
+- `app_user_profiles` (user_id, display_name, bio): a user's public
+  details, one per user, created at registration, edited only by them on
+  the web and on devices. The reference for a resource with no server
+  event log.
 - `POST /sync/backfill/:community_id`: every live `app_posts_communities` row
   for the community, each carrying its post, paged. Called by a client when
   it sees a new membership for its own user. See "What backfill means."
@@ -288,5 +291,5 @@ Worth doing, none of it needed to prove the design.
   one login across deployments.
 - **Permissions in the database** replacing the role strings.
 - **Postgres**, when a deployment's write rate demands it. The overlap buffer becomes mandatory then.
-- **`server_seq`, more event-sourced resources.** The design leaves room;
-  nothing requires them.
+- **`server_seq`, event sourcing proper.** Deriving rows from their event
+  logs. The design leaves room; nothing requires them.

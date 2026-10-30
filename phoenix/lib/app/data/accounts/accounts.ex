@@ -17,6 +17,7 @@ defmodule App.Data.Accounts do
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.User
+  alias App.Data.UserProfiles
   alias App.Data.Users
   alias App.Data.UsersCommunities
   alias App.Data.UserToken
@@ -33,14 +34,15 @@ defmodule App.Data.Accounts do
   ## Registration
 
   @doc """
-  Registers a user with the given email, and their app user row, see
-  `App.Data.AppUser`. The user logs in by the magic link sent next.
+  Registers a user with the given email, and their app user row and
+  profile, see `App.Data.AppUser`. The user logs in by the magic link sent next.
   """
   def register_user(params) do
     App.Repo.transact(fn ->
       with {:ok, user} <- Users.create(params, changesets: &User.registration_changeset/3),
            {:ok, _app_user} <-
-             AppUsers.create(%{id: user.id, email: user.email, joined_at: DateTime.utc_now()}) do
+             AppUsers.create(%{id: user.id, email: user.email, joined_at: DateTime.utc_now()}),
+           {:ok, _profile} <- UserProfiles.create(%{}, user_id: user.id) do
         {:ok, user}
       end
     end)
@@ -352,9 +354,12 @@ defmodule App.Data.Accounts do
         {:ok, _membership} = Memberships.leave(scope, membership.community_id)
       end
 
-      for post <- Posts.list(filters: [author_id: user.id]) do
+      for post <- Posts.list(filters: [owner_id: user.id]) do
         {:ok, _post} = Posting.delete(scope, post)
       end
+
+      {:ok, _profile} =
+        UserProfiles.delete_by([user_id: user.id], deleted_at: deleted_at, deleted_by_id: user.id)
 
       {:ok, _app_user} = AppUsers.delete(user.id, deleted_at: deleted_at, deleted_by_id: user.id)
 

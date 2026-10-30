@@ -14,17 +14,17 @@ defmodule App.Data.PostingTest do
   alias App.Web.Scope
 
   setup do
-    author = user_scope_fixture(user_fixture())
+    owner = user_scope_fixture(user_fixture())
     reader = user_scope_fixture(user_fixture())
 
     [one, two, three] =
       for _ <- 1..3 do
-        community = joined_community_fixture(author)
+        community = joined_community_fixture(owner)
         {:ok, _membership} = Memberships.join(reader, community.id)
         community
       end
 
-    %{author: author, reader: reader, one: one, two: two, three: three}
+    %{owner: owner, reader: reader, one: one, two: two, three: three}
   end
 
   defp feed_ids(scope, community \\ nil) do
@@ -33,85 +33,85 @@ defmodule App.Data.PostingTest do
   end
 
   describe "write/3" do
-    test "puts the post in the chosen communities, with their authors preloaded in the feed",
-         %{author: author, reader: reader, one: one, two: two, three: three} do
-      post = post_fixture(author, [one.id, two.id])
+    test "puts the post in the chosen communities, with their owners preloaded in the feed",
+         %{owner: owner, reader: reader, one: one, two: two, three: three} do
+      post = post_fixture(owner, [one.id, two.id])
 
       assert feed_ids(reader, one) == [post.id]
       assert feed_ids(reader, two) == [post.id]
       assert feed_ids(reader, three) == []
-      assert [%{author: %{id: author_id}}] = Posting.feed(Scope.put_community(reader, one))
-      assert author_id == author.user.id
+      assert [%{owner: %{id: owner_id}}] = Posting.feed(Scope.put_community(reader, one))
+      assert owner_id == owner.user.id
     end
 
-    test "refuses a community the author is not a member of", %{author: author} do
+    test "refuses a community the owner is not a member of", %{owner: owner} do
       other = community_fixture()
 
-      assert {:error, :not_a_member} = Posting.write(author, %{body: "hello"}, [other.id])
+      assert {:error, :not_a_member} = Posting.write(owner, %{body: "hello"}, [other.id])
       assert Posts.list() == []
     end
 
-    test "validates the post", %{author: author} do
-      assert {:error, changeset} = Posting.write(author, %{body: ""})
+    test "validates the post", %{owner: owner} do
+      assert {:error, changeset} = Posting.write(owner, %{body: ""})
       assert %{body: ["can't be blank"]} = errors_on(changeset)
     end
   end
 
   describe "feed/1 across communities" do
     test "shows posts in shared communities and the user's own, and nothing else",
-         %{author: author, reader: reader, one: one} do
-      shared = post_fixture(author, [one.id])
-      alone = post_fixture(author, [])
+         %{owner: owner, reader: reader, one: one} do
+      shared = post_fixture(owner, [one.id])
+      alone = post_fixture(owner, [])
 
       stranger = user_scope_fixture(user_fixture())
       private = joined_community_fixture(stranger)
       unseen = post_fixture(stranger, [private.id])
 
       assert feed_ids(reader) == [shared.id]
-      assert feed_ids(author) == [alone.id, shared.id]
+      assert feed_ids(owner) == [alone.id, shared.id]
       assert feed_ids(stranger) == [unseen.id]
     end
   end
 
   describe "remove_from_community/3 and add_to_community/3" do
     test "removing a post from one community leaves it in the others",
-         %{author: author, reader: reader, one: one, two: two} do
-      post = post_fixture(author, [one.id, two.id])
+         %{owner: owner, reader: reader, one: one, two: two} do
+      post = post_fixture(owner, [one.id, two.id])
 
       assert {:ok, %PostCommunity{deleted_at: %DateTime{}}} =
-               Posting.remove_from_community(author, post, one.id)
+               Posting.remove_from_community(owner, post, one.id)
 
       assert feed_ids(reader, one) == []
       assert feed_ids(reader, two) == [post.id]
     end
 
-    test "adding a post back revives the same row", %{author: author, reader: reader, one: one} do
-      post = post_fixture(author, [one.id])
-      [%{id: row_id}] = Posting.communities_of(author, post)
-      {:ok, _row} = Posting.remove_from_community(author, post, one.id)
+    test "adding a post back revives the same row", %{owner: owner, reader: reader, one: one} do
+      post = post_fixture(owner, [one.id])
+      [%{id: row_id}] = Posting.communities_of(owner, post)
+      {:ok, _row} = Posting.remove_from_community(owner, post, one.id)
 
       assert {:ok, %PostCommunity{id: ^row_id, deleted_at: nil}} =
-               Posting.add_to_community(author, post, one.id)
+               Posting.add_to_community(owner, post, one.id)
 
       assert feed_ids(reader, one) == [post.id]
     end
 
-    test "only the author adds or removes", %{author: author, reader: reader, one: one, two: two} do
-      post = post_fixture(author, [one.id])
+    test "only the owner adds or removes", %{owner: owner, reader: reader, one: one, two: two} do
+      post = post_fixture(owner, [one.id])
 
-      assert {:error, :not_author} = Posting.add_to_community(reader, post, two.id)
-      assert {:error, :not_author} = Posting.remove_from_community(reader, post, one.id)
-      assert {:error, :not_author} = Posting.delete(reader, post)
+      assert {:error, :not_owner} = Posting.add_to_community(reader, post, two.id)
+      assert {:error, :not_owner} = Posting.remove_from_community(reader, post, one.id)
+      assert {:error, :not_owner} = Posting.delete(reader, post)
     end
   end
 
   describe "leaving and rejoining" do
-    test "leaving removes the author's posts from that community and rejoining brings them back",
-         %{author: author, reader: reader, one: one, two: two} do
-      post = post_fixture(author, [one.id, two.id])
+    test "leaving removes the owner's posts from that community and rejoining brings them back",
+         %{owner: owner, reader: reader, one: one, two: two} do
+      post = post_fixture(owner, [one.id, two.id])
       other = post_fixture(reader, [one.id])
 
-      {:ok, membership} = Memberships.leave(author, one.id)
+      {:ok, membership} = Memberships.leave(owner, one.id)
 
       assert feed_ids(reader, one) == [other.id]
       assert feed_ids(reader, two) == [post.id]
@@ -124,18 +124,18 @@ defmodule App.Data.PostingTest do
 
       assert row.deleted_at == membership.deleted_at
 
-      {:ok, _membership} = Memberships.join(author, one.id)
+      {:ok, _membership} = Memberships.join(owner, one.id)
       assert feed_ids(reader, one) == [other.id, post.id]
     end
 
-    test "a row the author removed on purpose does not come back on rejoin",
-         %{author: author, reader: reader, one: one} do
-      kept = post_fixture(author, [one.id])
-      removed = post_fixture(author, [one.id])
-      {:ok, _row} = Posting.remove_from_community(author, removed, one.id)
+    test "a row the owner removed on purpose does not come back on rejoin",
+         %{owner: owner, reader: reader, one: one} do
+      kept = post_fixture(owner, [one.id])
+      removed = post_fixture(owner, [one.id])
+      {:ok, _row} = Posting.remove_from_community(owner, removed, one.id)
 
-      {:ok, _membership} = Memberships.leave(author, one.id)
-      {:ok, _membership} = Memberships.join(author, one.id)
+      {:ok, _membership} = Memberships.leave(owner, one.id)
+      {:ok, _membership} = Memberships.join(owner, one.id)
 
       assert feed_ids(reader, one) == [kept.id]
     end
@@ -143,27 +143,27 @@ defmodule App.Data.PostingTest do
 
   describe "delete/2" do
     test "hides the post from every feed with no cascade of its own",
-         %{author: author, reader: reader, one: one} do
-      post = post_fixture(author, [one.id])
+         %{owner: owner, reader: reader, one: one} do
+      post = post_fixture(owner, [one.id])
 
-      assert {:ok, %{deleted_at: %DateTime{}}} = Posting.delete(author, post)
+      assert {:ok, %{deleted_at: %DateTime{}}} = Posting.delete(owner, post)
 
       assert feed_ids(reader, one) == []
       assert feed_ids(reader) == []
-      assert feed_ids(author) == []
+      assert feed_ids(owner) == []
       assert [%PostCommunity{deleted_at: nil}] = PostsCommunities.list(filters: [post_id: post.id])
     end
   end
 
   describe "versions and events" do
     test "writing and deleting a post each record an event with the version it produced", %{
-      author: author,
+      owner: owner,
       one: one
     } do
-      post = post_fixture(author, [one.id], %{body: "hello"})
+      post = post_fixture(owner, [one.id], %{body: "hello"})
       assert post.version == 1
 
-      {:ok, deleted} = Posting.delete(author, post)
+      {:ok, deleted} = Posting.delete(owner, post)
       assert deleted.version == 2
 
       assert [
@@ -172,19 +172,19 @@ defmodule App.Data.PostingTest do
              ] = PostEvents.list(filters: [post_id: post.id])
     end
 
-    test "a write from a stale copy of a row is refused", %{author: author, one: one} do
-      post = post_fixture(author, [one.id])
+    test "a write from a stale copy of a row is refused", %{owner: owner, one: one} do
+      post = post_fixture(owner, [one.id])
       {:ok, _edited} = Posts.update(post, %{body: "first"})
 
       assert {:error, changeset} = Posts.update(post, %{body: "from the stale copy"})
       assert changeset.errors[:version]
-      assert {:error, _changeset} = Posting.delete(author, post)
+      assert {:error, _changeset} = Posting.delete(owner, post)
       assert Posts.get(post.id).body == "first"
     end
 
     test "a device's edit of a field nobody else changed merges with a newer server version",
-         %{author: author, one: one} do
-      post = post_fixture(author, [one.id], %{body: "hello"})
+         %{owner: owner, one: one} do
+      post = post_fixture(owner, [one.id], %{body: "hello"})
 
       event = fn base_version, changes ->
         %{
@@ -197,16 +197,16 @@ defmodule App.Data.PostingTest do
         }
       end
 
-      {:ok, %{conflicts: %{}}, _post} = Posting.apply_event(author, event.(1, %{"body" => "edited"}))
+      {:ok, %{conflicts: %{}}, _post} = Posting.apply_event(owner, event.(1, %{"body" => "edited"}))
 
       {:ok, %{conflicts: conflicts, version: 2}, post} =
-        Posting.apply_event(author, event.(1, %{"body" => "mine"}))
+        Posting.apply_event(owner, event.(1, %{"body" => "mine"}))
 
       assert conflicts == %{"body" => %{"yours" => "mine", "server" => "edited"}}
       assert post.body == "edited"
 
-      assert {:error, "not_editable: author_id", _post} =
-               Posting.apply_event(author, event.(2, %{"author_id" => Ecto.UUID.generate()}))
+      assert {:error, "not_editable: owner_id", _post} =
+               Posting.apply_event(owner, event.(2, %{"owner_id" => Ecto.UUID.generate()}))
     end
   end
 end

@@ -6,8 +6,8 @@ defmodule App.Data.Posts do
     * `in_community: community_id` - the posts in the community, for a
       request already scoped to one, where membership was checked.
     * `visible_to: scope` - across communities: the posts in a community
-      the scope's user is a live member of, or authored by the user. A
-      post in no community is visible only to its author.
+      the scope's user is a live member of, or owned by the user. A
+      post in no community is visible only to its owner.
 
   Both see only live `app_posts_communities` rows. Writing, adding to and
   removing from communities are in `App.Data.Posting`.
@@ -47,7 +47,7 @@ defmodule App.Data.Posts do
     Ecto.Query.where(
       query,
       [post],
-      post.author_id == ^user.id or post.id in subquery(in_my_communities)
+      post.owner_id == ^user.id or post.id in subquery(in_my_communities)
     )
   end
 

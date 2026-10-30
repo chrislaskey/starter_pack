@@ -1,7 +1,7 @@
 defmodule App.Data.PostEvent do
   @moduledoc """
-  One change to a post. Server-only and append-only, see "Event-sourced
-  resources" in `docs/design/offline-sync.md`.
+  One change to a post, in its event log. Server-only and append-only,
+  see "Events" in `docs/design/offline-sync.md`.
   """
 
   use Ecto.Schema

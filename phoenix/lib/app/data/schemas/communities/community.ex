@@ -2,7 +2,7 @@ defmodule App.Data.Community do
   @moduledoc """
   A community: the soft boundary inside a deployment. Users join
   communities, see `App.Data.UserCommunity`, and a post is in the
-  communities its author chose. Syncs to its members.
+  communities its owner chose. Syncs to its members.
   """
 
   use Ecto.Schema

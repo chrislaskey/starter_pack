@@ -73,6 +73,7 @@ defmodule App.Router do
       live "/communities", CommunitiesLive
       live "/communities/:id", CommunityLive
       live "/posts", PostsLive
+      live "/profile", ProfileLive
     end
 
     post "/users/update-password", UserSessionController, :update_password

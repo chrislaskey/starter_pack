@@ -14,8 +14,8 @@ use App.Data.UniversalChangeset
 def changeset(post, params, options \\ []) do
   post
   |> cast(params, [:body])
-  |> put_author(Keyword.get(options, :author_id))
-  |> validate_required([:author_id, :body])
+  |> put_owner(Keyword.get(options, :owner_id))
+  |> validate_required([:owner_id, :body])
   |> validate_length(:body, max: 10_000)
   |> put_change(:last_synced_at, DateTime.utc_now())
 end
@@ -53,7 +53,7 @@ time with one that:
    options, so `errors_on/1`, forms and Gettext work unchanged
 
 The changes the template made that the params did not supply, like the
-author from the scope or the sync time, go to the Rust as data. The other
+owner from the scope or the sync time, go to the Rust as data. The other
 apps pass them in `data` the same way, and the generated `.rs` says which
 fields those are. The template is kept as
 `__universal_changeset_template__/4`, and

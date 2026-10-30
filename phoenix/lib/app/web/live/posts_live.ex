@@ -54,10 +54,10 @@ defmodule App.Web.PostsLive do
 
         <ul id="posts" phx-update="stream" class="divide-y divide-base-200">
           <li :for={{id, post} <- @streams.posts} id={id} class="space-y-1 py-3">
-            <p class="text-sm text-base-content/60">{post.author.email}</p>
+            <p class="text-sm text-base-content/60">{post.owner.email}</p>
             <p class="whitespace-pre-wrap">{post.body}</p>
             <.button
-              :if={post.author_id == @current_scope.user.id}
+              :if={post.owner_id == @current_scope.user.id}
               phx-click="delete"
               phx-value-id={post.id}
               data-confirm="Delete this post?"
@@ -81,7 +81,7 @@ defmodule App.Web.PostsLive do
         {:noreply,
          socket
          |> assign(form: new_form())
-         |> stream_insert(:posts, Posts.get(post.id, preloads: [:author]), at: 0)}
+         |> stream_insert(:posts, Posts.get(post.id, preloads: [:owner]), at: 0)}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign(socket, form: to_form(changeset))}

@@ -1,8 +1,8 @@
 # Offline sync on the client: versions, events and conflicts
 
 What a desktop or mobile client does to sync with the server's MVCC
-versions and event-sourced resources. The server side and the reasons are
-in `offline-sync.md`, "Leak 2" and "Event-sourced resources". The desktop
+versions and events. The server side and the reasons are in
+`offline-sync.md`, "Leak 2" and "Events". The desktop
 app does this in `tauri/src-tauri/src/sync`, see
 `tauri/docs/offline-sync.md`, and the server tests' simulated client,
 `test/support/sync_client.ex`, does it in Elixir.
@@ -11,11 +11,12 @@ app does this in `tauri/src-tauri/src/sync`, see
 
 1. **The client never writes a version.** It stores the server's with the
    row. A row created on the device and not yet pushed has version 0.
-2. **Plain tables** sync as before, through `sync_outbox`: the whole row
-   is pushed, and it carries the version it was read at.
-3. **Event-sourced tables**, today `app_posts` only, never push rows. Each
-   save is one event, queued in `sync_events`, which the server answers
-   once.
+2. **User-editable tables**, today `app_posts` and `app_user_profiles`,
+   never push rows. Each save is one event of the fields it changed,
+   queued in `sync_events`, which the server answers once.
+3. **Server-wins rows**, a post's community rows, a membership, a new
+   community, are pushed whole through `sync_outbox` with the version they
+   were read at, and the server's row comes back.
 4. **A row from the server never replaces a row with a queued change**: an
    outbox entry or a pending event. The push decides that row first.
 5. **A conflict is kept until the person resolves it**, by reapplying it
@@ -51,12 +52,13 @@ order is the same and is a fine tiebreak.
 
 ## Local writes
 
-### Plain tables
+### Server-wins rows
 
-Unchanged: upsert the row and queue it in `sync_outbox`. Do not touch
-`version`. A new row is inserted with `version = 0`.
+Upsert the row with the device's time as `updated_at` and queue it in
+`sync_outbox`. Do not touch `version`. A new row is inserted with
+`version = 0`.
 
-### Event-sourced tables, in one transaction
+### User-editable tables, in one transaction
 
 **Create.** Insert the row with `version = 0` and queue:
 
@@ -65,7 +67,7 @@ Unchanged: upsert the row and queue it in `sync_outbox`. Do not touch
 ```
 
 `changes` holds only the fields the person set; for a post, `body`. The
-server sets the author from the token.
+server sets the owner from the token.
 
 **Update.** Read the row, then queue:
 
@@ -83,8 +85,13 @@ saves on one device from conflicting with each other.
 `"changes": {"deleted_at": "..."}`, `"base": {"deleted_at": null}`. The
 server sets `deleted_by_id`.
 
-Which fields an event may change is the server's rule, today `body` on
-create and `body` and `deleted_at` on update. Any other field is refused
+A profile is created by the server at registration, so a device only
+updates it, putting in `changes` just the fields that differ from the
+row.
+
+Which fields an event may change is the server's rule: for a post `body`
+on create and `body` and `deleted_at` on update, for a profile
+`display_name` and `bio`. Any other field is refused
 as `not_editable: <field>`.
 
 Run the resource's universal changeset before queuing, as `write_post`
@@ -126,19 +133,18 @@ Apply it in this order:
 1. **Accepted rows**: set `last_synced_at` and `version` on the row, and
    dequeue only entries queued before the push started.
 2. **Rejected rows**: dequeue first, then apply `server` when there is
-   one. On `conflict` someone else wrote the row since this device read
-   it, and `server` is their row; for a plain table the device's change
-   is gone.
+   one.
 3. **Event answers**, each by `id`:
    - `applied`: delete the event.
    - `conflict`: set `status = 'conflict'` and store `conflicts`. The
      fields not in `conflicts` did apply.
    - `rejected` with `server`: delete the event; the server's row wins.
-     Reasons: `not_author`, `exists`, `not_editable: ...`.
+     Reasons: `not_owner`, `exists`, `not_editable: ...`.
    - `rejected` without `server`: keep the event pending, count the
      attempt and keep `reason` in `last_error`, as a rejected outbox row
      is kept. Reasons: `malformed`, `bad_datetime: ...`,
-     `invalid: ...`, `unknown_post`, `event_id_taken`. These are bugs
+     `invalid: ...`, `unknown_post`, `unknown_profile`, `not_creatable`,
+     `event_id_taken`. These are bugs
      or invalid input, for a debugging screen, not the conflict UI.
 4. **Server rows of answered events**: for each row, once no event for it
    is still `pending`, apply the `server` row of its last answer, which
@@ -210,12 +216,12 @@ pruned, can only be let go; show it with the text from `yours`.
 | Piece | Where |
 | --- | --- |
 | `sync_events` table | `schema.rs`, `CLIENT_TABLES` |
-| `EVENT_SOURCED` | `store.rs` |
-| `write_post`, `edit_post`, `delete_post` | `store.rs` |
+| `EVENT_TABLES` | `store.rs` |
+| `write_post`, `edit_post`, `delete_post`, `edit_profile`, `profile` | `store.rs` |
 | `pending_events`, `conflicts`, `resolve_conflict` | `store.rs` |
 | events in the push request and response | `http.rs` |
 | the push answer, steps 1 to 4 above | `worker.rs`, `apply_push_response` |
-| `delete_post` and `resolve_conflict` commands, conflicts on the page | `mod.rs` |
+| `delete_post`, `edit_profile` and `resolve_conflict` commands, the profile and conflicts on the page | `mod.rs` |
 | banner, details and actions | `tauri/src/communities/CommunitiesPage.svelte` |
 
 ## Tests

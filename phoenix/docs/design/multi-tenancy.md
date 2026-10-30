@@ -28,7 +28,7 @@ Settled in discussion. Everything else in this doc follows from these.
   backups, keys and region, which is what enterprise reviews and data
   residency rules ask for.
 - **Inside a deployment, communities are the boundary.** Users join
-  communities, and a resource is visible in the communities its author chose.
+  communities, and a resource is visible in the communities its owner chose.
 - **A person in two deployments has two accounts.** A business that wants
   its data separate wants its identity separate too, usually through its own
   identity provider. When one login across deployments is needed, it comes
@@ -59,8 +59,8 @@ Settled in discussion. Everything else in this doc follows from these.
   npm package from v10. SQLite stores them as text or 16-byte blobs with no
   special support needed. With no reference across deployments and ids that
   never collide, moving or merging tenants stays a mechanical data copy.
-- **A post is in zero or more communities, chosen by its author.** The
-  author adds their own post to a community or removes it, and nobody else
+- **A post is in zero or more communities, chosen by its owner.** The
+  owner adds their own post to a community or removes it, and nobody else
   can put a post anywhere. There is no re-sharing of other people's
   resources.
 - **No home community.** A community admin removing a post from their
@@ -74,7 +74,7 @@ Settled in discussion. Everything else in this doc follows from these.
   nothing to restore, so the result is a fresh start.
 - **Comments and reactions are per community.** A comment belongs to the
   post's presence in one community, not to the post globally.
-- **A post in zero communities is valid.** It is visible only to its author.
+- **A post in zero communities is valid.** It is visible only to its owner.
 - **Communities are flat.** No nesting.
 - **Roles are string columns with app-level enums, and nothing is gated
   yet.** `app_users_communities.role` exists as a string column backed by
@@ -203,9 +203,9 @@ users_tokens            (id, user_id, ...)
 app_users               (id, email, joined_at, ...)   -- same id as users
 app_communities         (id, name, ...)
 app_users_communities   (id, user_id, community_id, role, ...)
-app_posts               (id, author_id, body, ...)
+app_posts               (id, owner_id, body, ...)
 app_posts_communities   (id, post_id, community_id, users_communities_id, ...)
-app_comments            (id, posts_communities_id, author_id, body, ...)   -- later
+app_comments            (id, posts_communities_id, owner_id, body, ...)   -- later
 app_reactions           (id, posts_communities_id, user_id, kind, ...)     -- later
 
 -- The app, server only
@@ -214,8 +214,8 @@ app_purges              (id, horizon, inserted_at)
 
 An `app_posts_communities` row says "this post is in this community" and
 records the membership it was added under, `users_communities_id`. Since only
-the author adds a post to a community, that membership is always the
-author's. Comments and reactions hang off the `app_posts_communities` row,
+the owner adds a post to a community, that membership is always the
+owner's. Comments and reactions hang off the `app_posts_communities` row,
 not the post, which is what "per community" means in SQL.
 
 Plus on every synced table, on the server and on every client:
@@ -238,7 +238,7 @@ Rules that hold it together:
   when a request is scoped to a community. Inside that scope, listing posts
   is a join on `app_posts_communities` alone. Only queries that span
   communities, such as the sync pull's "everything visible to this user,"
-  check both. Authors always see their own posts.
+  check both. Owners always see their own posts.
 - **Leaving cascades through the membership, and only that far.** Every
   `app_posts_communities` row points at the membership it was added under.
   Leaving community C soft-deletes the member's `app_users_communities` row
@@ -256,7 +256,7 @@ Rules that hold it together:
   soft-deleted membership still exists, rejoining clears `deleted_at` on it
   and on every `app_posts_communities` row whose `users_communities_id`
   matches and whose `deleted_at` equals the membership's. Rows deleted at
-  any other moment, by the author on purpose or by an admin, were deleted
+  any other moment, by the owner on purpose or by an admin, were deleted
   for their own reasons and stay deleted. Comments and reactions under
   revived rows reappear because reads join through them. If the membership
   was already purged, rejoining inserts a fresh row and starts from nothing.
@@ -270,8 +270,8 @@ Rules that hold it together:
   stays plain, and the earlier comments there return with it. A soft-deleted
   post hides its community rows because reads join through it, so deleting
   a post needs no cascade of its own.
-- **No home community.** A post has an author and is in zero or more
-  communities, all equal. The author deletes the post; a community admin can
+- **No home community.** A post has an owner and is in zero or more
+  communities, all equal. The owner deletes the post; a community admin can
   only soft-delete the post's row for their community.
 
 ## Phoenix

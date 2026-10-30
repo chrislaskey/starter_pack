@@ -4,7 +4,7 @@
 //! come off the wire. A local write upserts the row with a client-generated
 //! UUIDv7 and the device's time as `updated_at`, and queues it for the
 //! next push: in `sync_outbox`, or as an event in `sync_events` for an
-//! `EVENT_SOURCED` table. `last_synced_at` and `version` are the server's,
+//! `EVENT_TABLES` table. `last_synced_at` and `version` are the server's,
 //! with placeholders on a new local row: the time, and version 0. See
 //! `phoenix/docs/design/offline-sync-client.md`.
 
@@ -16,15 +16,16 @@ use serde_json::{Map, Value};
 use crate::changesets;
 
 /// The synced tables, parents first.
-pub const TABLES: [&str; 5] = [
+pub const TABLES: [&str; 6] = [
     "app_users",
+    "app_user_profiles",
     "app_communities",
     "app_users_communities",
     "app_posts",
     "app_posts_communities",
 ];
 
-pub const EVENT_SOURCED: [&str; 1] = ["app_posts"];
+pub const EVENT_TABLES: [&str; 2] = ["app_user_profiles", "app_posts"];
 
 /// An event on the wire, see `App.Data.Sync`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,10 +92,19 @@ pub struct Community {
 pub struct FeedPost {
     pub id: String,
     pub body: String,
-    pub author_email: String,
+    pub owner_email: String,
     pub inserted_at: String,
     pub communities: Vec<String>,
     pub mine: bool,
+    /// Queued for the next push.
+    pub pending: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UserProfile {
+    pub id: String,
+    pub display_name: String,
+    pub bio: String,
     /// Queued for the next push.
     pub pending: bool,
 }
@@ -369,7 +379,7 @@ pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
     connection
         .execute(
             "DELETE FROM app_posts
-             WHERE author_id != ?1
+             WHERE owner_id != ?1
                AND id NOT IN (
                  SELECT pc.post_id FROM app_posts_communities pc
                  JOIN app_users_communities uc
@@ -529,8 +539,8 @@ pub fn queue_event(
     changes: Map<String, Value>,
     made_at: &str,
 ) -> Result<String, String> {
-    if !EVENT_SOURCED.contains(&table) {
-        return Err(format!("{table} is not event-sourced"));
+    if !EVENT_TABLES.contains(&table) {
+        return Err(format!("{table} changes only as rows"));
     }
     let id = uuid::Uuid::now_v7().to_string();
     connection
@@ -676,9 +686,13 @@ pub fn conflicts(connection: &Connection) -> Result<Vec<Conflict>, String> {
                 })
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let summary = match table.as_str() {
+                "app_user_profiles" => "Your profile".to_string(),
+                _ => body.lines().next().unwrap_or("").to_string(),
+            };
 
             Ok(Conflict {
-                summary: body.lines().next().unwrap_or("").to_string(),
+                summary,
                 row_exists: current.is_some(),
                 id,
                 table,
@@ -799,7 +813,7 @@ pub fn write_post(
     let post_id = uuid::Uuid::now_v7().to_string();
     transaction
         .execute(
-            "INSERT INTO app_posts (id, author_id, body, version, last_synced_at, inserted_at, updated_at)
+            "INSERT INTO app_posts (id, owner_id, body, version, last_synced_at, inserted_at, updated_at)
              VALUES (?1, ?2, ?3, 0, ?4, ?4, ?4)",
             params![post_id, user_id, body, now],
         )
@@ -852,7 +866,17 @@ pub fn edit_post(
     now: &str,
 ) -> Result<(), String> {
     let body = checked_body(user_id, body)?;
-    change_own_post(connection, user_id, post_id, "body", Value::from(body), now)
+    let mut changes = Map::new();
+    changes.insert("body".into(), Value::from(body));
+    change_own_row(
+        connection,
+        user_id,
+        "app_posts",
+        "owner_id",
+        post_id,
+        changes,
+        now,
+    )
 }
 
 /// Deletes the user's own post, queued as an event.
@@ -862,43 +886,139 @@ pub fn delete_post(
     post_id: &str,
     now: &str,
 ) -> Result<(), String> {
-    change_own_post(
+    let mut changes = Map::new();
+    changes.insert("deleted_at".into(), Value::from(now));
+    change_own_row(
         connection,
         user_id,
+        "app_posts",
+        "owner_id",
         post_id,
-        "deleted_at",
-        Value::from(now),
+        changes,
         now,
     )
 }
 
-fn change_own_post(
+/// Edits the user's own profile, queued as an event of the fields that
+/// changed.
+pub fn edit_profile(
     connection: &Connection,
     user_id: &str,
-    post_id: &str,
-    field: &str,
-    value: Value,
+    display_name: &str,
+    bio: &str,
+    now: &str,
+) -> Result<(), String> {
+    let profile = own_profile(connection, user_id)?.ok_or("This device has no profile yet")?;
+    let blank_to_null = |text: &str| {
+        if text.trim().is_empty() {
+            Value::Null
+        } else {
+            Value::from(text)
+        }
+    };
+    let mut params = Map::new();
+    params.insert("display_name".into(), blank_to_null(display_name));
+    params.insert("bio".into(), blank_to_null(bio));
+
+    let mut data = Map::new();
+    data.insert("user_id".into(), Value::from(user_id));
+    changesets::checked(changesets::user_profile::changeset(&data, &params))?;
+
+    let changes: Map<String, Value> = params
+        .into_iter()
+        .filter(|(field, value)| profile.get(field).unwrap_or(&Value::Null) != value)
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let id = profile
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    change_own_row(
+        connection,
+        user_id,
+        "app_user_profiles",
+        "user_id",
+        &id,
+        changes,
+        now,
+    )
+}
+
+fn own_profile(
+    connection: &Connection,
+    user_id: &str,
+) -> Result<Option<Map<String, Value>>, String> {
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT id FROM app_user_profiles WHERE user_id = ?1 AND deleted_at IS NULL",
+            [user_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    match id {
+        Some(id) => row_json(connection, "app_user_profiles", &id),
+        None => Ok(None),
+    }
+}
+
+/// The user's profile as this device has it.
+pub fn profile(connection: &Connection, user_id: &str) -> Result<Option<UserProfile>, String> {
+    let Some(row) = own_profile(connection, user_id)? else {
+        return Ok(None);
+    };
+    let text = |field: &str| {
+        row.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let id = text("id");
+    Ok(Some(UserProfile {
+        pending: queued(connection, "app_user_profiles", &id)?,
+        display_name: text("display_name"),
+        bio: text("bio"),
+        id,
+    }))
+}
+
+/// Changes the user's own row of an event table and queues the event,
+/// with the changed fields' values before the change as its base.
+fn change_own_row(
+    connection: &Connection,
+    user_id: &str,
+    table: &str,
+    owner_column: &str,
+    id: &str,
+    changes: Map<String, Value>,
     now: &str,
 ) -> Result<(), String> {
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
-    let row = row_json(&transaction, "app_posts", post_id)?
+    let row = row_json(&transaction, table, id)?
         .filter(|row| {
-            row.get("author_id").and_then(Value::as_str) == Some(user_id)
+            row.get(owner_column).and_then(Value::as_str) == Some(user_id)
                 && row.get("deleted_at").is_none_or(Value::is_null)
         })
-        .ok_or("Not your post, or it is gone")?;
+        .ok_or("Not yours, or it is gone")?;
     let version = row.get("version").and_then(Value::as_i64).unwrap_or(0);
+    let base = changes
+        .keys()
+        .map(|field| {
+            (
+                field.clone(),
+                row.get(field).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
 
-    let mut base = Map::new();
-    base.insert(field.into(), row.get(field).cloned().unwrap_or(Value::Null));
-    let mut changes = Map::new();
-    changes.insert(field.into(), value);
-
-    update_fields(&transaction, "app_posts", post_id, user_id, &changes, now)?;
+    update_fields(&transaction, table, id, user_id, &changes, now)?;
     queue_event(
         &transaction,
-        "app_posts",
-        post_id,
+        table,
+        id,
         "update",
         version,
         base,
@@ -909,12 +1029,12 @@ fn change_own_post(
 }
 
 /// The server's rules for a post, `App.Data.Post.changeset/3`, run here so
-/// a post written offline is not refused on push. The author is data, as
+/// a post written offline is not refused on push. The owner is data, as
 /// the posting flow sets it on the server; the body is what the user
 /// typed, kept as the server keeps it.
-fn checked_body(author_id: &str, body: &str) -> Result<String, String> {
+fn checked_body(owner_id: &str, body: &str) -> Result<String, String> {
     let mut data = Map::new();
-    data.insert("author_id".into(), Value::from(author_id));
+    data.insert("owner_id".into(), Value::from(owner_id));
     let mut params = Map::new();
     params.insert("body".into(), Value::from(body));
 
@@ -959,11 +1079,11 @@ pub fn member_communities(
 pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT p.id, p.body, p.author_id, coalesce(u.email, ''), p.inserted_at,
+            "SELECT p.id, p.body, p.owner_id, coalesce(u.email, ''), p.inserted_at,
                     EXISTS (SELECT 1 FROM sync_outbox o WHERE o.table_name = 'app_posts' AND o.row_id = p.id)
                     OR EXISTS (SELECT 1 FROM sync_events e WHERE e.table_name = 'app_posts' AND e.row_id = p.id AND e.status = 'pending')
              FROM app_posts p
-             LEFT JOIN app_users u ON u.id = p.author_id
+             LEFT JOIN app_users u ON u.id = p.owner_id
              WHERE p.deleted_at IS NULL
              ORDER BY p.inserted_at DESC
              LIMIT 200",
@@ -971,12 +1091,12 @@ pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, Str
         .map_err(sql_error)?;
     let posts = statement
         .query_map([], |row| {
-            let author_id: String = row.get(2)?;
+            let owner_id: String = row.get(2)?;
             Ok(FeedPost {
                 id: row.get(0)?,
                 body: row.get(1)?,
-                mine: author_id == user_id,
-                author_email: row.get(3)?,
+                mine: owner_id == user_id,
+                owner_email: row.get(3)?,
                 inserted_at: row.get(4)?,
                 pending: row.get(5)?,
                 communities: Vec::new(),
@@ -1080,7 +1200,7 @@ pub(crate) mod tests {
             wire(
                 "app_posts",
                 stamped(
-                    json!({"id": "01a17558-0000-7000-8000-0000000000a1", "author_id": OTHER, "body": "hello"}),
+                    json!({"id": "01a17558-0000-7000-8000-0000000000a1", "owner_id": OTHER, "body": "hello"}),
                     AT,
                 ),
             ),
@@ -1105,7 +1225,7 @@ pub(crate) mod tests {
         let posts = feed(&connection, ME).unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].body, "hello");
-        assert_eq!(posts[0].author_email, "other@example.com");
+        assert_eq!(posts[0].owner_email, "other@example.com");
         assert_eq!(posts[0].communities, vec!["Gardeners".to_string()]);
         assert!(!posts[0].mine && !posts[0].pending);
 
@@ -1144,7 +1264,7 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row["body"], json!("  mine  "));
-        assert_eq!(row["author_id"], json!(ME));
+        assert_eq!(row["owner_id"], json!(ME));
         assert_eq!(row["updated_at"], json!(AT));
         assert_eq!(row["deleted_at"], Value::Null);
         assert_eq!(row["version"], json!(0));
@@ -1238,7 +1358,7 @@ pub(crate) mod tests {
 
         let mut from_server = server_rows()[5].clone();
         from_server.row["id"] = json!(mine);
-        from_server.row["author_id"] = json!(ME);
+        from_server.row["owner_id"] = json!(ME);
         from_server.row["body"] = json!("server copy");
         let applied = apply_rows(&connection, ME, &[from_server]).unwrap();
 
@@ -1373,7 +1493,7 @@ pub(crate) mod tests {
     /// The fixture post, as mine, at version 3.
     fn my_synced_post(connection: &Connection) -> String {
         let mut post = server_rows()[5].clone();
-        post.row["author_id"] = json!(ME);
+        post.row["owner_id"] = json!(ME);
         post.row.insert("version".into(), json!(3));
         apply_rows(connection, ME, &server_rows()).unwrap();
         apply_rows(connection, ME, &[post.clone()]).unwrap();
@@ -1440,7 +1560,7 @@ pub(crate) mod tests {
         edit_post(&connection, ME, &post_id, "local edit", AT).unwrap();
 
         let mut from_server = server_rows()[5].clone();
-        from_server.row["author_id"] = json!(ME);
+        from_server.row["owner_id"] = json!(ME);
         from_server.row["body"] = json!("server copy");
         assert_eq!(
             apply_rows(&connection, ME, &[from_server.clone()])
@@ -1527,5 +1647,79 @@ pub(crate) mod tests {
         assert!(resolve_conflict(&connection, ME, &event_id, true, AT).is_err());
         resolve_conflict(&connection, ME, &event_id, false, AT).unwrap();
         assert!(conflicts(&connection).unwrap().is_empty());
+    }
+
+    const PROFILE: &str = "01a17558-0000-7000-8000-0000000000f1";
+
+    fn device_with_my_profile() -> Connection {
+        let connection = open_in_memory().unwrap();
+        apply_rows(&connection, ME, &server_rows()).unwrap();
+        let profile = wire(
+            "app_user_profiles",
+            stamped(
+                json!({"id": PROFILE, "user_id": ME, "display_name": null, "bio": "hi", "version": 2}),
+                AT,
+            ),
+        );
+        apply_rows(&connection, ME, &[profile]).unwrap();
+        connection
+    }
+
+    #[test]
+    fn a_profile_edit_queues_only_the_fields_that_changed() {
+        let connection = device_with_my_profile();
+
+        edit_profile(&connection, ME, "Ada", "hi", AT).unwrap();
+
+        let events = pending_events(&connection).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].table, "app_user_profiles");
+        assert_eq!(events[0].base_version, 2);
+        assert_eq!(
+            events[0].base,
+            json!({"display_name": null}).as_object().unwrap().clone()
+        );
+        assert_eq!(
+            events[0].changes,
+            json!({"display_name": "Ada"}).as_object().unwrap().clone()
+        );
+        let shown = profile(&connection, ME).unwrap().unwrap();
+        assert_eq!(
+            (shown.display_name.as_str(), shown.bio.as_str()),
+            ("Ada", "hi")
+        );
+        assert!(shown.pending);
+
+        // Nothing changed, nothing queued; a blank field is cleared
+        edit_profile(&connection, ME, "Ada", "hi", AT).unwrap();
+        assert_eq!(pending_events(&connection).unwrap().len(), 1);
+        edit_profile(&connection, ME, "Ada", "  ", AT).unwrap();
+        assert_eq!(
+            pending_events(&connection).unwrap()[1].changes["bio"],
+            Value::Null
+        );
+
+        assert_eq!(
+            edit_profile(&connection, ME, &"x".repeat(101), "", AT).unwrap_err(),
+            "display_name should be at most 100 character(s)"
+        );
+        assert!(edit_profile(&connection, OTHER, "Eve", "", AT).is_err());
+    }
+
+    #[test]
+    fn a_profile_conflict_is_labelled_as_the_profile() {
+        let connection = device_with_my_profile();
+        edit_profile(&connection, ME, "Ada", "hi", AT).unwrap();
+        let event = pending_events(&connection).unwrap().remove(0);
+        let mut answer = Map::new();
+        answer.insert(
+            "display_name".into(),
+            json!({"yours": "Ada", "server": "Grace"}),
+        );
+        mark_conflict(&connection, &event.id, &answer).unwrap();
+
+        let conflict = &conflicts(&connection).unwrap()[0];
+        assert_eq!(conflict.summary, "Your profile");
+        assert_eq!(conflict.fields[0].yours, json!("Ada"));
     }
 }

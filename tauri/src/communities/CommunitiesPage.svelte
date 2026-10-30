@@ -100,6 +100,27 @@
     }
   }
 
+  let editingProfile = $state(false);
+  let displayName = $state("");
+  let bio = $state("");
+
+  function startProfileEdit() {
+    displayName = page.profile.display_name;
+    bio = page.profile.bio;
+    editingProfile = true;
+  }
+
+  async function saveProfile(event) {
+    event.preventDefault();
+    try {
+      page = await invoke("edit_profile", { displayName, bio });
+      editingProfile = false;
+      error = "";
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
   let showConflicts = $state(false);
 
   async function resolve(conflict, resolution) {
@@ -189,6 +210,26 @@
       </section>
     {/if}
 
+    {#if page.profile}
+      <section id="profile" class:pending={page.profile.pending}>
+        <h2>Your profile</h2>
+        {#if editingProfile}
+          <form onsubmit={saveProfile} class="post-form">
+            <label>Display name <input bind:value={displayName} /></label>
+            <label>Bio <textarea bind:value={bio} rows="3"></textarea></label>
+            <div class="actions">
+              <Button variant="primary" type="submit">Save</Button>
+              <Button type="button" onclick={() => (editingProfile = false)}>Cancel</Button>
+            </div>
+          </form>
+        {:else}
+          <p><strong>{page.profile.display_name || "(no display name)"}</strong>{#if page.profile.pending}<span class="muted"> · waiting to sync</span>{/if}</p>
+          <p>{page.profile.bio}</p>
+          <Button type="button" onclick={startProfileEdit}>Edit profile</Button>
+        {/if}
+      </section>
+    {/if}
+
     <section>
       <h2>Your communities</h2>
       {#if page.communities.length === 0}
@@ -214,7 +255,7 @@
         {#each page.posts as post (post.id)}
           <li class:pending={post.pending}>
             <p class="muted">
-              {post.author_email}{post.mine ? " (you)" : ""} · {post.inserted_at.slice(0, 19).replace("T", " ")}
+              {post.owner_email}{post.mine ? " (you)" : ""} · {post.inserted_at.slice(0, 19).replace("T", " ")}
               {#if post.communities.length}· in {post.communities.join(", ")}{/if}
               {#if post.pending}· waiting to sync{/if}
             </p>
@@ -252,6 +293,7 @@
     gap: 0.5rem;
     max-width: 40rem;
   }
+  input:not([type="checkbox"]),
   textarea {
     width: 100%;
     padding: 0.5rem;
@@ -275,6 +317,7 @@
     padding: 0.75rem 0;
     border-top: 1px solid color-mix(in oklab, currentColor 15%, transparent);
   }
+  #profile.pending,
   .feed li.pending {
     opacity: 0.7;
   }

@@ -26,13 +26,14 @@ defmodule App.Data.Purge do
   alias App.Data.Communities
   alias App.Data.Posts
   alias App.Data.PostsCommunities
+  alias App.Data.UserProfiles
   alias App.Data.Users
   alias App.Data.UsersCommunities
 
   @retention_days 90
 
   # Children first
-  @synced_contexts [PostsCommunities, Posts, UsersCommunities, Communities, AppUsers]
+  @synced_contexts [PostsCommunities, Posts, UsersCommunities, Communities, UserProfiles, AppUsers]
 
   def retention_days, do: @retention_days
 

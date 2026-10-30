@@ -4,13 +4,13 @@ defmodule App.Data.Posting do
   it, and reading a feed, over the `App.Data.Posts` and
   `App.Data.PostsCommunities` contexts.
 
-  Only the author adds their post to a community or removes it, and only
+  Only the owner adds their post to a community or removes it, and only
   to a community they are a member of. Adding a post back revives the row
   removed earlier. Deleting a post is a soft delete with no cascade: its
   community rows stay, hidden because every read joins through the post.
 
-  Every write records an `App.Data.PostEvent`, see "Event-sourced
-  resources" in `docs/design/offline-sync.md`.
+  Every write records an `App.Data.PostEvent` in the post's event log,
+  see "Events" in `docs/design/offline-sync.md`.
   """
 
   alias App.Data.Memberships
@@ -35,7 +35,7 @@ defmodule App.Data.Posting do
   end
 
   defp create_in_communities(%Scope{user: user} = scope, params, community_ids) do
-    with {:ok, post} <- Posts.create(params, author_id: user.id),
+    with {:ok, post} <- Posts.create(params, owner_id: user.id),
          {:ok, _event} <- record(scope, post, :create, 0, %{"body" => post.body}, %{}),
          :ok <- add_to_communities(scope, post, community_ids) do
       {:ok, post}
@@ -52,11 +52,11 @@ defmodule App.Data.Posting do
   end
 
   @doc """
-  Adds the post to the community, or adds it back. Author only.
+  Adds the post to the community, or adds it back. Owner only.
   """
   def add_to_community(
-        %Scope{user: %{id: author_id}} = scope,
-        %Post{author_id: author_id} = post,
+        %Scope{user: %{id: owner_id}} = scope,
+        %Post{owner_id: owner_id} = post,
         community_id
       ) do
     case Memberships.membership(scope, community_id) do
@@ -85,14 +85,14 @@ defmodule App.Data.Posting do
     end
   end
 
-  def add_to_community(_scope, _post, _community_id), do: {:error, :not_author}
+  def add_to_community(_scope, _post, _community_id), do: {:error, :not_owner}
 
   @doc """
-  Removes the post from the community. Author only.
+  Removes the post from the community. Owner only.
   """
   def remove_from_community(
-        %Scope{user: %{id: author_id} = user},
-        %Post{author_id: author_id} = post,
+        %Scope{user: %{id: owner_id} = user},
+        %Post{owner_id: owner_id} = post,
         community_id
       ) do
     case PostsCommunities.get_by(post_id: post.id, community_id: community_id) do
@@ -107,12 +107,12 @@ defmodule App.Data.Posting do
     end
   end
 
-  def remove_from_community(_scope, _post, _community_id), do: {:error, :not_author}
+  def remove_from_community(_scope, _post, _community_id), do: {:error, :not_owner}
 
   @doc """
-  Deletes the post. Author only.
+  Deletes the post. Owner only.
   """
-  def delete(%Scope{user: %{id: author_id} = user} = scope, %Post{author_id: author_id} = post) do
+  def delete(%Scope{user: %{id: owner_id} = user} = scope, %Post{owner_id: owner_id} = post) do
     App.Repo.transact(fn ->
       with {:ok, deleted} <- Posts.delete(post, deleted_by_id: user.id),
            {:ok, _event} <-
@@ -129,7 +129,7 @@ defmodule App.Data.Posting do
     end)
   end
 
-  def delete(_scope, _post), do: {:error, :not_author}
+  def delete(_scope, _post), do: {:error, :not_owner}
 
   @doc """
   Applies an event from a device, checked for shape by `App.Data.Sync`.
@@ -159,7 +159,7 @@ defmodule App.Data.Posting do
   defp apply_checked_event(%Scope{user: user} = scope, %{type: :create} = event) do
     case current(event.row_id) do
       nil ->
-        changeset = Posts.change(%Post{id: event.row_id}, event.changes, author_id: user.id)
+        changeset = Posts.change(%Post{id: event.row_id}, event.changes, owner_id: user.id)
 
         with {:ok, post} <- insert(changeset),
              {:ok, recorded} <- record(scope, post, :create, 0, event.changes, %{}, event.id) do
@@ -176,9 +176,8 @@ defmodule App.Data.Posting do
       nil ->
         {:error, "unknown_post", nil}
 
-      %Post{author_id: ^user_id} = post ->
-        values =
-          Map.new(@event_fields.update, &{&1, Merge.wire(Map.fetch!(post, String.to_existing_atom(&1)))})
+      %Post{owner_id: ^user_id} = post ->
+        values = Merge.values(post, @event_fields.update)
 
         {applied, conflicts} =
           Merge.merge(values, post.version, event.base_version, event.base, event.changes)
@@ -189,7 +188,7 @@ defmodule App.Data.Posting do
         end
 
       post ->
-        {:error, "not_author", post}
+        {:error, "not_owner", post}
     end
   end
 
@@ -230,16 +229,16 @@ defmodule App.Data.Posting do
   end
 
   @doc """
-  The posts the scope reads, newest first, with their authors: inside a
+  The posts the scope reads, newest first, with their owners: inside a
   community, the community's feed; otherwise everything visible to the
   user across communities.
   """
   def feed(%Scope{community: %{id: community_id}}) do
-    Posts.list(filters: [in_community: community_id], preloads: [:author])
+    Posts.list(filters: [in_community: community_id], preloads: [:owner])
   end
 
   def feed(%Scope{} = scope) do
-    Posts.list(filters: [visible_to: scope], preloads: [:author])
+    Posts.list(filters: [visible_to: scope], preloads: [:owner])
   end
 
   @doc """

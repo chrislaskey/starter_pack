@@ -11,9 +11,18 @@ use rustler::{Error, NifResult};
 #[path = "../../../lib/app/data/schemas/posts/post.rs"]
 mod post;
 
+#[allow(dead_code)]
+#[path = "../../../lib/app/data/schemas/user_profiles/user_profile.rs"]
+mod user_profile;
+
 #[rustler::nif]
 fn post_changeset(data: &str, params: &str) -> NifResult<String> {
     run(data, params, post::changeset)
+}
+
+#[rustler::nif]
+fn user_profile_changeset(data: &str, params: &str) -> NifResult<String> {
+    run(data, params, user_profile::changeset)
 }
 
 fn run(

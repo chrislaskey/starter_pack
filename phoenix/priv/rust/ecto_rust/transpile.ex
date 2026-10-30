@@ -12,7 +12,7 @@ defmodule EctoRust.Transpile do
   change or leaves the changeset alone does. Module attributes such as
   `@statuses` resolve to their value.
 
-  `put_change/3` writes nothing: the app sets such a field, the author
+  `put_change/3` writes nothing: the app sets such a field, the owner
   from the scope or the sync time, and the Rust reads it from `data`,
   which is how `App.Data.UniversalChangeset.run/3` and the other apps pass
   it. So a put field may be required but not otherwise validated, and may

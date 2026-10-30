@@ -10,11 +10,16 @@
 
 use ecto_changeset::Changeset;
 
-/// `App.Data.Post.changeset/3`. The app sets `author_id`, so it goes in
+/// `App.Data.Post.changeset/3`. The app sets `owner_id`, so it goes in
 /// `data`, as the posting flow sets it on the server.
 #[allow(dead_code)]
 #[path = "../../../phoenix/lib/app/data/schemas/posts/post.rs"]
 pub mod post;
+
+/// `App.Data.UserProfile.changeset/3`. The app sets `user_id`.
+#[allow(dead_code)]
+#[path = "../../../phoenix/lib/app/data/schemas/user_profiles/user_profile.rs"]
+pub mod user_profile;
 
 /// The changeset when it is valid, or its errors as one line for the
 /// page, like `body can't be blank`.
@@ -42,18 +47,18 @@ mod tests {
 
     #[test]
     fn a_post_is_checked_with_the_servers_rules() {
-        let author = json!({"author_id": "01a17558-0000-7000-8000-000000000001"});
+        let owner = json!({"owner_id": "01a17558-0000-7000-8000-000000000001"});
 
-        let valid = post::changeset(&object(author.clone()), &object(json!({"body": "Hello"})));
+        let valid = post::changeset(&object(owner.clone()), &object(json!({"body": "Hello"})));
         assert!(checked(valid).is_ok());
 
         let errors = checked(post::changeset(
-            &object(author),
+            &object(owner),
             &object(json!({"body": " "})),
         ));
         assert_eq!(errors.unwrap_err(), "body can't be blank");
 
-        let no_author = post::changeset(&Params::new(), &object(json!({"body": "Hello"})));
-        assert_eq!(checked(no_author).unwrap_err(), "author_id can't be blank");
+        let no_owner = post::changeset(&Params::new(), &object(json!({"body": "Hello"})));
+        assert_eq!(checked(no_owner).unwrap_err(), "owner_id can't be blank");
     }
 }

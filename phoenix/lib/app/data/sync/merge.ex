@@ -1,7 +1,7 @@
 defmodule App.Data.Sync.Merge do
   @moduledoc """
-  The field-level merge of an event-sourced resource, see "Event-sourced
-  resources" in `docs/design/offline-sync.md`.
+  The field-level merge of an event into its row, see "Events" in
+  `docs/design/offline-sync.md`.
   """
 
   @doc """
@@ -29,6 +29,11 @@ defmodule App.Data.Sync.Merge do
       end
     end)
   end
+
+  @doc """
+  The fields of a row, as wire values keyed by name.
+  """
+  def values(row, fields), do: Map.new(fields, &{&1, wire(Map.fetch!(row, String.to_existing_atom(&1)))})
 
   @doc """
   A value as it travels on the wire.

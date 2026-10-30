@@ -10,6 +10,7 @@ defmodule App.Data.UniversalChangeset.Native do
   # The Rust next to each schema is compiled in by path, so a change to
   # it recompiles this module and with it the crate
   @external_resource "lib/app/data/schemas/posts/post.rs"
+  @external_resource "lib/app/data/schemas/user_profiles/user_profile.rs"
 
   use Rustler, otp_app: :app, crate: "universal_changeset"
 
@@ -19,11 +20,17 @@ defmodule App.Data.UniversalChangeset.Native do
   """
   def run(App.Data.Post, :changeset, data, params), do: post_changeset(data, params)
 
+  def run(App.Data.UserProfile, :changeset, data, params),
+    do: user_profile_changeset(data, params)
+
   @doc """
   The fields a marked function casts, which `App.Data.UniversalChangeset.run/3`
   tells apart from the fields the app sets.
   """
   def cast(App.Data.Post, :changeset), do: [:body]
+  def cast(App.Data.UserProfile, :changeset), do: [:display_name, :bio]
 
   def post_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
+
+  def user_profile_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
 end

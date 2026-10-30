@@ -1,7 +1,7 @@
 defmodule App.Data.PostCommunity do
   @moduledoc """
   "This post is in this community", and the membership it was added
-  under, `users_communities_id`, which is always the author's. Leaving a
+  under, `users_communities_id`, which is always the owner's. Leaving a
   community soft-deletes the member's rows through that membership, and
   rejoining revives them, see `App.Data.Memberships`. Removing a post from
   a community soft-deletes its row, and adding it back revives the same
@@ -49,7 +49,7 @@ defmodule App.Data.PostCommunity do
   end
 
   @doc """
-  Adding the post back: revives the row under the author's current
+  Adding the post back: revives the row under the owner's current
   membership.
   """
   def revive_changeset(row, params, _options \\ []) do

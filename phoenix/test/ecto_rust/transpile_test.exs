@@ -72,9 +72,9 @@ defmodule EctoRust.TranspileTest do
 
     assert rust =~ ~s|BTreeMap::from([("body".to_string(), FieldType::String)])|
     assert rust =~ ~s|Changeset::cast(data, &fields(), params, &["body"])|
-    assert rust =~ ~s|.validate_required(&["author_id", "body"])|
+    assert rust =~ ~s|.validate_required(&["owner_id", "body"])|
     assert rust =~ ~s|.validate_length("body", &Length::default().max(10000), None)|
-    assert rust =~ "/// The app sets `author_id` and `last_synced_at`, so pass them in `data`."
+    assert rust =~ "/// The app sets `owner_id` and `last_synced_at`, so pass them in `data`."
     assert rust =~ "pub fn changeset_constraints() -> Vec<Constraint>"
   end
 

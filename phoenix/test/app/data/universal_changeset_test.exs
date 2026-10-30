@@ -5,15 +5,15 @@ defmodule App.Data.UniversalChangesetTest do
   # for every rule a marked function gains.
   use App.DataCase, async: true
 
-  alias App.Data.{Post, UniversalChangeset}
+  alias App.Data.{Post, UniversalChangeset, UserProfile}
 
-  @author Ecto.UUID.generate()
+  @owner Ecto.UUID.generate()
   @long String.duplicate("x", 10_001)
 
   @cases [
     %{function: :changeset, name: "a post", params: %{"body" => "Hello"}},
     %{function: :changeset, name: "no params", params: %{}},
-    %{function: :changeset, name: "no author", params: %{"body" => "Hello"}, options: []},
+    %{function: :changeset, name: "no owner", params: %{"body" => "Hello"}, options: []},
     %{function: :changeset, name: "blank body", params: %{"body" => "  "}},
     %{function: :changeset, name: "body too long", params: %{"body" => @long}},
     %{function: :changeset, name: "body at the limit", params: %{"body" => String.duplicate("x", 10_000)}},
@@ -21,23 +21,57 @@ defmodule App.Data.UniversalChangesetTest do
     %{function: :changeset, name: "atom keys", params: %{body: "Hello"}},
     %{
       function: :changeset,
-      name: "editing keeps the author",
-      data: %{author_id: @author, body: "Old"},
+      name: "editing keeps the owner",
+      data: %{owner_id: @owner, body: "Old"},
       params: %{"body" => "New"},
       options: []
     },
     %{
       function: :changeset,
       name: "an unchanged body is not validated",
-      data: %{author_id: @author, body: @long},
+      data: %{owner_id: @owner, body: @long},
       params: %{"body" => @long},
+      options: []
+    },
+    %{
+      module: UserProfile,
+      function: :changeset,
+      name: "a profile",
+      params: %{"display_name" => "Ada", "bio" => "Hi"}
+    },
+    %{module: UserProfile, function: :changeset, name: "an empty profile", params: %{}},
+    %{
+      module: UserProfile,
+      function: :changeset,
+      name: "no user",
+      params: %{"display_name" => "Ada"},
+      options: []
+    },
+    %{
+      module: UserProfile,
+      function: :changeset,
+      name: "display name too long",
+      params: %{"display_name" => String.duplicate("x", 101)}
+    },
+    %{
+      module: UserProfile,
+      function: :changeset,
+      name: "bio too long",
+      params: %{"bio" => String.duplicate("x", 1001)}
+    },
+    %{
+      module: UserProfile,
+      function: :changeset,
+      name: "editing keeps the user",
+      data: %{user_id: @owner, display_name: "Old"},
+      params: %{"display_name" => "New"},
       options: []
     }
   ]
 
   defp cases do
     for case <- @cases do
-      %{module: Post, data: %{}, options: [author_id: @author]} |> Map.merge(case)
+      %{module: Post, data: %{}, options: [owner_id: @owner, user_id: @owner]} |> Map.merge(case)
     end
   end
 
@@ -65,18 +99,18 @@ defmodule App.Data.UniversalChangesetTest do
   end
 
   test "the changeset keeps what the template puts and what the repo reads" do
-    changeset = Post.changeset(%Post{}, %{"body" => "Hello"}, author_id: @author)
+    changeset = Post.changeset(%Post{}, %{"body" => "Hello"}, owner_id: @owner)
 
     assert changeset.valid?
     assert changeset.changes.body == "Hello"
-    assert changeset.changes.author_id == @author
+    assert changeset.changes.owner_id == @owner
     assert %DateTime{} = changeset.changes.last_synced_at
-    assert changeset.required == [:author_id, :body]
+    assert changeset.required == [:owner_id, :body]
     assert [{:body, {:length, [max: 10_000]}}] = changeset.validations
   end
 
   test "an error is what Ecto reports, template and options included" do
-    changeset = Post.changeset(%Post{}, %{"body" => @long}, author_id: @author)
+    changeset = Post.changeset(%Post{}, %{"body" => @long}, owner_id: @owner)
 
     assert changeset.errors == [
              body:

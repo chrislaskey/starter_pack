@@ -122,6 +122,7 @@ mod tests {
             .unwrap();
         for table in [
             "app_users",
+            "app_user_profiles",
             "app_communities",
             "app_users_communities",
             "app_posts",

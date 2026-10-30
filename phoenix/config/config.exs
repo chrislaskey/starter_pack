@@ -33,6 +33,10 @@ config :ecto_sqlite3,
   uuid_type: :string,
   datetime_type: :iso8601
 
+# Transactions take SQLite's write lock up front and wait for it, instead
+# of failing when a read-then-write transaction cannot upgrade its lock
+config :app, App.Repo, default_transaction_mode: :immediate
+
 # Configure the endpoint
 config :app, App.Web.Endpoint,
   url: [host: "localhost"],

@@ -36,10 +36,10 @@ defmodule App.ClientMigrationsTest do
 
   test "the exported schema, applied to an empty file, accepts a row pulled from the server unchanged",
        %{tmp_dir: tmp_dir} do
-    author = user_scope_fixture(user_fixture())
-    community = joined_community_fixture(author)
-    post = post_fixture(author, [community.id])
-    {:ok, page} = Sync.pull(author, %{})
+    owner = user_scope_fixture(user_fixture())
+    community = joined_community_fixture(owner)
+    post = post_fixture(owner, [community.id])
+    {:ok, page} = Sync.pull(owner, %{})
     %{"rows" => rows, "next" => nil} = page |> Jason.encode!() |> Jason.decode!()
 
     {:ok, conn} = Sqlite3.open(Path.join(tmp_dir, "client.db"))

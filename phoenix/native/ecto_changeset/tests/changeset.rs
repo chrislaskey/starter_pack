@@ -23,7 +23,7 @@ fn types() -> BTreeMap<String, FieldType> {
         ),
         ("notes".to_string(), FieldType::String),
         ("terms".to_string(), FieldType::Boolean),
-        ("author_id".to_string(), FieldType::Uuid),
+        ("owner_id".to_string(), FieldType::Uuid),
         (
             "role".to_string(),
             FieldType::Enum(vec!["member".to_string(), "admin".to_string()]),
@@ -431,15 +431,15 @@ fn only_changes_are_validated() {
 #[test]
 fn a_required_field_set_by_the_app_is_read_from_data() {
     let changeset = Changeset::cast(
-        &params(json!({"author_id": "0199f3a0-6c1e-7c3e-8f1a-2b3c4d5e6f70"})),
+        &params(json!({"owner_id": "0199f3a0-6c1e-7c3e-8f1a-2b3c4d5e6f70"})),
         &types(),
         &params(json!({"name": "Ada"})),
         &["name"],
     )
-    .validate_required(&["author_id", "name"]);
+    .validate_required(&["owner_id", "name"]);
     assert!(changeset.valid());
     assert_eq!(
-        changeset.get_field("author_id"),
+        changeset.get_field("owner_id"),
         json!("0199f3a0-6c1e-7c3e-8f1a-2b3c4d5e6f70")
     );
 }
@@ -462,10 +462,10 @@ fn casts_uuids_enums_booleans_floats_and_dates_as_ecto_does() {
     let invalid = |error: Result<Value, Error>| error.unwrap_err().validation() == "cast";
 
     assert_eq!(
-        cast("author_id", json!("0199F3A0-6C1E-7C3E-8F1A-2B3C4D5E6F70")).unwrap(),
+        cast("owner_id", json!("0199F3A0-6C1E-7C3E-8F1A-2B3C4D5E6F70")).unwrap(),
         json!("0199f3a0-6c1e-7c3e-8f1a-2b3c4d5e6f70")
     );
-    assert!(invalid(cast("author_id", json!("not-a-uuid"))));
+    assert!(invalid(cast("owner_id", json!("not-a-uuid"))));
     assert_eq!(cast("role", json!("admin")).unwrap(), json!("admin"));
     assert!(invalid(cast("role", json!("owner"))));
     assert_eq!(cast("terms", json!("1")).unwrap(), json!(true));

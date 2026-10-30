@@ -1,7 +1,7 @@
 defmodule App.Data.Post do
   @moduledoc """
-  A post: the first resource, written by one author and in the
-  communities the author chose, see `App.Data.PostCommunity`. The
+  A post: the first resource, written by one owner and in the
+  communities the owner chose, see `App.Data.PostCommunity`. The
   reference for every rule a resource follows, see phase 3 of
   `docs/design/build-order.md`.
 
@@ -22,7 +22,7 @@ defmodule App.Data.Post do
   @foreign_key_type Ecto.UUID
 
   schema "app_posts" do
-    belongs_to :author, App.Data.AppUser
+    belongs_to :owner, App.Data.AppUser
     field :body, :string
     field :last_synced_at, :utc_datetime_usec
     field :version, :integer, default: 1
@@ -33,21 +33,21 @@ defmodule App.Data.Post do
   end
 
   @doc """
-  Writing or editing a post. The author is the `:author_id` option, set
+  Writing or editing a post. The owner is the `:owner_id` option, set
   by the flow, never a param.
   """
   @universal_changeset true
   def changeset(post, params, options \\ []) do
     post
     |> cast(params, [:body])
-    |> put_author(Keyword.get(options, :author_id))
-    |> validate_required([:author_id, :body])
+    |> put_owner(Keyword.get(options, :owner_id))
+    |> validate_required([:owner_id, :body])
     |> validate_length(:body, max: 10_000)
     |> put_change(:last_synced_at, DateTime.utc_now())
   end
 
-  defp put_author(changeset, nil), do: changeset
-  defp put_author(changeset, author_id), do: put_change(changeset, :author_id, author_id)
+  defp put_owner(changeset, nil), do: changeset
+  defp put_owner(changeset, owner_id), do: put_change(changeset, :owner_id, owner_id)
 
   @doc """
   The fields an `update` event may change, see `App.Data.Posting.apply_event/2`.

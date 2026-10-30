@@ -4,7 +4,7 @@ defmodule App.Repo.Migrations.CreatePosts do
   def change do
     create table(:app_posts, primary_key: false) do
       add :id, :uuid, primary_key: true
-      add :author_id, references(:app_users, type: :uuid, on_delete: :delete_all), null: false
+      add :owner_id, references(:app_users, type: :uuid, on_delete: :delete_all), null: false
       add :body, :text, null: false
       add :last_synced_at, :utc_datetime_usec, null: false
       add :version, :bigint, null: false, default: 1
@@ -14,7 +14,7 @@ defmodule App.Repo.Migrations.CreatePosts do
       timestamps(type: :utc_datetime_usec)
     end
 
-    create index(:app_posts, [:author_id])
+    create index(:app_posts, [:owner_id])
 
     create table(:app_posts_communities, primary_key: false) do
       add :id, :uuid, primary_key: true

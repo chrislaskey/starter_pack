@@ -17,13 +17,13 @@ defmodule App.Data.PurgeTest do
   defp later(days), do: DateTime.add(DateTime.utc_now(), days, :day)
 
   test "hard-deletes tombstones older than the window, children first, and records the horizon" do
-    author = user_scope_fixture(user_fixture())
-    community = joined_community_fixture(author)
-    gone = post_fixture(author, [community.id])
-    kept = post_fixture(author, [community.id])
-    {:ok, _row} = Posting.remove_from_community(author, gone, community.id)
-    {:ok, _post} = Posting.delete(author, gone)
-    {:ok, _membership} = Memberships.leave(author, community.id)
+    owner = user_scope_fixture(user_fixture())
+    community = joined_community_fixture(owner)
+    gone = post_fixture(owner, [community.id])
+    kept = post_fixture(owner, [community.id])
+    {:ok, _row} = Posting.remove_from_community(owner, gone, community.id)
+    {:ok, _post} = Posting.delete(owner, gone)
+    {:ok, _membership} = Memberships.leave(owner, community.id)
 
     assert Purge.horizon() == nil
     assert %{counts: %{"app_posts" => 0}} = Purge.run(now: later(89))
@@ -42,18 +42,18 @@ defmodule App.Data.PurgeTest do
     assert DateTime.compare(result.horizon, DateTime.utc_now()) == :gt
   end
 
-  test "purges a deleted account and its app user row" do
+  test "purges a deleted account, its app user row and its profile" do
     user = user_fixture()
     scope = user_scope_fixture(user)
     community = joined_community_fixture(scope)
     post_fixture(scope, [community.id])
     {:ok, _user} = Accounts.delete_user(user)
 
-    assert %{counts: %{"users" => 1, "app_users" => 1}} = Purge.run(now: later(91))
+    assert %{counts: %{"users" => 1, "app_users" => 1, "app_user_profiles" => 1}} = Purge.run(now: later(91))
 
     assert App.Repo.get(App.Data.User, user.id) == nil
     assert App.Data.AppUsers.get(user.id, include_deleted: true) == nil
-    assert Posts.list(filters: [author_id: user.id], include_deleted: true) == []
+    assert Posts.list(filters: [owner_id: user.id], include_deleted: true) == []
     assert Users.get_by(email: user.email) == nil
   end
 end

@@ -80,18 +80,18 @@ as a difference.
 
 ### What the app sets, and what the form sends
 
-`App.Data.Post.changeset/3` puts the author from the scope and the sync
-time, and requires the author. The Rust writes nothing for
+`App.Data.Post.changeset/3` puts the owner from the scope and the sync
+time, and requires the owner. The Rust writes nothing for
 `put_change/3`: a put field is data to the Rust, read from `data` as the
 row's other columns are. The Phoenix runtime passes the template's
 changes that the params did not supply as data, and the desktop app puts
-the author in `data` itself. So a put field may be required but not
+the owner in `data` itself. So a put field may be required but not
 otherwise validated, since Ecto would validate the put value and the
 Rust has nothing to validate; the transpiler refuses that, and a put
 field that is also cast.
 
-A helper with two clauses, `put_author(changeset, nil)` and
-`put_author(changeset, author_id)`, is followed because both clauses
+A helper with two clauses, `put_owner(changeset, nil)` and
+`put_owner(changeset, owner_id)`, is followed because both clauses
 give the same Rust: nothing. A helper whose clauses give different rules
 is refused with its line.
 

@@ -21,7 +21,7 @@ defmodule App.Data.UniversalChangeset do
   read, then the raw params go to the Rust function, which casts and
   validates them as it does in the other apps, and its errors replace the
   template's. The changes the template made that the params did not
-  supply, such as the author from the scope, go to the Rust as data, since
+  supply, such as the owner from the scope, go to the Rust as data, since
   the other apps set them the same way.
 
   Nothing here needs the Rust toolchain. The generated
@@ -122,7 +122,7 @@ defmodule App.Data.UniversalChangeset do
     # by Ecto when the params leave the field out, so it is a param here too
     params = prior |> Map.take(cast) |> params() |> Map.merge(params(attrs))
 
-    # What the template set outside the cast, such as the author from the
+    # What the template set outside the cast, such as the owner from the
     # scope, is data to the Rust, as it is in the other apps
     data = record |> Map.take(fields) |> Map.merge(template.changes |> Map.take(fields) |> Map.drop(cast))
 

@@ -43,10 +43,10 @@ defmodule App.Web.CommunityLive do
 
         <ul id="posts" phx-update="stream" class="divide-y divide-base-200">
           <li :for={{id, post} <- @streams.posts} id={id} class="space-y-1 py-3">
-            <p class="text-sm text-base-content/60">{post.author.email}</p>
+            <p class="text-sm text-base-content/60">{post.owner.email}</p>
             <p class="whitespace-pre-wrap">{post.body}</p>
             <.button
-              :if={post.author_id == @current_scope.user.id}
+              :if={post.owner_id == @current_scope.user.id}
               phx-click="remove"
               phx-value-id={post.id}
             >

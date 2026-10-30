@@ -37,7 +37,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{AppState, MAIN_WINDOW};
-use store::{Community, Conflict, Cursor, FeedPost};
+use store::{Community, Conflict, Cursor, FeedPost, UserProfile};
 use worker::SyncReport;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -53,6 +53,7 @@ pub struct Profile {
 #[derive(Debug, Serialize)]
 pub struct CommunitiesPage {
     pub communities: Vec<Community>,
+    pub profile: Option<UserProfile>,
     pub posts: Vec<FeedPost>,
     pub pending: i64,
     pub conflicts: Vec<Conflict>,
@@ -197,6 +198,30 @@ pub async fn edit_post(
     page(device)
 }
 
+/// Edits the user's own profile in the file and starts a sync.
+#[tauri::command]
+pub async fn edit_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    display_name: String,
+    bio: String,
+) -> Result<CommunitiesPage, String> {
+    let device = &state.device;
+    let profile = device.profile().ok_or("Not logged in on this device")?;
+    let connection = schema::open(&device.db_path())?;
+    store::edit_profile(
+        &connection,
+        &profile.id,
+        &display_name,
+        &bio,
+        &now_iso8601(),
+    )?;
+    drop(connection);
+
+    spawn_sync(app);
+    page(device)
+}
+
 /// Deletes the user's own post in the file and starts a sync.
 #[tauri::command]
 pub async fn delete_post(
@@ -251,6 +276,7 @@ fn page(device: &Device) -> Result<CommunitiesPage, String> {
 
     Ok(CommunitiesPage {
         communities: store::member_communities(&connection, &profile.id)?,
+        profile: store::profile(&connection, &profile.id)?,
         posts: store::feed(&connection, &profile.id)?,
         pending: store::pending_count(&connection)?,
         conflicts: store::conflicts(&connection)?,

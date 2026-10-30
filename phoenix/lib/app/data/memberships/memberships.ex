@@ -10,7 +10,7 @@ defmodule App.Data.Memberships do
   `deleted_at`. Rejoining while the row still exists clears `deleted_at`
   on that same row, so its id is stable, and revives exactly the rows
   that left with it: those under the membership whose `deleted_at` equals
-  the membership's. A row the author removed on purpose was deleted at
+  the membership's. A row the owner removed on purpose was deleted at
   another moment and stays deleted. Once the purge has removed the
   membership, rejoining starts fresh.
   """

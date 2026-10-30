@@ -11,7 +11,7 @@ defmodule App.Data.Sync do
 
   The rows visible to the user with `last_synced_at` later than the
   cursor, every table merged and ordered by `(last_synced_at, id)`,
-  paged. A `posts_communities` row carries its post and the post's author,
+  paged. A `posts_communities` row carries its post and the post's owner,
   regardless of their `last_synced_at`. The request's `cursor` is what the
   client stored after its last sync, pulled from an overlap buffer
   earlier so a write that committed late is not missed; `after` is the
@@ -24,11 +24,12 @@ defmodule App.Data.Sync do
   One transaction per batch of `rows` and `events`, parents first. Every
   datetime is checked for the exact format, client datetimes are bounded
   by the server clock, and everything is authorized against the scope.
-  Rows apply when their `version` is still the server's. Memberships and
-  `posts_communities` rows are server-wins. Posts change only through
-  events, merged field by field by `App.Data.Posting.apply_event/2`.
-  The response lists `accepted` and `rejected` rows, and an answer per
-  event. See `docs/design/offline-sync.md`.
+  A user-editable table, `@event_tables`, changes only through events,
+  merged field by field by its flow's `apply_event/2`. Other rows are
+  server-wins: app users, memberships and `posts_communities` rows, and a
+  community once a client has created it. The response lists `accepted`
+  and `rejected` rows, and an answer per event. See
+  `docs/design/offline-sync.md`.
 
   ## Backfill
 
@@ -47,7 +48,10 @@ defmodule App.Data.Sync do
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.PostsCommunities
+  alias App.Data.Profiles
   alias App.Data.UserCommunity
+  alias App.Data.UserProfile
+  alias App.Data.UserProfiles
   alias App.Data.UsersCommunities
   alias App.Web.Scope
 
@@ -60,11 +64,19 @@ defmodule App.Data.Sync do
   # Parents first, which is the push order.
   @tables [
     {"app_users", AppUser, AppUsers},
+    {"app_user_profiles", UserProfile, UserProfiles},
     {"app_communities", Community, Communities},
     {"app_users_communities", UserCommunity, UsersCommunities},
     {"app_posts", Post, Posts},
     {"app_posts_communities", PostCommunity, PostsCommunities}
   ]
+
+  # The tables a client changes only through events, with the flow that
+  # applies them
+  @event_tables %{
+    "app_user_profiles" => {UserProfile, Profiles},
+    "app_posts" => {Post, Posting}
+  }
 
   @doc """
   The synced tables as `{name, schema, context}`, parents first.
@@ -167,7 +179,7 @@ defmodule App.Data.Sync do
   defp sort_key(row), do: {DateTime.to_unix(row.last_synced_at, :microsecond), row.id}
 
   # Every live `posts_communities` row carries its post and the post's
-  # author, placed before it so a client with foreign keys can apply in
+  # owner, placed before it so a client with foreign keys can apply in
   # order. A removed row carries nothing: a client that held the post
   # prunes it, and one that never did must not receive it now.
   defp carry(page) do
@@ -178,10 +190,10 @@ defmodule App.Data.Sync do
       |> Posts.list()
       |> Map.new(&{&1.id, &1})
 
-    author_ids = posts |> Map.values() |> Enum.map(& &1.author_id) |> Enum.uniq()
+    owner_ids = posts |> Map.values() |> Enum.map(& &1.owner_id) |> Enum.uniq()
 
-    authors =
-      [filters: [id: author_ids], include_deleted: true]
+    owners =
+      [filters: [id: owner_ids], include_deleted: true]
       |> AppUsers.list()
       |> Map.new(&{&1.id, &1})
 
@@ -189,7 +201,7 @@ defmodule App.Data.Sync do
     |> Enum.flat_map(fn
       {"app_posts_communities", %{deleted_at: nil} = row} = pair ->
         post = Map.fetch!(posts, row.post_id)
-        [{"app_users", Map.fetch!(authors, post.author_id)}, {"app_posts", post}, pair]
+        [{"app_users", Map.fetch!(owners, post.owner_id)}, {"app_posts", post}, pair]
 
       pair ->
         [pair]
@@ -333,6 +345,10 @@ defmodule App.Data.Sync do
     end
   end
 
+  defp apply_row(_scope, table, _context, incoming) when is_map_key(@event_tables, table) do
+    {:rejected, table, incoming.id, "events_only", nil}
+  end
+
   # App users come from registration and are never accepted from a client.
   defp apply_row(_scope, "app_users", context, incoming) do
     {:rejected, "app_users", incoming.id, "server_wins", server_version(context, incoming.id)}
@@ -344,15 +360,11 @@ defmodule App.Data.Sync do
   defp apply_row(scope, "app_communities", context, incoming) do
     case context.get(incoming.id, include_deleted: true) do
       nil ->
-        write(scope, "app_communities", Community, nil, incoming)
+        insert(scope, "app_communities", Community, incoming)
 
       existing ->
         {:rejected, "app_communities", incoming.id, "server_wins", encode({"app_communities", existing})}
     end
-  end
-
-  defp apply_row(_scope, "app_posts", _context, incoming) do
-    {:rejected, "app_posts", incoming.id, "events_only", nil}
   end
 
   # Server-wins: the client's row is an intent, applied through the flow,
@@ -413,37 +425,18 @@ defmodule App.Data.Sync do
     end
   end
 
-  defp write(%Scope{user: user}, table, schema, existing, incoming) do
+  defp insert(%Scope{user: user}, table, schema, incoming) do
     now = DateTime.utc_now()
-    incoming = bound(incoming, now, user)
-
-    cond do
-      existing == nil ->
-        write_row(table, schema, existing, %{incoming | version: 1}, now)
-
-      incoming.version == existing.version ->
-        write_row(table, schema, existing, %{incoming | version: existing.version + 1}, now)
-
-      true ->
-        {:rejected, table, incoming.id, "conflict", encode({table, existing})}
-    end
-  end
-
-  defp write_row(table, schema, existing, incoming, now) do
-    fields = schema.__schema__(:fields)
 
     values =
       incoming
-      |> Map.take(fields)
-      |> Map.put(:last_synced_at, now)
-      |> Map.update!(:inserted_at, &(&1 || (existing && existing.inserted_at) || now))
+      |> bound(now, user)
+      |> Map.take(schema.__schema__(:fields))
+      |> Map.merge(%{version: 1, last_synced_at: now})
+      |> Map.update!(:inserted_at, &(&1 || now))
 
-    App.Repo.insert_all(schema, [values],
-      on_conflict: {:replace, fields -- [:id, :inserted_at]},
-      conflict_target: [:id]
-    )
-
-    {:accepted, table, incoming.id, %{last_synced_at: now, version: incoming.version}}
+    App.Repo.insert_all(schema, [values])
+    {:accepted, table, incoming.id, values}
   end
 
   # No datetime from a client is later than now, and a client deletes
@@ -460,8 +453,6 @@ defmodule App.Data.Sync do
   defp earliest(datetime, now), do: if(DateTime.compare(datetime, now) == :gt, do: now, else: datetime)
 
   ## Events
-
-  @event_sourced %{"app_posts" => {Post, Posting}}
 
   defp apply_event(scope, event) do
     answer = %{
@@ -489,19 +480,24 @@ defmodule App.Data.Sync do
           event_rejected(reason, row && encode({table, row}))
 
         {:error, %Ecto.Changeset{} = changeset} ->
-          event_rejected("invalid: #{inspect(changeset.errors)}", nil)
+          event_rejected(invalid(changeset), nil)
       end
     else
       {:error, reason} -> event_rejected(reason, nil)
     end
   end
 
+  defp invalid(changeset) do
+    "invalid: " <>
+      Enum.map_join(changeset.errors, ", ", fn {field, {message, _}} -> "#{field} #{message}" end)
+  end
+
   defp event_rejected(reason, server), do: %{"status" => "rejected", "reason" => reason, "server" => server}
 
   defp event_flow(table) do
-    case Map.fetch(@event_sourced, table) do
+    case Map.fetch(@event_tables, table) do
       {:ok, {schema, flow}} -> {:ok, schema, flow}
-      :error -> {:error, "not_event_sourced"}
+      :error -> {:error, "not_an_event_table"}
     end
   end
 

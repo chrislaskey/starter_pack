@@ -51,14 +51,17 @@ schema and `src-tauri/src/changesets.rs` compiles in by path, so a post the
 server would refuse is refused here before it is saved. It then inserts the
 post and one `app_posts_communities` row per chosen community, with a
 UUIDv7 from this device, the device's time as `updated_at` and version 0,
-not yet on the server. Posts are event-sourced: the post is queued as a
-`create` event in `sync_events`, and its community rows in `sync_outbox`.
+not yet on the server. The post is queued as a `create` event in
+`sync_events`, and its community rows in `sync_outbox`.
 The page shows the post at once, marked as waiting to sync, and a sync
 starts in the background.
 
-`edit_post` and `delete_post` change the row at once and queue an `update`
-event with the version the device has and the field's value before the
-change, so the server can tell a field someone else changed meanwhile.
+`edit_post`, `delete_post` and `edit_profile` change the row at once and
+queue an `update` event of the fields that changed, with the version the
+device has and their values before the change, so the server can tell a
+field someone else changed meanwhile. The profile is the user's own,
+created by the server at registration; the page shows it with an Edit
+profile form.
 The device never changes a version itself; the server's comes back with
 the row.
 
@@ -116,10 +119,11 @@ conflict on a post that is gone can only be let go.
 | Command | Does |
 | --- | --- |
 | `get_profile` | the user, from the server when connected, else as saved |
-| `get_communities_page` | the user's communities, feed, pending count, conflicts and cursor, from the file |
+| `get_communities_page` | the user's profile, communities, feed, pending count, conflicts and cursor, from the file |
 | `write_post` | writes a post into the file and starts a sync |
 | `edit_post` | edits the user's own post in the file and starts a sync |
 | `delete_post` | deletes the user's own post in the file and starts a sync |
+| `edit_profile` | edits the user's profile in the file and starts a sync |
 | `resolve_conflict` | `reapply` queues a conflicted change again and starts a sync, `ignore` lets it go |
 | `sync_now` | syncs now and returns the report |
 
@@ -148,4 +152,5 @@ cargo test two_devices -- --ignored
 It proves that a post written offline reaches the server and the other
 device, that the same post edited on both devices keeps the edit that
 reached the server first and leaves the other as a conflict, whatever
-either clock says, and that the conflict reapplied reaches both devices.
+either clock says, and that the conflict reapplied reaches both devices, and that different
+fields of the profile edited on each device both apply.

@@ -12,7 +12,7 @@ defmodule App.SyncClient do
       phone = SyncClient.write(phone, "app_users_communities", %{...})
       {phone, response} = SyncClient.push(phone)
 
-  Posts change through `create/3` and `change/4`, which queue events;
+  Posts and profiles change through `create/3` and `change/4`, which queue events;
   other rows through `write/4` and `delete/4`. `conflicts` holds the
   events the server answered with conflicts, until `resolve/3`.
 
@@ -95,7 +95,7 @@ defmodule App.SyncClient do
   end
 
   @doc """
-  A local write of a row that is not event-sourced: upserts the row with
+  A local write of a server-wins row: upserts the row with
   a client-generated id and `updated_at` from the device clock, and
   queues it for the next push. The columns not given keep the client's
   current values, or nil. A new row has version 0, not yet on the server;
@@ -125,7 +125,7 @@ defmodule App.SyncClient do
   end
 
   @doc """
-  A new row of an event-sourced table, by the user: written locally at
+  A new row of an event table, by the user: written locally at
   version 0 and queued as a `create` event. Returns the client and the
   row's id.
   """
@@ -137,14 +137,14 @@ defmodule App.SyncClient do
       client
       |> local_row(table, id, now)
       |> Map.merge(changes)
-      |> Map.put("author_id", scope.user.id)
+      |> Map.put("owner_id", scope.user.id)
 
     event = new_event(table, id, "create", 0, %{}, changes)
     {client |> put_row(table, row) |> queue_event(event), id}
   end
 
   @doc """
-  A change to a row of an event-sourced table: the row changes at once,
+  A change to a row of an event table: the row changes at once,
   and the event records the version and the values the change started
   from, as `base`, and the new values.
   """

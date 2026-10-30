@@ -3,7 +3,7 @@ defmodule App.Data.AppUsers do
   The data context over `App.Data.AppUser`.
 
   The `visible_to: scope` filter is what syncs to a user: themselves and
-  the members of the communities they are a live member of. The authors
+  the members of the communities they are a live member of. The owners
   of visible posts travel with the posts, see `App.Data.Sync`.
   """
 

@@ -23,7 +23,7 @@ defmodule App.Data.PostsCommunities do
         select: uc.community_id
       )
 
-    my_posts = from(p in Post, where: p.author_id == ^user.id, select: p.id)
+    my_posts = from(p in Post, where: p.owner_id == ^user.id, select: p.id)
 
     Ecto.Query.where(
       query,

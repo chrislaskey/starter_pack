@@ -13,10 +13,10 @@ pub fn fields() -> BTreeMap<String, FieldType> {
 }
 
 /// `App.Data.Post.changeset`.
-/// The app sets `author_id` and `last_synced_at`, so pass them in `data`.
+/// The app sets `owner_id` and `last_synced_at`, so pass them in `data`.
 pub fn changeset(data: &Params, params: &Params) -> Changeset {
     Changeset::cast(data, &fields(), params, &["body"])
-        .validate_required(&["author_id", "body"])
+        .validate_required(&["owner_id", "body"])
         .validate_length("body", &Length::default().max(10000), None)
 }
 

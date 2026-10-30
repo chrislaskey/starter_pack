@@ -242,7 +242,7 @@ mod tests {
         let connection = open_in_memory().unwrap();
         store::apply_rows(&connection, ME, &server_rows()).unwrap();
         let mut post = server_rows()[5].clone();
-        post.row["author_id"] = json!(ME);
+        post.row["owner_id"] = json!(ME);
         post.row.insert("version".into(), json!(3));
         store::apply_rows(&connection, ME, &[post.clone()]).unwrap();
         (connection, post.row["id"].as_str().unwrap().to_string())
@@ -329,7 +329,7 @@ mod tests {
         let report = answer(
             &mut connection,
             json!({"accepted": [], "rejected": [], "events": [
-                {"id": events[0].id, "status": "rejected", "reason": "not_author", "server": server},
+                {"id": events[0].id, "status": "rejected", "reason": "not_owner", "server": server},
                 {"id": events[1].id, "status": "rejected", "reason": "invalid: body", "server": null}
             ]}),
         );
@@ -482,5 +482,33 @@ mod tests {
         assert_eq!(body(&phone), "phone");
         sync(&server, &mut laptop, &user_id).await.unwrap();
         assert_eq!(body(&laptop), "phone");
+
+        // Different fields of the profile edited on each device both apply
+        let current = store::profile(&phone, &user_id).unwrap().unwrap();
+        store::edit_profile(
+            &phone,
+            &user_id,
+            "From the phone",
+            &current.bio,
+            &super::super::now_iso8601(),
+        )
+        .unwrap();
+        store::edit_profile(
+            &laptop,
+            &user_id,
+            &current.display_name,
+            "From the laptop",
+            &super::super::now_iso8601(),
+        )
+        .unwrap();
+        sync(&server, &mut phone, &user_id).await.unwrap();
+        let report = sync(&server, &mut laptop, &user_id).await.unwrap();
+        assert_eq!(report.conflicts, 0, "{report:?}");
+        sync(&server, &mut phone, &user_id).await.unwrap();
+        for device in [&phone, &laptop] {
+            let profile = store::profile(device, &user_id).unwrap().unwrap();
+            assert_eq!(profile.display_name, "From the phone");
+            assert_eq!(profile.bio, "From the laptop");
+        }
     }
 }

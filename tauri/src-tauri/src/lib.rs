@@ -130,6 +130,7 @@ pub fn run() {
             sync::write_post,
             sync::edit_post,
             sync::delete_post,
+            sync::edit_profile,
             sync::resolve_conflict,
             sync::sync_now
         ])
