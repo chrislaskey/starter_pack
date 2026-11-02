@@ -5,7 +5,7 @@ defmodule App.Data.UniversalChangesetTest do
   # for every rule a marked function gains.
   use App.DataCase, async: true
 
-  alias App.Data.{Post, UniversalChangeset, UserProfile}
+  alias App.Data.{Comment, Link, Post, PostTag, Tag, UniversalChangeset, UserProfile}
 
   @owner Ecto.UUID.generate()
   @long String.duplicate("x", 10_001)
@@ -65,6 +65,109 @@ defmodule App.Data.UniversalChangesetTest do
       name: "editing keeps the user",
       data: %{user_id: @owner, display_name: "Old"},
       params: %{"display_name" => "New"},
+      options: []
+    },
+    %{
+      module: Link,
+      function: :changeset,
+      name: "a link",
+      params: %{"post_id" => @owner, "label" => "Docs", "url" => "https://hexdocs.pm/ecto"}
+    },
+    %{module: Link, function: :changeset, name: "an empty link", params: %{}},
+    %{
+      module: Link,
+      function: :changeset,
+      name: "a URL that is not http",
+      params: %{"post_id" => @owner, "label" => "Docs", "url" => "ftp://example.com"}
+    },
+    %{
+      module: Link,
+      function: :changeset,
+      name: "a URL with no host",
+      params: %{"post_id" => @owner, "label" => "Docs", "url" => "https://"}
+    },
+    %{
+      module: Link,
+      function: :changeset,
+      name: "a URL with a space",
+      params: %{"post_id" => @owner, "label" => "Docs", "url" => "https://example.com/a b"}
+    },
+    %{
+      module: Link,
+      function: :changeset,
+      name: "label and URL too long",
+      params: %{
+        "post_id" => @owner,
+        "label" => String.duplicate("x", 101),
+        "url" => "https://example.com/" <> String.duplicate("x", 2000)
+      }
+    },
+    %{module: Link, function: :changeset, name: "a post id that is not a UUID", params: %{"post_id" => "1"}},
+    %{module: Tag, function: :changeset, name: "a tag", params: %{"name" => "elixir"}},
+    %{module: Tag, function: :changeset, name: "no owner", params: %{"name" => "elixir"}, options: []},
+    %{module: Tag, function: :changeset, name: "a blank name", params: %{"name" => " "}},
+    %{
+      module: Tag,
+      function: :changeset,
+      name: "a name too long",
+      params: %{"name" => String.duplicate("x", 51)}
+    },
+    %{
+      module: PostTag,
+      function: :changeset,
+      name: "a tagging",
+      params: %{"post_id" => @owner, "tag_id" => @owner, "position" => 0, "note" => "why"}
+    },
+    %{module: PostTag, function: :changeset, name: "an empty tagging", params: %{}},
+    %{
+      module: PostTag,
+      function: :changeset,
+      name: "a negative position and a note too long",
+      params: %{
+        "post_id" => @owner,
+        "tag_id" => @owner,
+        "position" => -1,
+        "note" => String.duplicate("x", 201)
+      }
+    },
+    %{
+      module: PostTag,
+      function: :changeset,
+      name: "a position from a form",
+      params: %{"post_id" => @owner, "tag_id" => @owner, "position" => "2"}
+    },
+    %{
+      module: PostTag,
+      function: :changeset,
+      name: "a position that is not a number",
+      params: %{"post_id" => @owner, "tag_id" => @owner, "position" => "first"}
+    },
+    %{
+      module: Comment,
+      function: :changeset,
+      name: "a comment",
+      params: %{"posts_communities_id" => @owner, "body" => "Hi"}
+    },
+    %{module: Comment, function: :changeset, name: "an empty comment", params: %{}},
+    %{
+      module: Comment,
+      function: :changeset,
+      name: "no commenter",
+      params: %{"posts_communities_id" => @owner, "body" => "Hi"},
+      options: []
+    },
+    %{
+      module: Comment,
+      function: :changeset,
+      name: "a body too long",
+      params: %{"posts_communities_id" => @owner, "body" => String.duplicate("x", 2001)}
+    },
+    %{
+      module: Comment,
+      function: :changeset,
+      name: "editing keeps the commenter and the thread",
+      data: %{posts_communities_id: @owner, owner_id: @owner, body: "Old"},
+      params: %{"body" => "New"},
       options: []
     }
   ]

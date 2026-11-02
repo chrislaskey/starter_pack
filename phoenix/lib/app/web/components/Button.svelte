@@ -2,7 +2,7 @@
   Written by hand to mirror App.Web.CoreComponents.button/1
   in lib/app/web/components/core_components.ex. After changing the component, update this
   file to match and run `mix app.svelte --accept lib/app/web/components/Button.svelte`.
-  heex-svelte: source=99af889b2aee output=none
+  heex-svelte: source=481a2e2bee1d output=none
 -->
 <script>
   // button/1 picks its classes and its tag in Elixir before the template,
@@ -15,6 +15,8 @@
    * @typedef {Object} Props
    * @property {any} [class]
    * @property {"primary"} [variant]
+   * @property {"button" | "submit" | "reset"} [type]
+   * @property {boolean} [disabled]
    * @property {import("svelte").Snippet<[]>} children
    */
 

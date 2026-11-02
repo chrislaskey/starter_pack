@@ -8,16 +8,52 @@ use ecto_changeset::{Changeset, Params};
 use rustler::{Error, NifResult};
 
 #[allow(dead_code)]
+#[path = "../../../lib/app/data/schemas/comments/comment.rs"]
+mod comment;
+
+#[allow(dead_code)]
+#[path = "../../../lib/app/data/schemas/links/link.rs"]
+mod link;
+
+#[allow(dead_code)]
 #[path = "../../../lib/app/data/schemas/posts/post.rs"]
 mod post;
+
+#[allow(dead_code)]
+#[path = "../../../lib/app/data/schemas/posts_tags/post_tag.rs"]
+mod post_tag;
+
+#[allow(dead_code)]
+#[path = "../../../lib/app/data/schemas/tags/tag.rs"]
+mod tag;
 
 #[allow(dead_code)]
 #[path = "../../../lib/app/data/schemas/user_profiles/user_profile.rs"]
 mod user_profile;
 
 #[rustler::nif]
+fn comment_changeset(data: &str, params: &str) -> NifResult<String> {
+    run(data, params, comment::changeset)
+}
+
+#[rustler::nif]
+fn link_changeset(data: &str, params: &str) -> NifResult<String> {
+    run(data, params, link::changeset)
+}
+
+#[rustler::nif]
 fn post_changeset(data: &str, params: &str) -> NifResult<String> {
     run(data, params, post::changeset)
+}
+
+#[rustler::nif]
+fn post_tag_changeset(data: &str, params: &str) -> NifResult<String> {
+    run(data, params, post_tag::changeset)
+}
+
+#[rustler::nif]
+fn tag_changeset(data: &str, params: &str) -> NifResult<String> {
+    run(data, params, tag::changeset)
 }
 
 #[rustler::nif]

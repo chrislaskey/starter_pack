@@ -45,7 +45,11 @@ posts, see `phoenix/priv/client_migrations/README.md`.
 
 ### A local write
 
-`write_post` checks the post with the server's own rules first,
+The post form is `App.Web.PostsLive.post_form/0`'s definition, as the
+`post_form.dynamic_form.json` that `mix app.dynamic_forms` writes beside
+it, validated on every change by `show_post_form` and on submit by
+`write_post` with the `dynamic_form` crate, see `phoenix/docs/design/dynamic-forms.md`. Once the
+form is valid, `write_post` checks the post with the server's own rules,
 `App.Data.Post.changeset/3` as the Rust `mix app.rust` writes next to the
 schema and `src-tauri/src/changesets.rs` compiles in by path, so a post the
 server would refuse is refused here before it is saved. It then inserts the
@@ -120,7 +124,8 @@ conflict on a post that is gone can only be let go.
 | --- | --- |
 | `get_profile` | the user, from the server when connected, else as saved |
 | `get_communities_page` | the user's profile, communities, feed, pending count, conflicts and cursor, from the file |
-| `write_post` | writes a post into the file and starts a sync |
+| `show_post_form` | the post form for the entries typed so far, with the errors of the inputs used |
+| `write_post` | submits the post form: writes the post into the file and starts a sync, or returns the form with its errors |
 | `edit_post` | edits the user's own post in the file and starts a sync |
 | `delete_post` | deletes the user's own post in the file and starts a sync |
 | `edit_profile` | edits the user's profile in the file and starts a sync |

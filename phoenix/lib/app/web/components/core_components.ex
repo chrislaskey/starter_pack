@@ -100,9 +100,12 @@ defmodule App.Web.CoreComponents do
       <.button navigate={~p"/"}>Home</.button>
   """
   @universal_component true
-  attr :rest, :global, include: ~w(href navigate patch method download name value disabled)
+  attr :rest, :global, include: ~w(href navigate patch method download name value)
   attr :class, :any
   attr :variant, :string, values: ~w(primary)
+  # Declared, not in rest, because dynamic_form passes them beside its own rest
+  attr :type, :string, default: nil, values: [nil | ~w(button submit reset)]
+  attr :disabled, :boolean, default: false
   slot :inner_block, required: true
 
   def button(%{rest: rest} = assigns) do
@@ -121,7 +124,7 @@ defmodule App.Web.CoreComponents do
       """
     else
       ~H"""
-      <button class={@class} {@rest}>
+      <button type={@type} disabled={@disabled} class={@class} {@rest}>
         {render_slot(@inner_block)}
       </button>
       """
@@ -135,6 +138,11 @@ defmodule App.Web.CoreComponents do
   which is used to retrieve the input name, id, and values.
   Otherwise all attributes may be passed explicitly.
 
+  The markup is in the form field components below, like `text_input/1`,
+  which take plain props and are mirrored into Svelte. This module is also
+  the components module `dynamic_form` renders its questions with, see
+  `docs/design/dynamic-forms.md`.
+
   ## Types
 
   This function accepts all HTML input types, considering that:
@@ -143,16 +151,18 @@ defmodule App.Web.CoreComponents do
 
     * `type="checkbox"` is used exclusively to render boolean values
 
+    * `type="radio-group"` and `type="checkbox-group"` render one radio
+      button or checkbox per option, the second submitted as `name[]`
+
     * For live file uploads, see `Phoenix.Component.live_file_input/1`
 
   See https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input
-  for more information. Unsupported types, such as radio, are best
-  written directly in your templates.
+  for more information.
 
   ## Examples
 
   ```heex
-  <.input field={@form[:email]} type="email" />
+  <.input field={@form[:email]} type="email" required />
   <.input name="my-input" errors={["oh no!"]} />
   ```
 
@@ -165,8 +175,10 @@ defmodule App.Web.CoreComponents do
   <.input field={@form[:user_type]} type="select" options={["Admin": "admin", "User": "user"]} />
   ```
 
-  For more information on what kind of data can be passed to `options` see
-  [`options_for_select`](https://phoenix-html.hexdocs.pm/Phoenix.HTML.Form.html#options_for_select/2).
+  Options are `{label, value}` pairs, a keyword list, or values that are
+  their own labels, as for the groups. Unlike
+  [`options_for_select`](https://phoenix-html.hexdocs.pm/Phoenix.HTML.Form.html#options_for_select/2),
+  option groups aren't supported.
   """
   attr :id, :any, default: nil
   attr :name, :any
@@ -175,31 +187,39 @@ defmodule App.Web.CoreComponents do
 
   attr :type, :string,
     default: "text",
-    values: ~w(checkbox color date datetime-local email file month number password
-               search select tel text textarea time url week hidden)
+    values: ~w(checkbox checkbox-group color date datetime-local email file month number
+               password radio-group range search select tel text textarea time url week hidden)
 
   attr :field, Phoenix.HTML.FormField,
     doc: "a form field struct retrieved from the form, for example: @form[:email]"
 
   attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+
+  attr :required_label, :any,
+    default: "*",
+    doc: "the mark beside a required field's label, nil or false for none"
+
   attr :checked, :boolean, doc: "the checked flag for checkbox inputs"
   attr :prompt, :string, default: nil, doc: "the prompt for select inputs"
-  attr :options, :list, doc: "the options to pass to Phoenix.HTML.Form.options_for_select/2"
+  attr :options, :list, doc: "the options of a select or a group"
   attr :multiple, :boolean, default: false, doc: "the multiple flag for select inputs"
+  attr :layout, :string, default: "vertical", doc: ~s|"vertical" or "horizontal", for groups|
   attr :class, :any, default: nil, doc: "the input class to use over defaults"
   attr :error_class, :any, default: nil, doc: "the input error class to use over defaults"
 
   attr :rest, :global,
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
-                multiple pattern placeholder readonly required rows size step)
+                multiple pattern placeholder readonly rows size step)
 
   def input(%{field: %Phoenix.HTML.FormField{} = field} = assigns) do
     errors = if Phoenix.Component.used_input?(field), do: field.errors, else: []
+    many = assigns.multiple or assigns.type == "checkbox-group"
 
     assigns
     |> assign(field: nil, id: assigns.id || field.id)
     |> assign(:errors, Enum.map(errors, &translate_error(&1)))
-    |> assign_new(:name, fn -> if assigns.multiple, do: field.name <> "[]", else: field.name end)
+    |> assign_new(:name, fn -> if many, do: field.name <> "[]", else: field.name end)
     |> assign_new(:value, fn -> field.value end)
     |> input()
   end
@@ -217,94 +237,134 @@ defmodule App.Web.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <input
-          type="hidden"
-          name={@name}
-          value="false"
-          disabled={@rest[:disabled]}
-          form={@rest[:form]}
-        />
-        <span class="label">
-          <input
-            type="checkbox"
-            id={@id}
-            name={@name}
-            value="true"
-            checked={@checked}
-            class={@class || "checkbox checkbox-sm"}
-            {@rest}
-          />{@label}
-        </span>
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
-    </div>
+    <.checkbox_input
+      id={@id}
+      name={@name}
+      label={@label}
+      checked={@checked}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      class={@class}
+      {@rest}
+    />
     """
   end
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <select
-          id={@id}
-          name={@name}
-          class={[@class || "w-full select", @errors != [] && (@error_class || "select-error")]}
-          multiple={@multiple}
-          {@rest}
-        >
-          <option :if={@prompt} value="">{@prompt}</option>
-          {Phoenix.HTML.Form.options_for_select(@options, @value)}
-        </select>
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
-    </div>
+    <.select_input
+      id={@id}
+      name={@name}
+      label={@label}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      prompt={@prompt}
+      multiple={@multiple}
+      options={list_options(@options, @value, :selected)}
+      class={@class}
+      error_class={@error_class}
+      {@rest}
+    />
     """
   end
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <textarea
-          id={@id}
-          name={@name}
-          class={[
-            @class || "w-full textarea",
-            @errors != [] && (@error_class || "textarea-error")
-          ]}
-          {@rest}
-        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
-    </div>
+    <.textarea_input
+      id={@id}
+      name={@name}
+      value={Phoenix.HTML.Form.normalize_value("textarea", @value)}
+      label={@label}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      class={@class}
+      error_class={@error_class}
+      {@rest}
+    />
+    """
+  end
+
+  def input(%{type: "radio-group"} = assigns) do
+    ~H"""
+    <.radio_group_input
+      id={@id}
+      name={@name}
+      label={@label}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      layout={@layout}
+      options={list_options(@options, @value, :checked)}
+      {@rest}
+    />
+    """
+  end
+
+  def input(%{type: "checkbox-group"} = assigns) do
+    ~H"""
+    <.checkbox_group_input
+      id={@id}
+      name={@name}
+      label={@label}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      layout={@layout}
+      options={list_options(@options, @value, :checked)}
+      {@rest}
+    />
     """
   end
 
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <input
-          type={@type}
-          name={@name}
-          id={@id}
-          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
-          class={[
-            @class || "w-full input",
-            @errors != [] && (@error_class || "input-error")
-          ]}
-          {@rest}
-        />
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
-    </div>
+    <.text_input
+      type={@type}
+      id={@id}
+      name={@name}
+      value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+      label={@label}
+      errors={@errors}
+      required={@required}
+      required_label={@required_label}
+      class={@class}
+      error_class={@error_class}
+      {@rest}
+    />
     """
+  end
+
+  # dynamic_form renders radiogroup, rating and checkbox questions with
+  # these, giving `style` for the layout
+  @doc false
+  def input_radio_group(assigns), do: input(group_assigns(assigns, "radio-group"))
+
+  @doc false
+  def input_checkbox_group(assigns), do: input(group_assigns(assigns, "checkbox-group"))
+
+  defp group_assigns(assigns, type) do
+    {style, assigns} = Map.pop(assigns, :style, :vertical)
+    Map.merge(assigns, %{type: type, layout: to_string(style)})
+  end
+
+  # Each option becomes a map with its label and its value as strings,
+  # marked under `key` when `current` has that value.
+  defp list_options(options, current, key) do
+    current = current |> List.wrap() |> Enum.map(&to_string/1)
+
+    for option <- options || [] do
+      {label, value} =
+        case option do
+          {label, value} -> {to_string(label), to_string(value)}
+          value -> {to_string(value), to_string(value)}
+        end
+
+      %{:label => label, :value => value, key => value in current}
+    end
   end
 
   # Helper used by inputs to generate form errors
@@ -462,6 +522,278 @@ defmodule App.Web.CoreComponents do
     """
   end
 
+  ## Form fields
+
+  # The markup of input/1, from plain props: an id, a name, a value,
+  # translated errors and options as maps. They are mirrored into Svelte,
+  # where the desktop app's DynamicForm.svelte renders them with props its
+  # Rust builds. Anything else, like placeholder or phx-debounce, goes on
+  # the control through rest.
+
+  @doc """
+  The mark beside a required field's label, `*` unless the field sets
+  another, or none when it sets `nil` or `false`.
+  """
+  @universal_component true
+  attr :required, :boolean, default: false
+  attr :label, :any, default: "*"
+
+  def required_mark(assigns) do
+    ~H"""
+    <span :if={@required && @label} class="ml-0.5 text-error">{@label}</span>
+    """
+  end
+
+  @doc "A one-line input: text, email, number and the other HTML types."
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :type, :string, default: "text"
+  attr :value, :any, default: nil
+  attr :label, :string, default: nil
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :class, :any, default: nil
+  attr :error_class, :any, default: nil
+
+  attr :rest, :global, include: ~w(accept autocomplete capture disabled form list max maxlength min minlength
+                multiple pattern placeholder readonly size step)
+
+  def text_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <label for={@id}>
+        <span :if={@label} class="label mb-1">
+          {@label}<.required_mark required={@required} label={@required_label} />
+        </span>
+        <input
+          type={@type}
+          name={@name}
+          id={@id}
+          value={@value}
+          class={[@class || "w-full input", @errors != [] && (@error_class || "input-error")]}
+          required={@required}
+          {@rest}
+        />
+      </label>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  @doc "A multi-line input."
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :value, :string, default: nil
+  attr :label, :string, default: nil
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :class, :any, default: nil
+  attr :error_class, :any, default: nil
+
+  attr :rest, :global,
+    include: ~w(autocomplete cols disabled form maxlength minlength placeholder readonly rows)
+
+  def textarea_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <label for={@id}>
+        <span :if={@label} class="label mb-1">
+          {@label}<.required_mark required={@required} label={@required_label} />
+        </span>
+        <textarea
+          id={@id}
+          name={@name}
+          class={[@class || "w-full textarea", @errors != [] && (@error_class || "textarea-error")]}
+          required={@required}
+          {@rest}
+        >{@value}</textarea>
+      </label>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  @doc """
+  A select, one choice or several with `multiple`. Each option is a map
+  with `label`, `value` and `selected`.
+  """
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :label, :string, default: nil
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :prompt, :string, default: nil
+  attr :multiple, :boolean, default: false
+  attr :options, :list, default: []
+  attr :class, :any, default: nil
+  attr :error_class, :any, default: nil
+  attr :rest, :global, include: ~w(autocomplete disabled form size)
+
+  def select_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <label for={@id}>
+        <span :if={@label} class="label mb-1">
+          {@label}<.required_mark required={@required} label={@required_label} />
+        </span>
+        <select
+          id={@id}
+          name={@name}
+          class={[@class || "w-full select", @errors != [] && (@error_class || "select-error")]}
+          multiple={@multiple}
+          required={@required}
+          {@rest}
+        >
+          <option :if={@prompt} value="">{@prompt}</option>
+          <option :for={option <- @options} value={option.value} selected={option.selected}>
+            {option.label}
+          </option>
+        </select>
+      </label>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  @doc """
+  A single checkbox for a boolean. The hidden input submits `false` when
+  it is unchecked.
+  """
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :label, :string, default: nil
+  attr :checked, :boolean, default: false
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :disabled, :boolean, default: false
+  attr :class, :any, default: nil
+  attr :rest, :global, include: ~w(form readonly)
+
+  def checkbox_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <label for={@id}>
+        <input type="hidden" name={@name} value="false" disabled={@disabled} />
+        <span class="label">
+          <input
+            type="checkbox"
+            id={@id}
+            name={@name}
+            value="true"
+            checked={@checked}
+            class={@class || "checkbox checkbox-sm"}
+            required={@required}
+            disabled={@disabled}
+            {@rest}
+          />{@label}<.required_mark required={@required} label={@required_label} />
+        </span>
+      </label>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  @doc """
+  Radio buttons, one choice. Each option is a map with `label`, `value`
+  and `checked`; `layout` is `"vertical"` or `"horizontal"`.
+  """
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :label, :string, default: nil
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :layout, :string, default: "vertical"
+  attr :options, :list, default: []
+  attr :rest, :global, include: ~w(disabled form)
+
+  def radio_group_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <span :if={@label} class="label mb-1">
+        {@label}<.required_mark required={@required} label={@required_label} />
+      </span>
+      <div class={[
+        "flex gap-4",
+        @layout == "vertical" && "flex-col",
+        @layout == "horizontal" && "flex-row items-center"
+      ]}>
+        <label :for={option <- @options} class="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            id={"#{@id}-#{option.value}"}
+            name={@name}
+            value={option.value}
+            checked={option.checked}
+            class="radio radio-sm"
+            required={@required}
+            {@rest}
+          />
+          {option.label}
+        </label>
+      </div>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
+  @doc """
+  Checkboxes, several choices, submitted as `name[]`. The hidden input
+  submits the field when every box is clear. Options and layout as in
+  `radio_group_input/1`.
+  """
+  @universal_component true
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :label, :string, default: nil
+  attr :errors, :list, default: []
+  attr :required, :boolean, default: false
+  attr :required_label, :any, default: "*"
+  attr :layout, :string, default: "vertical"
+  attr :options, :list, default: []
+  attr :disabled, :boolean, default: false
+  attr :rest, :global, include: ~w(form)
+
+  def checkbox_group_input(assigns) do
+    ~H"""
+    <div class="fieldset mb-2">
+      <span :if={@label} class="label mb-1">
+        {@label}<.required_mark required={@required} label={@required_label} />
+      </span>
+      <input type="hidden" name={@name} value="" disabled={@disabled} />
+      <div class={[
+        "flex gap-4",
+        @layout == "vertical" && "flex-col",
+        @layout == "horizontal" && "flex-row items-center"
+      ]}>
+        <label :for={option <- @options} class="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            id={"#{@id}-#{option.value}"}
+            name={@name}
+            value={option.value}
+            checked={option.checked}
+            class="checkbox checkbox-sm"
+            disabled={@disabled}
+            {@rest}
+          />
+          {option.label}
+        </label>
+      </div>
+      <.error :for={message <- @errors}>{message}</.error>
+    </div>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do
@@ -510,5 +842,17 @@ defmodule App.Web.CoreComponents do
   """
   def translate_errors(errors, field) when is_list(errors) do
     for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
+  end
+
+  @doc """
+  A changeset's errors as one sentence, for a flash: "Url must be an
+  http:// or https:// URL; Label can't be blank".
+  """
+  def errors_sentence(%Ecto.Changeset{} = changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(&translate_error/1)
+    |> Enum.map_join("; ", fn {field, messages} ->
+      "#{Phoenix.Naming.humanize(field)} #{Enum.join(messages, ", ")}"
+    end)
   end
 end

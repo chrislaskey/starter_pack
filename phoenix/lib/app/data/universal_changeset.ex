@@ -61,12 +61,15 @@ defmodule App.Data.UniversalChangeset do
       args = Enum.map(args, &without_default/1)
       arity = length(args)
       body = templates_call_templates(body, marked)
+      # The replacement passes every argument on, so one the template
+      # ignores, like `_options`, is used there
+      passed = Enum.map(args, &unignored/1)
 
       quote do
         defoverridable [{unquote(name), unquote(arity)}]
 
-        def unquote(name)(unquote_splicing(args)) do
-          App.Data.UniversalChangeset.run(__MODULE__, unquote(name), [unquote_splicing(args)])
+        def unquote(name)(unquote_splicing(passed)) do
+          App.Data.UniversalChangeset.run(__MODULE__, unquote(name), [unquote_splicing(passed)])
         end
 
         @doc false
@@ -76,6 +79,15 @@ defmodule App.Data.UniversalChangeset do
       end
     end
   end
+
+  defp unignored({name, meta, context} = var) when is_atom(name) and is_atom(context) do
+    case Atom.to_string(name) do
+      "_" <> rest when rest != "" -> {String.to_atom(rest), meta, context}
+      _name -> var
+    end
+  end
+
+  defp unignored(arg), do: arg
 
   # A template that calls another marked function must reach its template
   # and not its Rust

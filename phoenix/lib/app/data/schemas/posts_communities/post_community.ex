@@ -1,9 +1,9 @@
 defmodule App.Data.PostCommunity do
   @moduledoc """
   "This post is in this community", and the membership it was added
-  under, `users_communities_id`, which is always the owner's. Leaving a
-  community soft-deletes the member's rows through that membership, and
-  rejoining revives them, see `App.Data.Memberships`. Removing a post from
+  under, `users_communities_id`, which is always the owner's. Deleting
+  the post or leaving the community copies its `deleted_at` here, and
+  undoing either revives the row, see `App.Data.Deletes`. Removing a post from
   a community soft-deletes its row, and adding it back revives the same
   row, so the unique index on the pair is plain.
   """
@@ -28,6 +28,18 @@ defmodule App.Data.PostCommunity do
   end
 
   @required [:post_id, :community_id, :users_communities_id]
+
+  @doc """
+  The rows above this one, by foreign key: deleting one copies its
+  `deleted_at` here, see `App.Data.Deletes`.
+  """
+  def parents, do: [post_id: App.Data.Post, users_communities_id: App.Data.UserCommunity]
+
+  @doc """
+  The stream of the row's events: its post's, since where a post is
+  visible is part of its history, see `App.Data.EventLog`.
+  """
+  def event_stream(row), do: {"app_posts", row.post_id}
 
   def changeset(row, params, _options \\ []) do
     row

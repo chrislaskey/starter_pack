@@ -16,16 +16,27 @@ use serde_json::{Map, Value};
 use crate::changesets;
 
 /// The synced tables, parents first.
-pub const TABLES: [&str; 6] = [
+pub const TABLES: [&str; 10] = [
     "app_users",
     "app_user_profiles",
     "app_communities",
     "app_users_communities",
     "app_posts",
     "app_posts_communities",
+    "app_links",
+    "app_tags",
+    "app_posts_tags",
+    "app_comments",
 ];
 
-pub const EVENT_TABLES: [&str; 2] = ["app_user_profiles", "app_posts"];
+pub const EVENT_TABLES: [&str; 6] = [
+    "app_user_profiles",
+    "app_posts",
+    "app_links",
+    "app_tags",
+    "app_posts_tags",
+    "app_comments",
+];
 
 /// An event on the wire, see `App.Data.Sync`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

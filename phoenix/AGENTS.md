@@ -50,6 +50,15 @@ This is a web application written using the Phoenix web framework.
 - Every marked function has cases in `test/app/data/universal_changeset_test.exs`, which runs each through the template and the Rust and fails on any difference. Add a case for every rule you add
 - The first `@universal_changeset true` makes the Rust toolchain a requirement of every environment that compiles the app, the Dockerfile included; with none, nothing needs it. Read `mix help app.rust` and `priv/rust/README.md` before marking a function for the first time
 
+### Dynamic forms
+
+- A form is a function in its LiveView that returns the definition, the `dynamic_form` library's JSON as an Elixir map, rendered with `<DynamicForm.form instance={...} components={App.Web.CoreComponents}>`. Forms live beside the LiveView that uses them, never in a central module. `App.Web.PostsLive.post_form/0` is the example. Read `docs/design/dynamic-forms.md` first
+- A form the desktop app shows too is marked `@universal_dynamic_form true`: a public function with no arguments returning JSON data only. `mix app.dynamic_forms` writes it as `<function>.dynamic_form.json` next to the module, which the desktop app includes by path and validates with `native/dynamic_form`, which follows the library's rules. Fill in what changes at runtime, like choices, after calling it, with `App.Web.DynamicForms.put_choices/3`
+- **Always** run `mix app.dynamic_forms` after changing a marked form, and commit the `.json` file with it. **Never** edit the file. `mix test` fails while a file is out of date with its function
+- The Rust supports what the library reads in data mode except `file` questions, and copies the library's behavior, quirks included. A definition the library would crash on, or one with a `file` question, fails to load in the desktop app
+- The library renders its questions with `CoreComponents.input/1`, as the app's own forms do. `input/1` turns a form field into plain props for the `@universal_component` form field components, like `text_input/1`, which hold the markup. Run `mix app.svelte` after changing them
+- `native/dynamic_form/tests/cases.json` is what the library does: errors, conditions, rendered outlines and lifecycle flows, checked by `mix test` and `cargo test`. Add a case for any behavior the Rust gains: write the input, run `mix test --only record_cases` to fill in the library's result, read it, then make `cargo test` pass
+
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content

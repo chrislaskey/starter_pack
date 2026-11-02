@@ -106,8 +106,8 @@ reference for every rule the generator will later copy.
 Builds
 
 - `app_posts` (id, owner_id, body), with the sync columns and soft
-  delete, and `app_post_events`, the server-only log of every change to a
-  post.
+  delete, and its stream in `app_events`, the server-only log of every
+  change to a post, see `related-resources.md`.
 - `app_posts_communities` (post_id, community_id, users_communities_id), with
   a plain unique index on (post_id, community_id): adding a post back
   revives the row rather than inserting a new one, like rejoining does
@@ -131,7 +131,8 @@ post by another user in no shared community is invisible; removing a post
 from one community leaves it in the others; leaving removes the owner's
 posts from that community and rejoining within the window brings them
 back; a row the owner removed on purpose does not come back on rejoin; a
-soft-deleted post is gone from every feed with no cascade of its own.
+soft-deleted post is gone from every feed, and its community rows are
+deleted with it, see "Deletes" in `related-resources.md`.
 
 Deferred: a title or any other field, comments, reactions, moderation of
 any kind, the generator.

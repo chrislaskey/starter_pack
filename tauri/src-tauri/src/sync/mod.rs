@@ -36,7 +36,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::{AppState, MAIN_WINDOW};
+use crate::{AppState, MAIN_WINDOW, forms};
+use dynamic_form::{FormState, Shown};
 use store::{Community, Conflict, Cursor, FeedPost, UserProfile};
 use worker::SyncReport;
 
@@ -155,29 +156,66 @@ pub fn get_communities_page(state: State<'_, AppState>) -> Result<CommunitiesPag
     page(&state.device)
 }
 
-/// Writes a post into the file, in the communities given, and starts a
-/// sync in the background. Returns the page as it is now.
+/// The empty post form, as it first shows.
+#[tauri::command]
+pub fn show_post_form(state: State<'_, AppState>) -> Result<Shown, String> {
+    let communities = page(&state.device)?.communities;
+    forms::show_post_form(&communities)
+}
+
+/// The post form after a change: its `FormData` entries, and the state it
+/// last showed with.
+#[tauri::command]
+pub fn change_post_form(
+    state: State<'_, AppState>,
+    form: FormState,
+    entries: Vec<(String, String)>,
+) -> Result<Shown, String> {
+    let communities = page(&state.device)?.communities;
+    forms::change_post_form(&communities, &form, &entries)
+}
+
+/// What submitting the post form did.
+#[derive(Debug, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum WritePostReply {
+    /// The post is in the file; the page as it is now.
+    Written { page: CommunitiesPage },
+    /// The form was invalid; it comes back with its errors showing.
+    Invalid { form: Shown },
+}
+
+/// Submits the post form: when it is valid, writes the post into the file,
+/// in the communities ticked, and starts a sync in the background.
 #[tauri::command]
 pub async fn write_post(
     app: AppHandle,
     state: State<'_, AppState>,
-    body: String,
-    community_ids: Vec<String>,
-) -> Result<CommunitiesPage, String> {
+    form: FormState,
+    entries: Vec<(String, String)>,
+) -> Result<WritePostReply, String> {
     let device = &state.device;
     let profile = device.profile().ok_or("Not logged in on this device")?;
+    let communities = page(device)?.communities;
+    let post = match forms::submit_post_form(&communities, &form, &entries)? {
+        Ok(post) => post,
+        Err(form) => return Ok(WritePostReply::Invalid { form }),
+    };
+
     let connection = schema::open(&device.db_path())?;
     store::write_post(
         &connection,
         &profile.id,
-        &body,
-        &community_ids,
+        &post.body,
+        &post.community_ids,
         &now_iso8601(),
     )?;
     drop(connection);
 
     spawn_sync(app);
-    page(device)
+    Ok(WritePostReply::Written {
+        page: page(device)?,
+    })
 }
 
 /// Edits the user's own post in the file and starts a sync.

@@ -40,15 +40,26 @@ defmodule App.Data.Sync do
 
   alias App.Data.AppUser
   alias App.Data.AppUsers
+  alias App.Data.Comment
+  alias App.Data.Commenting
+  alias App.Data.Comments
   alias App.Data.Communities
   alias App.Data.Community
+  alias App.Data.Link
+  alias App.Data.Links
   alias App.Data.Memberships
   alias App.Data.Post
   alias App.Data.PostCommunity
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.PostsCommunities
+  alias App.Data.PostsTags
+  alias App.Data.PostTag
   alias App.Data.Profiles
+  alias App.Data.Sync.Merge
+  alias App.Data.Tag
+  alias App.Data.Tagging
+  alias App.Data.Tags
   alias App.Data.UserCommunity
   alias App.Data.UserProfile
   alias App.Data.UserProfiles
@@ -68,14 +79,22 @@ defmodule App.Data.Sync do
     {"app_communities", Community, Communities},
     {"app_users_communities", UserCommunity, UsersCommunities},
     {"app_posts", Post, Posts},
-    {"app_posts_communities", PostCommunity, PostsCommunities}
+    {"app_posts_communities", PostCommunity, PostsCommunities},
+    {"app_links", Link, Links},
+    {"app_tags", Tag, Tags},
+    {"app_posts_tags", PostTag, PostsTags},
+    {"app_comments", Comment, Comments}
   ]
 
   # The tables a client changes only through events, with the flow that
   # applies them
   @event_tables %{
     "app_user_profiles" => {UserProfile, Profiles},
-    "app_posts" => {Post, Posting}
+    "app_posts" => {Post, Posting},
+    "app_links" => {Link, Posting},
+    "app_tags" => {Tag, Tagging},
+    "app_posts_tags" => {PostTag, Tagging},
+    "app_comments" => {Comment, Commenting}
   }
 
   @doc """
@@ -180,8 +199,10 @@ defmodule App.Data.Sync do
 
   # Every live `posts_communities` row carries its post and the post's
   # owner, placed before it so a client with foreign keys can apply in
-  # order. A removed row carries nothing: a client that held the post
-  # prunes it, and one that never did must not receive it now.
+  # order, and after it the post's live links, tags and posts_tags rows,
+  # tags first, then the row's live comments, their authors first. A
+  # removed row carries nothing: a client that held the
+  # post prunes it, and one that never did must not receive it now.
   defp carry(page) do
     post_ids = for {"app_posts_communities", %{deleted_at: nil} = row} <- page, uniq: true, do: row.post_id
 
@@ -197,16 +218,44 @@ defmodule App.Data.Sync do
       |> AppUsers.list()
       |> Map.new(&{&1.id, &1})
 
+    links = [filters: [post_id: post_ids], order_by: [:id]] |> Links.list() |> Enum.group_by(& &1.post_id)
+
+    posts_tags =
+      [filters: [post_id: post_ids], order_by: [:id]] |> PostsTags.list() |> Enum.group_by(& &1.post_id)
+
+    tags =
+      [filters: [id: posts_tags |> Map.values() |> List.flatten() |> Enum.map(& &1.tag_id)]]
+      |> Tags.list()
+      |> Map.new(&{&1.id, &1})
+
+    thread_ids = for {"app_posts_communities", %{deleted_at: nil} = row} <- page, do: row.id
+
+    comments =
+      [filters: [posts_communities_id: thread_ids], preloads: [:owner]]
+      |> Comments.list()
+      |> Enum.group_by(& &1.posts_communities_id)
+
     page
     |> Enum.flat_map(fn
       {"app_posts_communities", %{deleted_at: nil} = row} = pair ->
         post = Map.fetch!(posts, row.post_id)
-        [{"app_users", Map.fetch!(owners, post.owner_id)}, {"app_posts", post}, pair]
+        its_tags = Map.get(posts_tags, post.id, [])
+
+        [{"app_users", Map.fetch!(owners, post.owner_id)}, {"app_posts", post}, pair] ++
+          for(link <- Map.get(links, post.id, []), do: {"app_links", link}) ++
+          for(row <- its_tags, do: {"app_tags", Map.fetch!(tags, row.tag_id)}) ++
+          for(row <- its_tags, do: {"app_posts_tags", row}) ++
+          carry_comments(Map.get(comments, row.id, []))
 
       pair ->
         [pair]
     end)
     |> Enum.uniq_by(fn {table, row} -> {table, row.id} end)
+  end
+
+  defp carry_comments(comments) do
+    for(comment <- comments, do: {"app_users", comment.owner}) ++
+      for(comment <- comments, do: {"app_comments", comment})
   end
 
   defp limit(params) do
@@ -242,14 +291,7 @@ defmodule App.Data.Sync do
   ## Push
 
   def push(%Scope{} = scope, rows, events \\ []) when is_list(rows) and is_list(events) do
-    {:ok, results} =
-      App.Repo.transact(fn ->
-        {:ok,
-         Enum.flat_map(batches(rows, events), fn
-           {:row, row} -> [apply_row(scope, row)]
-           {:event, event} -> [apply_event(scope, event)]
-         end)}
-      end)
+    results = run(scope, rows, events)
 
     %{
       "accepted" =>
@@ -266,9 +308,96 @@ defmodule App.Data.Sync do
         for {:rejected, table, id, reason, server} <- results do
           %{"table" => table, "id" => id, "reason" => reason, "server" => server}
         end,
-      "events" => for({:event, answer} <- results, do: answer)
+      "events" => for({:event, answer, _result} <- results, do: answer)
     }
   end
+
+  @doc """
+  What `push/3` does, in one transaction, before it is put on the wire:
+  for each row and event, parents first, `{:accepted, table, id, row}`,
+  `{:rejected, table, id, reason, server_row}`, or `{:event, answer,
+  result}` with the flow's own result beside the answer. For the web,
+  which pushes as a device does and wants the structs back, see `save/4`.
+  """
+  def run(%Scope{} = scope, rows, events) when is_list(rows) and is_list(events) do
+    {:ok, results} =
+      App.Repo.transact(fn ->
+        {:ok,
+         Enum.flat_map(batches(rows, events), fn
+           {:row, row} -> [apply_row(scope, row)]
+           {:event, event} -> [apply_event(scope, event)]
+         end)}
+      end)
+
+    results
+  end
+
+  @doc """
+  The web's save of one row: the event a device would send, from `loaded`,
+  the row as the page loaded it, or nil for a new row, applied at once.
+  `changes` are by field name, as strings. Returns `{:ok, row}`,
+  `{:conflict, conflicts, row}` when someone changed the same field
+  first, `{:error, changeset}`, or `{:error, reason}`.
+  """
+  def save(%Scope{} = scope, table, loaded, changes) do
+    changes = Map.new(changes, fn {field, value} -> {to_string(field), Merge.wire(value)} end)
+
+    event =
+      case loaded do
+        nil ->
+          event(table, Ecto.UUID.generate(version: 7), "create", 0, %{}, changes)
+
+        row ->
+          base = Merge.values(row, Map.keys(changes))
+          event(table, row.id, "update", row.version, base, changes)
+      end
+
+    [{:event, _answer, result}] = run(scope, [], [event])
+
+    case result do
+      {:ok, %{conflicts: conflicts}, row} when conflicts == %{} -> {:ok, row}
+      {:ok, %{conflicts: conflicts}, row} -> {:conflict, conflicts, row}
+      {:error, reason, _row} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  An event as a device sends it.
+  """
+  def event(table, row_id, type, base_version, base, changes) do
+    %{
+      "id" => Ecto.UUID.generate(version: 7),
+      "table" => table,
+      "row_id" => row_id,
+      "type" => type,
+      "base_version" => base_version,
+      "base" => base,
+      "changes" => changes
+    }
+  end
+
+  @doc """
+  The results of `run/3` as one outcome, for a save the web makes all or
+  nothing: `:ok` when everything applied, including a server-wins row
+  that comes back as the server has it, else the first error, as
+  `{:error, changeset}` or `{:error, reason}` with the reasons the web
+  handles as atoms.
+  """
+  def outcome(results) do
+    Enum.find_value(results, :ok, fn
+      {:accepted, _table, _id, _row} -> nil
+      {:rejected, _table, _id, "server_wins", _server} -> nil
+      {:rejected, _table, _id, reason, _server} -> {:error, reason(reason)}
+      {:event, _answer, {:ok, _recorded, _row}} -> nil
+      {:event, _answer, {:error, %Ecto.Changeset{} = changeset, _row}} -> {:error, changeset}
+      {:event, _answer, {:error, reason, _row}} -> {:error, reason(reason)}
+      {:event, _answer, {:error, reason}} -> {:error, reason(reason)}
+    end)
+  end
+
+  defp reason(reason) when reason in ["not_a_member", "not_owner"], do: String.to_existing_atom(reason)
+  defp reason(reason), do: reason
 
   defp batches(rows, events) do
     order = @tables |> Enum.map(&elem(&1, 0)) |> Enum.with_index() |> Map.new()
@@ -461,35 +590,53 @@ defmodule App.Data.Sync do
       "row_id" => string_of(event, "row_id")
     }
 
-    {:event, Map.merge(answer, event_result(scope, table_of(event), event))}
+    {answer_of_result, result} = event_result(scope, table_of(event), event)
+    {:event, Map.merge(answer, answer_of_result), result}
   end
 
   defp event_result(scope, table, event) do
     with {:ok, schema, flow} <- event_flow(table),
-         {:ok, checked} <- check_event(schema, event) do
-      case flow.apply_event(scope, checked) do
-        {:ok, recorded, row} ->
-          %{
-            "status" => if(recorded.conflicts == %{}, do: "applied", else: "conflict"),
-            "version" => recorded.version,
-            "conflicts" => recorded.conflicts,
-            "server" => encode({table, row})
-          }
-
-        {:error, reason, row} ->
-          event_rejected(reason, row && encode({table, row}))
-
-        {:error, %Ecto.Changeset{} = changeset} ->
-          event_rejected(invalid(changeset), nil)
-      end
+         {:ok, checked} <- check_event(schema, table, event) do
+      result = flow.apply_event(scope, checked)
+      {event_answer(table, result), result}
     else
-      {:error, reason} -> event_rejected(reason, nil)
+      {:error, reason} -> {event_rejected(reason, nil), {:error, reason}}
+    end
+  end
+
+  defp event_answer(table, result) do
+    case result do
+      {:ok, recorded, row} ->
+        %{
+          "status" => if(recorded.conflicts == %{}, do: "applied", else: "conflict"),
+          "version" => recorded.version,
+          "conflicts" => recorded.conflicts,
+          "server" => encode({table, row})
+        }
+
+      {:error, %Ecto.Changeset{} = changeset, row} ->
+        Map.put(event_rejected(invalid(changeset), row && encode({table, row})), "errors", errors(changeset))
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        Map.put(event_rejected(invalid(changeset), nil), "errors", errors(changeset))
+
+      {:error, reason, row} ->
+        event_rejected(reason, row && encode({table, row}))
     end
   end
 
   defp invalid(changeset) do
     "invalid: " <>
       Enum.map_join(changeset.errors, ", ", fn {field, {message, _}} -> "#{field} #{message}" end)
+  end
+
+  # Each field's messages with their values filled in, for a form
+  defp errors(changeset) do
+    Ecto.Changeset.traverse_errors(changeset, fn {message, options} ->
+      Regex.replace(~r"%{(\w+)}", message, fn _match, key ->
+        options |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      end)
+    end)
   end
 
   defp event_rejected(reason, server), do: %{"status" => "rejected", "reason" => reason, "server" => server}
@@ -504,6 +651,7 @@ defmodule App.Data.Sync do
   # A deletion time is bounded like a row's.
   defp check_event(
          schema,
+         table,
          %{"id" => id, "row_id" => row_id, "type" => type, "base_version" => base_version} = event
        )
        when type in ["create", "update"] and is_integer(base_version) and base_version >= 0 do
@@ -518,6 +666,7 @@ defmodule App.Data.Sync do
       {:ok,
        %{
          id: id,
+         table: table,
          row_id: row_id,
          type: String.to_existing_atom(type),
          base_version: base_version,
@@ -530,7 +679,7 @@ defmodule App.Data.Sync do
     end
   end
 
-  defp check_event(_schema, _event), do: {:error, "malformed"}
+  defp check_event(_schema, _table, _event), do: {:error, "malformed"}
 
   defp bound_changes(%{"deleted_at" => at} = changes) when is_binary(at) do
     now = DateTime.utc_now()

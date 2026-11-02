@@ -267,9 +267,9 @@ Rules that hold it together:
   both join tables, applied by the data context. Adding a post back to a
   community clears `deleted_at` on the existing row instead of inserting a
   new one, so ids stay stable and the unique index on (post, community)
-  stays plain, and the earlier comments there return with it. A soft-deleted
-  post hides its community rows because reads join through it, so deleting
-  a post needs no cascade of its own.
+  stays plain, and the earlier comments there return with it. Deleting a
+  post copies its `deleted_at` onto its community rows, so no read has to
+  check the post, see "Deletes" in `related-resources.md`.
 - **No home community.** A post has an owner and is in zero or more
   communities, all equal. The owner deletes the post; a community admin can
   only soft-delete the post's row for their community.

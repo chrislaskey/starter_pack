@@ -5,9 +5,9 @@ defmodule App.Data.PostingTest do
   import App.Data.PostsFixtures
   import App.Data.UsersFixtures
 
+  alias App.Data.Events
   alias App.Data.Memberships
   alias App.Data.PostCommunity
-  alias App.Data.PostEvents
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.PostsCommunities
@@ -142,16 +142,18 @@ defmodule App.Data.PostingTest do
   end
 
   describe "delete/2" do
-    test "hides the post from every feed with no cascade of its own",
+    test "hides the post from every feed and copies its deletion onto its community rows",
          %{owner: owner, reader: reader, one: one} do
       post = post_fixture(owner, [one.id])
 
-      assert {:ok, %{deleted_at: %DateTime{}}} = Posting.delete(owner, post)
+      assert {:ok, %{deleted_at: %DateTime{} = deleted_at}} = Posting.delete(owner, post)
 
       assert feed_ids(reader, one) == []
       assert feed_ids(reader) == []
       assert feed_ids(owner) == []
-      assert [%PostCommunity{deleted_at: nil}] = PostsCommunities.list(filters: [post_id: post.id])
+
+      assert [%PostCommunity{deleted_at: ^deleted_at}] =
+               PostsCommunities.list(filters: [post_id: post.id], include_deleted: true)
     end
   end
 
@@ -169,17 +171,20 @@ defmodule App.Data.PostingTest do
       assert [
                %{type: :create, base_version: 0, version: 1, changes: %{"body" => "hello"}},
                %{type: :update, base_version: 1, version: 2, changes: %{"deleted_at" => _}}
-             ] = PostEvents.list(filters: [post_id: post.id])
+             ] = Events.list(filters: [row_table: "app_posts", row_id: post.id])
     end
 
-    test "a write from a stale copy of a row is refused", %{owner: owner, one: one} do
+    test "a write from a stale copy of a row is refused, and a delete from one merges like a device's",
+         %{owner: owner, one: one} do
       post = post_fixture(owner, [one.id])
       {:ok, _edited} = Posts.update(post, %{body: "first"})
 
       assert {:error, changeset} = Posts.update(post, %{body: "from the stale copy"})
       assert changeset.errors[:version]
-      assert {:error, _changeset} = Posting.delete(owner, post)
       assert Posts.get(post.id).body == "first"
+
+      # An event from the stale copy: nobody else changed deleted_at
+      assert {:ok, %{body: "first", deleted_at: %DateTime{}}} = Posting.delete(owner, post)
     end
 
     test "a device's edit of a field nobody else changed merges with a newer server version",

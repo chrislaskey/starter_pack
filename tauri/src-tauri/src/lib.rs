@@ -23,6 +23,7 @@
 mod changesets;
 mod claude_code;
 mod config;
+mod forms;
 mod git;
 mod macos;
 mod phoenix;
@@ -127,6 +128,8 @@ pub fn run() {
             paste_quick_search_item,
             sync::get_profile,
             sync::get_communities_page,
+            sync::show_post_form,
+            sync::change_post_form,
             sync::write_post,
             sync::edit_post,
             sync::delete_post,

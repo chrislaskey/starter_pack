@@ -73,6 +73,7 @@ defmodule App.Router do
       live "/communities", CommunitiesLive
       live "/communities/:id", CommunityLive
       live "/posts", PostsLive
+      live "/tags", TagsLive
       live "/profile", ProfileLive
     end
 

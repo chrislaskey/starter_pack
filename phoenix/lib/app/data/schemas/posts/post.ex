@@ -1,8 +1,9 @@
 defmodule App.Data.Post do
   @moduledoc """
   A post: the first resource, written by one owner and in the
-  communities the owner chose, see `App.Data.PostCommunity`. The
-  reference for every rule a resource follows, see phase 3 of
+  communities the owner chose, see `App.Data.PostCommunity`, with its
+  links and tags, see `docs/design/related-resources.md`. The reference
+  for every rule a resource follows, see phase 3 of
   `docs/design/build-order.md`.
 
   `last_synced_at` is set on every write, as the sync protocol in
@@ -23,6 +24,8 @@ defmodule App.Data.Post do
 
   schema "app_posts" do
     belongs_to :owner, App.Data.AppUser
+    has_many :links, App.Data.Link
+    has_many :posts_tags, App.Data.PostTag
     field :body, :string
     field :last_synced_at, :utc_datetime_usec
     field :version, :integer, default: 1
@@ -56,20 +59,17 @@ defmodule App.Data.Post do
     post
     |> changeset(params, options)
     |> cast(params, [:deleted_at])
-    |> put_deleted_by(Keyword.get(options, :deleted_by_id))
-  end
-
-  defp put_deleted_by(changeset, user_id) do
-    case fetch_change(changeset, :deleted_at) do
-      {:ok, nil} -> put_change(changeset, :deleted_by_id, nil)
-      {:ok, _at} -> put_change(changeset, :deleted_by_id, user_id)
-      :error -> changeset
-    end
+    |> App.Data.Synced.put_deleted_by(Keyword.get(options, :deleted_by_id))
   end
 
   @doc """
-  Deleting a post: a soft delete, with no cascade of its own since reads
-  of its community rows join through it.
+  The stream of the post's events: its own, see `App.Data.EventLog`.
+  """
+  def event_stream(post), do: {"app_posts", post.id}
+
+  @doc """
+  Deleting a post: a soft delete. `App.Data.Deletes` copies it onto the
+  rows below.
   """
   def delete_changeset(post, params, _options \\ []) do
     post

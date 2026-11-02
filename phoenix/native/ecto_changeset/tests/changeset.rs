@@ -494,3 +494,69 @@ fn text_fills_in_the_options() {
     };
     assert_eq!(error.text(), "must be less than 150");
 }
+
+/// `Ecto.Changeset.cast/4` over `{%{name: "Ada", age: 3}, types}`, the
+/// data the change functions below compare with.
+fn ada(params_value: Value) -> Changeset {
+    Changeset::cast(
+        &params(json!({"name": "Ada", "age": 3})),
+        &types(),
+        &params(params_value),
+        &["name", "tags", "age"],
+    )
+}
+
+#[test]
+fn params_are_the_raw_params_cast_from() {
+    let changeset = ada(json!({"name": "Bea", "tags": ["a", ""], "extra": "x"}));
+
+    assert_eq!(
+        changeset.params(),
+        &params(json!({"name": "Bea", "tags": ["a", ""], "extra": "x"}))
+    );
+    assert_eq!(changeset.changes()["tags"], json!(["a"]));
+}
+
+#[test]
+fn put_change_stores_a_change_unless_it_equals_the_data() {
+    let mut changeset = ada(json!({"name": "Bea", "tags": ["a", ""]}));
+
+    changeset.put_change("tags", json!(["b"]));
+    assert_eq!(changeset.changes()["tags"], json!(["b"]));
+
+    changeset.put_change("name", json!("Ada"));
+    assert!(!changeset.changes().contains_key("name"));
+
+    // Ecto's integer equality takes 3.0 for 3
+    changeset.put_change("age", json!(3.0));
+    assert!(!changeset.changes().contains_key("age"));
+
+    changeset.put_change("tags", json!([]));
+    assert_eq!(changeset.changes()["tags"], json!([]));
+}
+
+#[test]
+fn delete_change_falls_back_to_the_data() {
+    let mut with_data = ada(json!({"name": "Bea"}));
+    with_data.delete_change("name");
+    with_data.delete_change("age");
+    assert!(with_data.changes().is_empty());
+    assert_eq!(with_data.get_field("name"), json!("Ada"));
+    assert!(with_data.validate_required(&["name"]).valid());
+
+    let mut without_data = Changeset::cast(
+        &Params::new(),
+        &types(),
+        &params(json!({"name": "Bea"})),
+        &["name"],
+    );
+    without_data.delete_change("name");
+    assert_eq!(
+        errors(&without_data.validate_required(&["name"])),
+        [error(
+            "name",
+            "can't be blank",
+            json!([["validation", "required"]])
+        )]
+    );
+}

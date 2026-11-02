@@ -230,6 +230,27 @@ impl Changeset {
         &self.required
     }
 
+    /// The params the changeset was cast from.
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
+    /// `put_change/3`: the value becomes the field's change, unless it
+    /// equals the field's value in `data`, which removes the change.
+    pub fn put_change(&mut self, field: &str, value: Value) {
+        let current = self.data.get(field).cloned().unwrap_or(Value::Null);
+        if values_equal(&current, &value) {
+            self.changes.remove(field);
+        } else {
+            self.changes.insert(field.to_string(), value);
+        }
+    }
+
+    /// `delete_change/2`.
+    pub fn delete_change(&mut self, field: &str) {
+        self.changes.remove(field);
+    }
+
     /// The field's change, or its value in `data`.
     pub fn get_field(&self, field: &str) -> Value {
         self.changes

@@ -18,7 +18,7 @@ defmodule App.Data.Posts do
   import Ecto.Query, only: [from: 2]
 
   alias App.Data.PostCommunity
-  alias App.Data.UserCommunity
+  alias App.Data.Visibility
   alias App.Web.Scope
 
   def filter(query, :in_community, community_id) do
@@ -31,24 +31,8 @@ defmodule App.Data.Posts do
     Ecto.Query.where(query, [post], post.id in subquery(in_community))
   end
 
-  def filter(query, :visible_to, %Scope{user: user}) do
-    memberships =
-      from(uc in UserCommunity,
-        where: uc.user_id == ^user.id and is_nil(uc.deleted_at),
-        select: uc.community_id
-      )
-
-    in_my_communities =
-      from(pc in PostCommunity,
-        where: pc.community_id in subquery(memberships) and is_nil(pc.deleted_at),
-        select: pc.post_id
-      )
-
-    Ecto.Query.where(
-      query,
-      [post],
-      post.owner_id == ^user.id or post.id in subquery(in_my_communities)
-    )
+  def filter(query, :visible_to, %Scope{} = scope) do
+    Ecto.Query.where(query, [post], post.id in subquery(Visibility.post_ids(scope)))
   end
 
   def filter(query, key, value), do: super(query, key, value)

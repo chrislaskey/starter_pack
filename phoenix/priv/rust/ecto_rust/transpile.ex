@@ -157,12 +157,12 @@ defmodule EctoRust.Transpile do
   end
 
   # A regex compiled twice is two terms, so steps compare by its source
-  defp comparable(steps) do
-    Macro.prewalk(steps, fn
-      %Regex{} = regex -> {Regex.source(regex), Regex.opts(regex)}
-      other -> other
-    end)
-  end
+  # Steps are data, not AST: a walk with `Macro.prewalk/2` would read a
+  # step like `{:validate_format, field, {regex, opts}}` as a call
+  defp comparable(%Regex{} = regex), do: {Regex.source(regex), Regex.opts(regex)}
+  defp comparable(list) when is_list(list), do: Enum.map(list, &comparable/1)
+  defp comparable(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> comparable() |> List.to_tuple()
+  defp comparable(other), do: other
 
   defp not_recursive(name, arity, stack) do
     if {name, arity} in stack, do: {:error, 0, "#{name}/#{arity} pipes into itself"}, else: :ok

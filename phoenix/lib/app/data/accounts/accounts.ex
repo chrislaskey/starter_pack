@@ -13,9 +13,13 @@ defmodule App.Data.Accounts do
 
   alias App.Data.Accounts.Email
   alias App.Data.AppUsers
+  alias App.Data.Commenting
+  alias App.Data.Comments
   alias App.Data.Memberships
   alias App.Data.Posting
   alias App.Data.Posts
+  alias App.Data.Sync
+  alias App.Data.Tags
   alias App.Data.User
   alias App.Data.UserProfiles
   alias App.Data.Users
@@ -340,8 +344,10 @@ defmodule App.Data.Accounts do
 
   @doc """
   Deletes the account: soft-deletes the user and their app user row,
-  deletes the tokens, leaves every community, which takes the user's
-  posts there along, and deletes the user's posts. Everything goes for
+  deletes the tokens, deletes the user's comments while they are still a
+  member, leaves every community, which takes the user's
+  posts there along, and deletes the user's posts and tags, through the
+  same events the web and devices use. Everything goes for
   good with the purge after the retention window, see `App.Data.Purge`.
   The email can be registered again at once.
   """
@@ -350,12 +356,20 @@ defmodule App.Data.Accounts do
     scope = Scope.for_user(user)
 
     App.Repo.transact(fn ->
+      for comment <- Comments.list(filters: [owner_id: user.id]) do
+        {:ok, _comment} = Commenting.delete(scope, comment)
+      end
+
       for membership <- UsersCommunities.list(filters: [user_id: user.id]) do
         {:ok, _membership} = Memberships.leave(scope, membership.community_id)
       end
 
       for post <- Posts.list(filters: [owner_id: user.id]) do
         {:ok, _post} = Posting.delete(scope, post)
+      end
+
+      for tag <- Tags.list(filters: [owner_id: user.id]) do
+        {:ok, _tag} = Sync.save(scope, "app_tags", tag, %{"deleted_at" => deleted_at})
       end
 
       {:ok, _profile} =

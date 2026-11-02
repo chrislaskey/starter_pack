@@ -10,11 +10,14 @@ defmodule App.Data.Purge do
   horizon in `app_purges`; `App.Data.Sync` tells a client whose cursor is
   older to resync from nothing, since it may have missed a tombstone.
 
-  A purged parent takes its children through the foreign keys, whatever
-  their age: a deleted post's community rows, a left membership's rows, a
-  deleted user's posts. That is safe because every read joins through
-  the parent, so nothing could reach those children once the parent's
-  tombstone, which every client in the window received, was in place.
+  A deleted row's children were deleted with it, with the same
+  `deleted_at`, see `App.Data.Deletes`, so they age out together. A
+  purged parent still takes any child left through the foreign keys,
+  such as a deleted user's posts.
+
+  When the row a stream of `App.Data.EventLog` belongs to is gone, the
+  stream goes too. A link purged on its own leaves its events in its
+  post's stream.
 
   Run it from `mix app.purge` or `App.Release.purge/0`, on a schedule,
   such as a daily cron job on the server.
@@ -23,9 +26,17 @@ defmodule App.Data.Purge do
   import Ecto.Query, only: [from: 2]
 
   alias App.Data.AppUsers
+  alias App.Data.Comment
+  alias App.Data.Comments
   alias App.Data.Communities
+  alias App.Data.EventLog
+  alias App.Data.Links
+  alias App.Data.Post
   alias App.Data.Posts
   alias App.Data.PostsCommunities
+  alias App.Data.PostsTags
+  alias App.Data.Tag
+  alias App.Data.Tags
   alias App.Data.UserProfiles
   alias App.Data.Users
   alias App.Data.UsersCommunities
@@ -33,7 +44,21 @@ defmodule App.Data.Purge do
   @retention_days 90
 
   # Children first
-  @synced_contexts [PostsCommunities, Posts, UsersCommunities, Communities, UserProfiles, AppUsers]
+  @synced_contexts [
+    Comments,
+    PostsTags,
+    Links,
+    PostsCommunities,
+    Posts,
+    Tags,
+    UsersCommunities,
+    Communities,
+    UserProfiles,
+    AppUsers
+  ]
+
+  # The streams of the event log, by the table of the row they belong to
+  @streams [{"app_posts", Post}, {"app_tags", Tag}, {"app_comments", Comment}]
 
   def retention_days, do: @retention_days
 
@@ -62,6 +87,8 @@ defmodule App.Data.Purge do
         {context.schema().__schema__(:source), count}
       end
 
+    events = EventLog.purge_streams(@streams)
+
     # Tokens go with the user through the foreign key
     {users, _} = Users.delete_many(filters: [deleted_at_before: horizon], hard: true)
 
@@ -69,7 +96,7 @@ defmodule App.Data.Purge do
       %{id: Ecto.UUID.generate(), horizon: horizon, inserted_at: DateTime.utc_now()}
     ])
 
-    Map.put(synced, "users", users)
+    synced |> Map.put("users", users) |> Map.put("app_events", events)
   end
 
   @doc """

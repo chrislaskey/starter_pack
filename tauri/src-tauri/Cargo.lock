@@ -886,6 +886,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "core-graphics",
+ "dynamic_form",
  "ecto_changeset",
  "env_logger",
  "futures-util",
@@ -1046,6 +1047,17 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "dynamic_form"
+version = "0.1.0"
+dependencies = [
+ "ecto_changeset",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
 
 [[package]]
 name = "ecto_changeset"

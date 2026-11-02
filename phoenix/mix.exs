@@ -37,11 +37,14 @@ defmodule App.MixProject do
   # The code generators in priv/code_generators are Mix tasks that need the
   # igniter dependency, which is only present in dev and test. The Svelte
   # mirroring in priv/svelte is a dev tool too, see priv/svelte/README.md,
-  # as is the Rust mirroring of changesets in priv/rust, see priv/rust/README.md.
+  # as is the Rust mirroring of changesets in priv/rust, see priv/rust/README.md,
+  # and the JSON of forms in priv/dynamic_form_json, see its README.md.
   defp elixirc_paths(:test),
-    do: ["lib", "test/support", "priv/code_generators", "priv/svelte", "priv/rust"]
+    do: ["lib", "test/support", "priv/code_generators", "priv/svelte", "priv/rust", "priv/dynamic_form_json"]
 
-  defp elixirc_paths(:dev), do: ["lib", "priv/code_generators", "priv/svelte", "priv/rust"]
+  defp elixirc_paths(:dev),
+    do: ["lib", "priv/code_generators", "priv/svelte", "priv/rust", "priv/dynamic_form_json"]
+
   defp elixirc_paths(_), do: ["lib"]
 
   # Specifies your project dependencies.
@@ -77,6 +80,9 @@ defmodule App.MixProject do
        depth: 1},
       {:swoosh, "~> 1.16"},
       {:req, "~> 0.5"},
+      # Forms defined as SurveyJS JSON, rendered with App.Web.CoreComponents,
+      # see docs/design/dynamic-forms.md
+      {:dynamic_form, "~> 1.2"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},

@@ -11,7 +11,7 @@
 msgid ""
 msgstr ""
 
-#: lib/app/web/components/core_components.ex:384
+#: lib/app/web/components/core_components.ex:444
 #, elixir-autogen, elixir-format
 msgid "Actions"
 msgstr ""
@@ -36,3 +36,10 @@ msgstr ""
 #, elixir-autogen, elixir-format
 msgid "close"
 msgstr ""
+
+#: lib/app/web/live/tags_live.ex:48
+#, elixir-autogen, elixir-format
+msgid "1 post"
+msgid_plural "%{count} posts"
+msgstr[0] ""
+msgstr[1] ""

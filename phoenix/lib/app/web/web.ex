@@ -82,6 +82,9 @@ defmodule App.Web do
       # Marks a function component to mirror into a .svelte file, see
       # `mix help app.svelte`
       Module.register_attribute(__MODULE__, :universal_component, accumulate: true)
+      # Marks a function returning a dynamic_form definition to write as a
+      # .json file, see `mix help app.dynamic_forms`
+      Module.register_attribute(__MODULE__, :universal_dynamic_form, accumulate: true)
 
       # Translation
       use Gettext, backend: App.Web.Gettext

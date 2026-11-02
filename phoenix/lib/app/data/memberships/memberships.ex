@@ -4,22 +4,18 @@ defmodule App.Data.Memberships do
   `App.Data.UsersCommunities` context. A membership is a `users_communities`
   row of the scope's user.
 
-  Leaving soft-deletes the row with one `deleted_at` value, computed once
-  here, and cascades to the member's own posts in the community: every
-  live `posts_communities` row added under the membership gets the same
-  `deleted_at`. Rejoining while the row still exists clears `deleted_at`
-  on that same row, so its id is stable, and revives exactly the rows
-  that left with it: those under the membership whose `deleted_at` equals
-  the membership's. A row the owner removed on purpose was deleted at
-  another moment and stays deleted. Once the purge has removed the
-  membership, rejoining starts fresh.
+  Leaving soft-deletes the row, and `App.Data.Deletes` copies its
+  `deleted_at` onto the member's own posts in the community: every live
+  `posts_communities` row added under the membership. Rejoining while the
+  row still exists clears `deleted_at` on that same row, so its id is
+  stable, and revives exactly the rows that left with it, unless their
+  post has been deleted since. A row the owner removed on purpose was
+  deleted at another moment and stays deleted. Once the purge has removed
+  the membership, rejoining starts fresh.
   """
 
-  import Ecto.Query, only: [from: 2]
-
   alias App.Data.Communities
-  alias App.Data.PostCommunity
-  alias App.Data.PostsCommunities
+  alias App.Data.Deletes
   alias App.Data.UserCommunity
   alias App.Data.UsersCommunities
   alias App.Web.Scope
@@ -58,10 +54,10 @@ defmodule App.Data.Memberships do
     end
   end
 
-  defp rejoin(%UserCommunity{deleted_at: left_at} = membership) do
+  defp rejoin(%UserCommunity{user_id: user_id} = left) do
     with {:ok, membership} <-
-           UsersCommunities.update(membership, %{}, changesets: &UserCommunity.rejoin_changeset/3) do
-      revive_rows(membership, left_at)
+           UsersCommunities.update(left, %{}, changesets: &UserCommunity.rejoin_changeset/3) do
+      :ok = Deletes.copy_down(left, membership, user_id)
       {:ok, membership}
     end
   end
@@ -81,32 +77,14 @@ defmodule App.Data.Memberships do
   end
 
   defp leave_with_posts(membership, user_id) do
-    deleted_at = DateTime.utc_now()
-
-    with {:ok, membership} <-
+    with {:ok, left} <-
            UsersCommunities.delete(membership,
-             deleted_at: deleted_at,
+             deleted_at: DateTime.utc_now(),
              deleted_by_id: user_id,
              changesets: &UserCommunity.leave_changeset/3
            ) do
-      cascade_rows(membership, deleted_at)
-      {:ok, membership}
+      :ok = Deletes.copy_down(membership, left, user_id)
+      {:ok, left}
     end
-  end
-
-  defp cascade_rows(%UserCommunity{id: id, deleted_by_id: deleted_by_id}, deleted_at) do
-    PostsCommunities.delete_many(
-      filters: [users_communities_id: id],
-      deleted_at: deleted_at,
-      deleted_by_id: deleted_by_id
-    )
-  end
-
-  defp revive_rows(%UserCommunity{id: id}, left_at) do
-    App.Repo.update_all(
-      from(pc in PostCommunity, where: pc.users_communities_id == ^id and pc.deleted_at == ^left_at),
-      set: [deleted_at: nil, deleted_by_id: nil, last_synced_at: DateTime.utc_now()],
-      inc: [version: 1]
-    )
   end
 end

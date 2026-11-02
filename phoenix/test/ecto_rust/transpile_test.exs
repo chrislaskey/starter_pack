@@ -78,6 +78,15 @@ defmodule EctoRust.TranspileTest do
     assert rust =~ "pub fn changeset_constraints() -> Vec<Constraint>"
   end
 
+  test "writes a format with its message, and a unique constraint for the local store" do
+    assert {:ok, rust} = module(App.Data.Link, :changeset, 3)
+    assert rust =~ ~s|.validate_format(\n            "url",|
+    assert rust =~ "must be an http:// or https:// URL"
+
+    assert {:ok, rust} = module(App.Data.Tag, :changeset, 3)
+    assert rust =~ "app_tags_owner_id_lower_name_index"
+  end
+
   test "casts an Ecto.Enum by its values" do
     assert {:ok, rust} = module(Branching, :with_enum, 2)
     assert rust =~ ~s|FieldType::Enum(vec!["member".to_string(), "admin".to_string()])|

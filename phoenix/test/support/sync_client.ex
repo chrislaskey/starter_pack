@@ -12,7 +12,8 @@ defmodule App.SyncClient do
       phone = SyncClient.write(phone, "app_users_communities", %{...})
       {phone, response} = SyncClient.push(phone)
 
-  Posts and profiles change through `create/3` and `change/4`, which queue events;
+  Posts, profiles, links, tags and posts_tags change through `create/3`
+  and `change/4`, which queue events;
   other rows through `write/4` and `delete/4`. `conflicts` holds the
   events the server answered with conflicts, until `resolve/3`.
 
@@ -137,7 +138,7 @@ defmodule App.SyncClient do
       client
       |> local_row(table, id, now)
       |> Map.merge(changes)
-      |> Map.put("owner_id", scope.user.id)
+      |> put_owner(table, scope.user.id)
 
     event = new_event(table, id, "create", 0, %{}, changes)
     {client |> put_row(table, row) |> queue_event(event), id}
@@ -189,6 +190,7 @@ defmodule App.SyncClient do
   def push(%__MODULE__{} = client) do
     rows = for {table, id} <- client.outbox, do: %{"table" => table, "row" => row(client, table, id)}
     events = Enum.map(client.events, &Map.delete(&1, "conflicts"))
+    sent = client.events
     response = wire(Sync.push(client.scope, rows, events))
     client = %{client | outbox: []}
 
@@ -219,10 +221,19 @@ defmodule App.SyncClient do
         end
       end)
 
+    # A rejected create drops the device's row, and the server's row, if
+    # any, takes its place
     client =
-      Enum.reduce(response["events"], client, fn
-        %{"server" => nil, "table" => table, "row_id" => id}, client -> drop_row(client, table, id)
-        %{"server" => server}, client -> apply_server_row(client, server)
+      Enum.reduce(response["events"], client, fn answer, client ->
+        client =
+          if answer["status"] == "rejected" and created?(sent, answer["id"]),
+            do: drop_row(client, answer["table"], answer["row_id"]),
+            else: client
+
+        case answer do
+          %{"server" => nil, "table" => table, "row_id" => id} -> drop_row(client, table, id)
+          %{"server" => server} -> apply_server_row(client, server)
+        end
       end)
 
     {client, response}
@@ -235,6 +246,13 @@ defmodule App.SyncClient do
       else: put_row(client, table, row)
   end
 
+  # Posts, tags and comments have an owner; links and posts_tags are owned through
+  # their post
+  defp put_owner(row, table, user_id) when table in ["app_posts", "app_tags", "app_comments"],
+    do: Map.put(row, "owner_id", user_id)
+
+  defp put_owner(row, _table, _user_id), do: row
+
   defp local_row(client, table, id, now) do
     row(client, table, id) ||
       %{
@@ -246,6 +264,8 @@ defmodule App.SyncClient do
         "last_synced_at" => nil
       }
   end
+
+  defp created?(events, id), do: Enum.any?(events, &(&1["id"] == id and &1["type"] == "create"))
 
   defp new_event(table, row_id, type, base_version, base, changes) do
     %{

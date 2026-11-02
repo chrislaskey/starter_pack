@@ -2,9 +2,10 @@ defmodule App.Data.AppUsers do
   @moduledoc """
   The data context over `App.Data.AppUser`.
 
-  The `visible_to: scope` filter is what syncs to a user: themselves and
-  the members of the communities they are a live member of. The owners
-  of visible posts travel with the posts, see `App.Data.Sync`.
+  The `visible_to: scope` filter is what syncs to a user: themselves, the
+  members of the communities they are a live member of, and the authors
+  of the comments they see. The owners of visible posts travel with the
+  posts, see `App.Data.Sync`.
   """
 
   use App.Data.Context, schema: App.Data.AppUser
@@ -12,9 +13,10 @@ defmodule App.Data.AppUsers do
   import Ecto.Query, only: [from: 2]
 
   alias App.Data.UserCommunity
+  alias App.Data.Visibility
   alias App.Web.Scope
 
-  def filter(query, :visible_to, %Scope{user: user}) do
+  def filter(query, :visible_to, %Scope{user: user} = scope) do
     my_communities =
       from(uc in UserCommunity,
         where: uc.user_id == ^user.id and is_nil(uc.deleted_at),
@@ -27,7 +29,11 @@ defmodule App.Data.AppUsers do
         select: uc.user_id
       )
 
-    Ecto.Query.where(query, [u], u.id == ^user.id or u.id in subquery(members))
+    Ecto.Query.where(
+      query,
+      [u],
+      u.id == ^user.id or u.id in subquery(members) or u.id in subquery(Visibility.commenter_ids(scope))
+    )
   end
 
   def filter(query, key, value), do: super(query, key, value)

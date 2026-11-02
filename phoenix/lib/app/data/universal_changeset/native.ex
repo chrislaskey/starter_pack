@@ -9,7 +9,11 @@ defmodule App.Data.UniversalChangeset.Native do
 
   # The Rust next to each schema is compiled in by path, so a change to
   # it recompiles this module and with it the crate
+  @external_resource "lib/app/data/schemas/comments/comment.rs"
+  @external_resource "lib/app/data/schemas/links/link.rs"
   @external_resource "lib/app/data/schemas/posts/post.rs"
+  @external_resource "lib/app/data/schemas/posts_tags/post_tag.rs"
+  @external_resource "lib/app/data/schemas/tags/tag.rs"
   @external_resource "lib/app/data/schemas/user_profiles/user_profile.rs"
 
   use Rustler, otp_app: :app, crate: "universal_changeset"
@@ -18,7 +22,11 @@ defmodule App.Data.UniversalChangeset.Native do
   Runs the Rust of a marked function: the data and the params go in as
   JSON, the errors come out as JSON.
   """
+  def run(App.Data.Comment, :changeset, data, params), do: comment_changeset(data, params)
+  def run(App.Data.Link, :changeset, data, params), do: link_changeset(data, params)
   def run(App.Data.Post, :changeset, data, params), do: post_changeset(data, params)
+  def run(App.Data.PostTag, :changeset, data, params), do: post_tag_changeset(data, params)
+  def run(App.Data.Tag, :changeset, data, params), do: tag_changeset(data, params)
 
   def run(App.Data.UserProfile, :changeset, data, params),
     do: user_profile_changeset(data, params)
@@ -27,10 +35,22 @@ defmodule App.Data.UniversalChangeset.Native do
   The fields a marked function casts, which `App.Data.UniversalChangeset.run/3`
   tells apart from the fields the app sets.
   """
+  def cast(App.Data.Comment, :changeset), do: [:posts_communities_id, :body]
+  def cast(App.Data.Link, :changeset), do: [:post_id, :label, :url]
   def cast(App.Data.Post, :changeset), do: [:body]
+  def cast(App.Data.PostTag, :changeset), do: [:post_id, :tag_id, :position, :note]
+  def cast(App.Data.Tag, :changeset), do: [:name]
   def cast(App.Data.UserProfile, :changeset), do: [:display_name, :bio]
 
+  def comment_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
+
+  def link_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
+
   def post_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
+
+  def post_tag_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
+
+  def tag_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
 
   def user_profile_changeset(_data, _params), do: :erlang.nif_error(:nif_not_loaded)
 end

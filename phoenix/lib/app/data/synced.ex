@@ -21,6 +21,19 @@ defmodule App.Data.Synced do
   end
 
   @doc """
+  Sets `deleted_by_id` to match a `deleted_at` change: the user who
+  deleted, or nil when the row comes back. For the `event_changeset/3` of
+  a resource that changes through events.
+  """
+  def put_deleted_by(changeset, user_id) do
+    case Ecto.Changeset.fetch_change(changeset, :deleted_at) do
+      {:ok, nil} -> Ecto.Changeset.put_change(changeset, :deleted_by_id, nil)
+      {:ok, _at} -> Ecto.Changeset.put_change(changeset, :deleted_by_id, user_id)
+      :error -> changeset
+    end
+  end
+
+  @doc """
   Whether the schema module is marked as synced.
   """
   def synced?(module) when is_atom(module) do

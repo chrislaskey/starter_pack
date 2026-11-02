@@ -5,8 +5,8 @@ defmodule App.Data.SyncTest do
   import App.Data.PostsFixtures
   import App.Data.UsersFixtures
 
+  alias App.Data.Events
   alias App.Data.Memberships
-  alias App.Data.PostEvents
   alias App.Data.Posting
   alias App.Data.Posts
   alias App.Data.Profiles
@@ -67,7 +67,8 @@ defmodule App.Data.SyncTest do
     for schema <- Sync.schemas(), do: assert(Synced.synced?(schema))
 
     assert Enum.map(Sync.tables(), &elem(&1, 0)) ==
-             ~w(app_users app_user_profiles app_communities app_users_communities app_posts app_posts_communities)
+             ~w(app_users app_user_profiles app_communities app_users_communities app_posts app_posts_communities
+                app_links app_tags app_posts_tags app_comments)
   end
 
   describe "pull/2" do
@@ -173,7 +174,7 @@ defmodule App.Data.SyncTest do
       assert SyncClient.row(phone, "app_posts", post_id)["version"] == 2
 
       assert [%{type: :create, base_version: 0, version: 1}, %{type: :update, base_version: 1, version: 2}] =
-               PostEvents.list(filters: [post_id: post_id])
+               Events.list(filters: [row_table: "app_posts", row_id: post_id])
     end
 
     test "the same field edited on two devices keeps the edit that reached the server first, and the other becomes a conflict",
@@ -201,7 +202,7 @@ defmodule App.Data.SyncTest do
 
       # The rejected change is in the post's history with nothing applied
       assert %{changes: changes, conflicts: %{"body" => _}, version: 2} =
-               PostEvents.get(answer["id"])
+               Events.get(answer["id"])
 
       assert changes == %{}
     end
@@ -273,7 +274,7 @@ defmodule App.Data.SyncTest do
       assert %{"events" => [%{"status" => "applied", "version" => 2}]} = wire(Sync.push(owner, [], [event]))
       assert %{"events" => [%{"status" => "applied", "version" => 2}]} = wire(Sync.push(owner, [], [event]))
       assert Posts.get(post.id).version == 2
-      assert length(PostEvents.list(filters: [post_id: post.id])) == 2
+      assert length(Events.list(filters: [row_table: "app_posts", row_id: post.id])) == 2
 
       assert %{"events" => [%{"status" => "rejected", "reason" => "event_id_taken"}]} =
                wire(Sync.push(other, [], [event]))
@@ -584,23 +585,26 @@ defmodule App.Data.SyncTest do
   end
 
   describe "pull/2 and tombstones" do
-    test "a deleted post travels without its body, and a removed row carries no post",
+    test "a deleted post travels without its body, and a deleted or removed post reaches a member as its community row",
          %{owner: owner, other: other, community: community} do
       deleted = post_fixture(owner, [community.id], %{body: "secret, deleted"})
       removed = post_fixture(owner, [community.id], %{body: "secret, removed"})
       {:ok, _post} = Posting.delete(owner, deleted)
       {:ok, _row} = Posting.remove_from_community(owner, removed, community.id)
 
-      phone = SyncClient.pull(SyncClient.new(other))
+      laptop = SyncClient.pull(SyncClient.new(owner))
+      assert SyncClient.row(laptop, "app_posts", deleted.id)["body"] == ""
+      assert SyncClient.row(laptop, "app_posts", deleted.id)["deleted_at"]
 
-      assert SyncClient.row(phone, "app_posts", deleted.id)["body"] == ""
-      assert SyncClient.row(phone, "app_posts", deleted.id)["deleted_at"]
+      # A member's device prunes a post whose community row is gone
+      phone = SyncClient.pull(SyncClient.new(other))
+      refute SyncClient.row(phone, "app_posts", deleted.id)
       refute SyncClient.row(phone, "app_posts", removed.id)
 
-      [row] =
-        for row <- SyncClient.rows(phone, "app_posts_communities"), row["post_id"] == removed.id, do: row
-
-      assert row["deleted_at"]
+      for post <- [deleted, removed] do
+        [row] = for row <- SyncClient.rows(phone, "app_posts_communities"), row["post_id"] == post.id, do: row
+        assert row["deleted_at"]
+      end
     end
 
     test "a row written late inside the overlap window is still delivered, and a page holds each row once",

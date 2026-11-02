@@ -6,14 +6,13 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import Button from "$phoenix/components/Button.svelte";
+  import DynamicForm from "$phoenix/components/DynamicForm.svelte";
   import Header from "$phoenix/components/Header.svelte";
   import ThemeToggle from "$phoenix/components/ThemeToggle.svelte";
   import { homeUrl } from "../lib/routes.js";
 
   let profile = $state();
   let page = $state();
-  let body = $state("");
-  let communityIds = $state([]);
   let syncing = $state(false);
   let lastSync = $state("");
   let error = $state("");
@@ -41,6 +40,7 @@
     } catch (problem) {
       error = String(problem);
     }
+    await showPostForm();
   }
 
   async function sync() {
@@ -56,19 +56,62 @@
     }
   }
 
-  async function post(event) {
-    event.preventDefault();
+  // The post form is Phoenix's post_form.dynamic_form.json, validated and
+  // laid out by the Rust (src-tauri/src/forms.rs) on every change, as
+  // LiveView does on the web. Only the reply to the latest request is
+  // shown, so a slow reply never puts back what the user has since typed
+  // over. A written post remounts the form, empty, as the web page does.
+  let postForm = $state();
+  let postFormKey = $state(0);
+  let posting = $state(false);
+  let postEntries = null;
+  let latestPostFormRequest = 0;
+
+  // The form as it first shows, or, once the user has typed, as it is
+  // again with the communities as they are now
+  async function showPostForm() {
+    if (!profile) return;
+    if (postForm && postEntries) return changePostForm(postEntries, postForm.state);
+    const request = ++latestPostFormRequest;
     try {
-      page = await invoke("write_post", { body, communityIds });
-      body = "";
-      error = "";
+      const form = await invoke("show_post_form");
+      if (request === latestPostFormRequest) postForm = form;
     } catch (problem) {
       error = String(problem);
     }
   }
 
-  function toggle(id) {
-    communityIds = communityIds.includes(id) ? communityIds.filter((other) => other !== id) : [...communityIds, id];
+  async function changePostForm(entries, state) {
+    postEntries = entries;
+    const request = ++latestPostFormRequest;
+    try {
+      const form = await invoke("change_post_form", { form: state, entries });
+      if (request === latestPostFormRequest) postForm = form;
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  async function writePost(entries, state) {
+    latestPostFormRequest++;
+    posting = true;
+    try {
+      const reply = await invoke("write_post", { form: state, entries });
+      if (reply.result === "written") {
+        page = reply.page;
+        postFormKey++;
+        postForm = null;
+        postEntries = null;
+        await showPostForm();
+      } else {
+        postForm = reply.form;
+      }
+      error = "";
+    } catch (problem) {
+      error = String(problem);
+    } finally {
+      posting = false;
+    }
   }
 
   let editingId = $state("");
@@ -235,18 +278,20 @@
       {#if page.communities.length === 0}
         <p class="muted">Join a community in the web UI; it appears here on the next sync.</p>
       {/if}
-      <form id="post-form" onsubmit={post} class="post-form">
-        <textarea bind:value={body} rows="3" placeholder="Write a post, even offline"></textarea>
-        <div class="communities">
-          {#each page.communities as community (community.id)}
-            <label>
-              <input type="checkbox" checked={communityIds.includes(community.id)} onchange={() => toggle(community.id)} />
-              {community.name}
-            </label>
-          {/each}
+      {#if postForm}
+        <div class="post-form">
+          {#key postFormKey}
+            <DynamicForm
+              id="post-form"
+              form={postForm}
+              submit_text="Post"
+              disabled={posting}
+              onchange={changePostForm}
+              onsubmit={writePost}
+            />
+          {/key}
         </div>
-        <Button variant="primary" type="submit">Post</Button>
-      </form>
+      {/if}
     </section>
 
     <section>
@@ -300,11 +345,6 @@
     border: 1px solid color-mix(in oklab, currentColor 30%, transparent);
     border-radius: 0.5rem;
     background: transparent;
-  }
-  .communities {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
   }
   .feed {
     list-style: none;

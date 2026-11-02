@@ -238,9 +238,12 @@ The web app saves the same way: a form sends the values it loaded as the
 `base` and the fields the person changed, and shows a conflicting field
 inline with Reapply and Let it go, see `App.Web.ProfileLive`.
 
-**The event log.** Posts keep `app_post_events`, every change in the
-same transaction as the row, server-only and never synced, gone with its
-post when the purge hard-deletes it. It is the history, the record of
+**The event log.** A resource opts in to `app_events`, one table shared
+by every resource that logs, server-only and never synced. Each row's
+events go in a stream, its post's for a post, its links, tags on it and
+community rows, recorded in the same transaction as the row and gone
+with the stream's row when the purge hard-deletes it. See "The event
+log" in `related-resources.md`. It is the history, the record of
 what was not applied, and what makes a retried event exact. Profiles keep
 none: a retry is still safe, since a field already holding the value is
 skipped, except that a retry arriving after someone else changed the same
@@ -248,9 +251,11 @@ field shows a needless conflict. A log is the foundation for event
 sourcing later, deriving the row from its events; today the row is
 written directly and the log sits beside it.
 
-Adding a user-editable resource is: an `apply_event/2` in its flow with
-the fields an event may change, an entry in `@event_tables` in
-`App.Data.Sync`, and, for a log, an events table like `app_post_events`.
+Adding a user-editable resource is: an `apply_event/2` in its flow,
+usually a spec for `App.Data.EventFlow` with the fields an event may
+change, an entry in `@event_tables` in `App.Data.Sync`, and, for a log,
+`event_stream/1` on its schema. The web saves through the same path with
+`App.Data.Sync.save/4`.
 A row pushed for one of these tables is refused with `events_only`. A
 device keeps its events until the server answers them, and the
 conflicted ones until the person resolves them, see
@@ -275,8 +280,10 @@ handle:
   its local file and pull fresh. This is also the recovery path for any
   corruption, so it is worth building early.
 
-Purge has to respect foreign keys: a deleted post's community rows and
-comments go with it. Purging in dependency order, oldest first, in small batches, is
+Purge has to respect foreign keys: a deleted post's community rows,
+links and tags on it go with it. A delete copies its `deleted_at` onto
+the rows below, so they age out together, see "Deletes" in
+`related-resources.md`. Purging in dependency order, oldest first, in small batches, is
 enough.
 
 ### Leak 4: visibility is not a row update
