@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::deletes;
 use crate::changesets;
 
 /// The synced tables, parents first.
@@ -97,18 +98,6 @@ pub struct Applied {
 pub struct Community {
     pub id: String,
     pub name: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct FeedPost {
-    pub id: String,
-    pub body: String,
-    pub owner_email: String,
-    pub inserted_at: String,
-    pub communities: Vec<String>,
-    pub mine: bool,
-    /// Queued for the next push.
-    pub pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -384,10 +373,12 @@ pub fn delete_row(connection: &Connection, table: &str, id: &str) -> Result<(), 
 }
 
 /// Deletes every post not by the user that is no longer in a community
-/// the user is a live member of. The post's community rows go with it
-/// through the foreign key. Returns how many posts went.
+/// the user is a live member of. The post's community rows, links, tag
+/// rows and comments go with it through the foreign keys, and so does
+/// someone else's tag left on none of the posts here. Returns how many
+/// posts went.
 pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
-    connection
+    let posts = connection
         .execute(
             "DELETE FROM app_posts
              WHERE owner_id != ?1
@@ -399,7 +390,15 @@ pub fn prune(connection: &Connection, user_id: &str) -> Result<usize, String> {
                )",
             [user_id],
         )
-        .map_err(sql_error)
+        .map_err(sql_error)?;
+    connection
+        .execute(
+            "DELETE FROM app_tags
+             WHERE owner_id != ?1 AND id NOT IN (SELECT tag_id FROM app_posts_tags)",
+            [user_id],
+        )
+        .map_err(sql_error)?;
+    Ok(posts)
 }
 
 /// Drops every synced row, the cursor and the outbox, for a resync from
@@ -626,6 +625,47 @@ pub fn delete_event(connection: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Drops a rejected `create` event with the row it made, the row's other
+/// pending events and, through the foreign keys, the rows below it, see
+/// "Writing" in `phoenix/docs/design/related-resources.md`.
+pub fn drop_rejected_create(connection: &Connection, event_id: &str) -> Result<(), String> {
+    let event: Option<(String, String)> = connection
+        .query_row(
+            "SELECT table_name, row_id FROM sync_events WHERE id = ?1",
+            [event_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    delete_event(connection, event_id)?;
+
+    if let Some((table, row_id)) = event {
+        connection
+            .execute(
+                "DELETE FROM sync_events WHERE table_name = ?1 AND row_id = ?2 AND status = 'pending'",
+                params![table, row_id],
+            )
+            .map_err(sql_error)?;
+        delete_row(connection, &table, &row_id)?;
+    }
+    Ok(())
+}
+
+/// The event's type and the id of its row, while it is on the device.
+pub fn event_kind_and_row(
+    connection: &Connection,
+    event_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    connection
+        .query_row(
+            "SELECT type, row_id FROM sync_events WHERE id = ?1",
+            [event_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)
+}
+
 pub fn mark_conflict(
     connection: &Connection,
     id: &str,
@@ -686,20 +726,28 @@ pub fn conflicts(connection: &Connection) -> Result<Vec<Conflict>, String> {
                     field,
                 })
                 .collect();
-            let body = current
-                .as_ref()
-                .and_then(|row| row.get("body"))
-                .or_else(|| {
-                    fields
-                        .iter()
-                        .find(|field| field.field == "body")
-                        .map(|field| &field.yours)
-                })
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let text = |field: &str| {
+                current
+                    .as_ref()
+                    .and_then(|row| row.get(field))
+                    .or_else(|| {
+                        fields
+                            .iter()
+                            .find(|conflict| conflict.field == field)
+                            .map(|conflict| &conflict.yours)
+                    })
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.lines().next())
+                    .unwrap_or("")
+                    .to_string()
+            };
             let summary = match table.as_str() {
                 "app_user_profiles" => "Your profile".to_string(),
-                _ => body.lines().next().unwrap_or("").to_string(),
+                "app_tags" => format!("The tag {}", text("name")),
+                "app_links" => format!("The link {}", text("label")),
+                "app_posts_tags" => "A tag on a post".to_string(),
+                "app_comments" => format!("Your comment {}", text("body")),
+                _ => text("body"),
             };
 
             Ok(Conflict {
@@ -767,7 +815,7 @@ pub fn resolve_conflict(
     transaction.commit().map_err(sql_error)
 }
 
-fn update_fields(
+pub(super) fn update_fields(
     connection: &Connection,
     table: &str,
     id: &str,
@@ -890,24 +938,33 @@ pub fn edit_post(
     )
 }
 
-/// Deletes the user's own post, queued as an event.
+/// Deletes the user's own post, queued as an event, and copies the
+/// delete onto its links, tags and community rows, see `deletes`.
 pub fn delete_post(
     connection: &Connection,
     user_id: &str,
     post_id: &str,
     now: &str,
 ) -> Result<(), String> {
-    let mut changes = Map::new();
-    changes.insert("deleted_at".into(), Value::from(now));
-    change_own_row(
-        connection,
+    let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+    let post = own_live_row(&transaction, "app_posts", "owner_id", user_id, post_id)?;
+    change_row(
+        &transaction,
         user_id,
         "app_posts",
-        "owner_id",
-        post_id,
-        changes,
+        &post,
+        deleted_now(now),
         now,
-    )
+    )?;
+    deletes::copy_delete_down(&transaction, "app_posts", post_id, now, user_id)?;
+    transaction.commit().map_err(sql_error)
+}
+
+/// The changes of a delete made now.
+pub(super) fn deleted_now(now: &str) -> Map<String, Value> {
+    let mut changes = Map::new();
+    changes.insert("deleted_at".into(), Value::from(now));
+    changes
 }
 
 /// Edits the user's own profile, queued as an event of the fields that
@@ -1008,12 +1065,48 @@ fn change_own_row(
     now: &str,
 ) -> Result<(), String> {
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
-    let row = row_json(&transaction, table, id)?
-        .filter(|row| {
-            row.get(owner_column).and_then(Value::as_str) == Some(user_id)
-                && row.get("deleted_at").is_none_or(Value::is_null)
-        })
-        .ok_or("Not yours, or it is gone")?;
+    let row = own_live_row(&transaction, table, owner_column, user_id, id)?;
+    change_row(&transaction, user_id, table, &row, changes, now)?;
+    transaction.commit().map_err(sql_error)
+}
+
+/// The user's own live row, owned through `owner_column`.
+pub(super) fn own_live_row(
+    connection: &Connection,
+    table: &str,
+    owner_column: &str,
+    user_id: &str,
+    id: &str,
+) -> Result<Map<String, Value>, String> {
+    live_row(connection, table, id)?
+        .filter(|row| row.get(owner_column).and_then(Value::as_str) == Some(user_id))
+        .ok_or_else(|| "Not yours, or it is gone".to_string())
+}
+
+/// The row, unless it is gone or deleted.
+pub(super) fn live_row(
+    connection: &Connection,
+    table: &str,
+    id: &str,
+) -> Result<Option<Map<String, Value>>, String> {
+    Ok(row_json(connection, table, id)?.filter(is_live))
+}
+
+/// Changes a row of an event table and queues the `update` event, with
+/// the changed fields' values before the change as its base. The caller
+/// checks the user may.
+pub(super) fn change_row(
+    connection: &Connection,
+    user_id: &str,
+    table: &str,
+    row: &Map<String, Value>,
+    changes: Map<String, Value>,
+    now: &str,
+) -> Result<(), String> {
+    let id = row
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("a row without an id")?;
     let version = row.get("version").and_then(Value::as_i64).unwrap_or(0);
     let base = changes
         .keys()
@@ -1025,18 +1118,42 @@ fn change_own_row(
         })
         .collect();
 
-    update_fields(&transaction, table, id, user_id, &changes, now)?;
+    update_fields(connection, table, id, user_id, &changes, now)?;
+    queue_event(connection, table, id, "update", version, base, changes, now)?;
+    Ok(())
+}
+
+/// Inserts a new row of an event table and queues its `create` event of
+/// `changes`. `data` is what the app sets, such as the owner, which the
+/// server sets from the scope. Returns the new id.
+pub(super) fn create_row(
+    connection: &Connection,
+    table: &str,
+    data: &Map<String, Value>,
+    changes: Map<String, Value>,
+    now: &str,
+) -> Result<String, String> {
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut row = data.clone();
+    row.extend(changes.clone());
+    row.insert("id".into(), Value::from(id.as_str()));
+    row.insert("version".into(), Value::from(0));
+    for column in ["last_synced_at", "inserted_at", "updated_at"] {
+        row.insert(column.into(), Value::from(now));
+    }
+
+    upsert(connection, table, &row)?;
     queue_event(
-        &transaction,
+        connection,
         table,
-        id,
-        "update",
-        version,
-        base,
+        &id,
+        "create",
+        0,
+        Map::new(),
         changes,
         now,
     )?;
-    transaction.commit().map_err(sql_error)
+    Ok(id)
 }
 
 /// The server's rules for a post, `App.Data.Post.changeset/3`, run here so
@@ -1085,62 +1202,10 @@ pub fn member_communities(
     Ok(communities)
 }
 
-/// The posts on this device, newest first: everything the file holds is
-/// visible to the user, see `prune`.
-pub fn feed(connection: &Connection, user_id: &str) -> Result<Vec<FeedPost>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT p.id, p.body, p.owner_id, coalesce(u.email, ''), p.inserted_at,
-                    EXISTS (SELECT 1 FROM sync_outbox o WHERE o.table_name = 'app_posts' AND o.row_id = p.id)
-                    OR EXISTS (SELECT 1 FROM sync_events e WHERE e.table_name = 'app_posts' AND e.row_id = p.id AND e.status = 'pending')
-             FROM app_posts p
-             LEFT JOIN app_users u ON u.id = p.owner_id
-             WHERE p.deleted_at IS NULL
-             ORDER BY p.inserted_at DESC
-             LIMIT 200",
-        )
-        .map_err(sql_error)?;
-    let posts = statement
-        .query_map([], |row| {
-            let owner_id: String = row.get(2)?;
-            Ok(FeedPost {
-                id: row.get(0)?,
-                body: row.get(1)?,
-                mine: owner_id == user_id,
-                owner_email: row.get(3)?,
-                inserted_at: row.get(4)?,
-                pending: row.get(5)?,
-                communities: Vec::new(),
-            })
-        })
-        .map_err(sql_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(sql_error)?;
-
-    let mut names = connection
-        .prepare(
-            "SELECT c.name FROM app_posts_communities pc
-             JOIN app_communities c ON c.id = pc.community_id
-             WHERE pc.post_id = ?1 AND pc.deleted_at IS NULL
-             ORDER BY c.name",
-        )
-        .map_err(sql_error)?;
-    posts
-        .into_iter()
-        .map(|mut post| {
-            post.communities = names
-                .query_map([&post.id], |row| row.get(0))
-                .map_err(sql_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(sql_error)?;
-            Ok(post)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::sync::pages::feed;
     use crate::sync::schema::open_in_memory;
     use serde_json::json;
 

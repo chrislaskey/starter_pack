@@ -21,6 +21,26 @@ pub mod post;
 #[path = "../../../phoenix/lib/app/data/schemas/user_profiles/user_profile.rs"]
 pub mod user_profile;
 
+/// `App.Data.Link.changeset/3`.
+#[allow(dead_code)]
+#[path = "../../../phoenix/lib/app/data/schemas/links/link.rs"]
+pub mod link;
+
+/// `App.Data.Tag.changeset/3`. The app sets `owner_id`.
+#[allow(dead_code)]
+#[path = "../../../phoenix/lib/app/data/schemas/tags/tag.rs"]
+pub mod tag;
+
+/// `App.Data.PostTag.changeset/3`.
+#[allow(dead_code)]
+#[path = "../../../phoenix/lib/app/data/schemas/posts_tags/post_tag.rs"]
+pub mod post_tag;
+
+/// `App.Data.Comment.changeset/3`. The app sets `owner_id`.
+#[allow(dead_code)]
+#[path = "../../../phoenix/lib/app/data/schemas/comments/comment.rs"]
+pub mod comment;
+
 /// The changeset when it is valid, or its errors as one line for the
 /// page, like `body can't be blank`.
 pub fn checked(changeset: Changeset) -> Result<Changeset, String> {

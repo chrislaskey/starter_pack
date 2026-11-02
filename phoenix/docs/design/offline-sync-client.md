@@ -133,14 +133,22 @@ Apply it in this order:
 1. **Accepted rows**: set `last_synced_at` and `version` on the row, and
    dequeue only entries queued before the push started.
 2. **Rejected rows**: dequeue first, then apply `server` when there is
-   one.
+   one. A `server_wins` answer without `server` means the server has no
+   such row and won't make one, such as a removal of a post's row in a
+   community the server never had: delete the row.
 3. **Event answers**, each by `id`:
    - `applied`: delete the event.
    - `conflict`: set `status = 'conflict'` and store `conflicts`. The
      fields not in `conflicts` did apply.
+   - a `create` rejected, unless `server` is the same row: delete the
+     event, the row it made, that row's other pending events and the rows
+     below it; the server's row, if any, takes its place. Reasons:
+     `exists` for a pair the server already has, `invalid: ...` for a
+     name another device took first, `unknown_tag` and the like for a row
+     whose parent was refused. See "Writing" in `related-resources.md`.
    - `rejected` with `server`: delete the event; the server's row wins.
      Reasons: `not_owner`, `exists`, `not_editable: ...`.
-   - `rejected` without `server`: keep the event pending, count the
+   - any other `rejected` without `server`: keep the event pending, count the
      attempt and keep `reason` in `last_error`, as a rejected outbox row
      is kept. Reasons: `malformed`, `bad_datetime: ...`,
      `invalid: ...`, `unknown_post`, `unknown_profile`, `not_creatable`,

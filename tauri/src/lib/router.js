@@ -6,14 +6,34 @@
 // (src/quick-search.html), not a page here.
 import { createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
-import { COMMUNITIES_INDEX_PATH, HOME_PATH, TMUX_EXAMPLE_PATH } from "./routes.js";
+import {
+  COMMUNITIES_INDEX_PATH,
+  COMMUNITY_SHOW_PATH,
+  HOME_PATH,
+  POSTS_INDEX_PATH,
+  PROFILE_PATH,
+  TAGS_INDEX_PATH,
+  TMUX_EXAMPLE_PATH,
+} from "./routes.js";
 
-const { navigate } = createRouter({
+const { navigate, route } = createRouter({
   layout: RemountPageOnNavigation,
   [HOME_PATH]: () => import("../StatusPage.svelte"),
   [COMMUNITIES_INDEX_PATH]: () => import("../communities/CommunitiesPage.svelte"),
+  [COMMUNITY_SHOW_PATH]: () => import("../communities/CommunityPage.svelte"),
+  [POSTS_INDEX_PATH]: () => import("../posts/PostsPage.svelte"),
+  [TAGS_INDEX_PATH]: () => import("../tags/TagsPage.svelte"),
+  [PROFILE_PATH]: () => import("../profile/ProfilePage.svelte"),
   [TMUX_EXAMPLE_PATH]: () => import("../tmux-example/TmuxExamplePage.svelte"),
 });
+
+/**
+ * The current page's path parameters, such as `id` in `/communities/:id`.
+ * @returns {Record<string, string>}
+ */
+export function pathParams() {
+  return /** @type {Record<string, string>} */ (route.params);
+}
 
 // The router types its paths; ours come from routes.js, so any path goes.
 const navigateToPath = /** @type {(pathname: string, options: { search: string }) => Promise<unknown>} */ (

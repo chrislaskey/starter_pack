@@ -7,23 +7,37 @@
 //! the same tables as the server, see `schema`. The pages read only from
 //! that file, so they work with the network off.
 //!
-//! A local write, see `store`, upserts the row and queues it: in
-//! `sync_outbox`, or for a post as an event in `sync_events`. A sync, see `worker`, pushes the outbox, pulls what
+//! A local write upserts the row and queues it: in `sync_outbox` for a
+//! server-wins row, or as an event in `sync_events`. A sync, see `worker`, pushes the outbox, pulls what
 //! changed on the server, backfills a community the user just joined, and
 //! prunes what the user can no longer see. One runs after every local
 //! write, when the page is opened, on demand, and every half minute.
 //!
 //! ```text
-//! mod.rs     the profile, the commands and the timer
-//! schema.rs  opening the file: the embedded client migrations
-//! store.rs   reads and local writes on the file, applying server rows
-//! http.rs    the three sync endpoints over HTTP with the API token
-//! worker.rs  one sync
+//! mod.rs          the profile, a sync and the timer
+//! commands.rs     the commands the pages call
+//! pages.rs        what each page shows, read from the file
+//! schema.rs       opening the file: the embedded client migrations
+//! store.rs        the file's rows, outbox and events; posts and the profile
+//! posting.rs      a post's links and its place in a community
+//! tagging.rs      tags, and tags on posts
+//! commenting.rs   comments
+//! memberships.rs  leaving a community
+//! deletes.rs      a delete copied onto the rows below it
+//! http.rs         the three sync endpoints over HTTP with the API token
+//! worker.rs       one sync
 //! ```
 
+pub mod commands;
+pub mod commenting;
+pub mod deletes;
 pub mod http;
+pub mod memberships;
+pub mod pages;
+pub mod posting;
 pub mod schema;
 pub mod store;
+pub mod tagging;
 pub mod worker;
 
 use std::fs;
@@ -34,11 +48,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{AppState, MAIN_WINDOW, forms};
-use dynamic_form::{FormState, Shown};
-use store::{Community, Conflict, Cursor, FeedPost, UserProfile};
+use crate::{AppState, MAIN_WINDOW};
 use worker::SyncReport;
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -48,17 +60,6 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 pub struct Profile {
     pub id: String,
     pub email: String,
-}
-
-/// The communities page, read from the device's file only.
-#[derive(Debug, Serialize)]
-pub struct CommunitiesPage {
-    pub communities: Vec<Community>,
-    pub profile: Option<UserProfile>,
-    pub posts: Vec<FeedPost>,
-    pub pending: i64,
-    pub conflicts: Vec<Conflict>,
-    pub cursor: Option<Cursor>,
 }
 
 /// The profile and the file on this device.
@@ -132,196 +133,6 @@ pub fn now_iso8601() -> String {
         .to_string()
 }
 
-/// The user this device is logged in as, refreshed from the server when
-/// connected, else as last saved on this device.
-#[tauri::command]
-pub async fn get_profile(state: State<'_, AppState>) -> Result<Profile, String> {
-    match crate::request(&state.control, "auth.user.get".into(), json!({})).await {
-        Ok(reply) => {
-            let profile: Profile =
-                serde_json::from_value(reply).map_err(|error| error.to_string())?;
-            state.device.save_profile(&profile)?;
-            Ok(profile)
-        }
-        Err(error) => state
-            .device
-            .profile()
-            .ok_or_else(|| format!("Not connected, and this device knows no user yet: {error}")),
-    }
-}
-
-/// The user's communities and feed, from the file on this device.
-#[tauri::command]
-pub fn get_communities_page(state: State<'_, AppState>) -> Result<CommunitiesPage, String> {
-    page(&state.device)
-}
-
-/// The empty post form, as it first shows.
-#[tauri::command]
-pub fn show_post_form(state: State<'_, AppState>) -> Result<Shown, String> {
-    let communities = page(&state.device)?.communities;
-    forms::show_post_form(&communities)
-}
-
-/// The post form after a change: its `FormData` entries, and the state it
-/// last showed with.
-#[tauri::command]
-pub fn change_post_form(
-    state: State<'_, AppState>,
-    form: FormState,
-    entries: Vec<(String, String)>,
-) -> Result<Shown, String> {
-    let communities = page(&state.device)?.communities;
-    forms::change_post_form(&communities, &form, &entries)
-}
-
-/// What submitting the post form did.
-#[derive(Debug, Serialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum WritePostReply {
-    /// The post is in the file; the page as it is now.
-    Written { page: CommunitiesPage },
-    /// The form was invalid; it comes back with its errors showing.
-    Invalid { form: Shown },
-}
-
-/// Submits the post form: when it is valid, writes the post into the file,
-/// in the communities ticked, and starts a sync in the background.
-#[tauri::command]
-pub async fn write_post(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    form: FormState,
-    entries: Vec<(String, String)>,
-) -> Result<WritePostReply, String> {
-    let device = &state.device;
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let communities = page(device)?.communities;
-    let post = match forms::submit_post_form(&communities, &form, &entries)? {
-        Ok(post) => post,
-        Err(form) => return Ok(WritePostReply::Invalid { form }),
-    };
-
-    let connection = schema::open(&device.db_path())?;
-    store::write_post(
-        &connection,
-        &profile.id,
-        &post.body,
-        &post.community_ids,
-        &now_iso8601(),
-    )?;
-    drop(connection);
-
-    spawn_sync(app);
-    Ok(WritePostReply::Written {
-        page: page(device)?,
-    })
-}
-
-/// Edits the user's own post in the file and starts a sync.
-#[tauri::command]
-pub async fn edit_post(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    post_id: String,
-    body: String,
-) -> Result<CommunitiesPage, String> {
-    let device = &state.device;
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.db_path())?;
-    store::edit_post(&connection, &profile.id, &post_id, &body, &now_iso8601())?;
-    drop(connection);
-
-    spawn_sync(app);
-    page(device)
-}
-
-/// Edits the user's own profile in the file and starts a sync.
-#[tauri::command]
-pub async fn edit_profile(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    display_name: String,
-    bio: String,
-) -> Result<CommunitiesPage, String> {
-    let device = &state.device;
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.db_path())?;
-    store::edit_profile(
-        &connection,
-        &profile.id,
-        &display_name,
-        &bio,
-        &now_iso8601(),
-    )?;
-    drop(connection);
-
-    spawn_sync(app);
-    page(device)
-}
-
-/// Deletes the user's own post in the file and starts a sync.
-#[tauri::command]
-pub async fn delete_post(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    post_id: String,
-) -> Result<CommunitiesPage, String> {
-    let device = &state.device;
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.db_path())?;
-    store::delete_post(&connection, &profile.id, &post_id, &now_iso8601())?;
-    drop(connection);
-
-    spawn_sync(app);
-    page(device)
-}
-
-/// `reapply` queues the change again and starts a sync, `ignore` lets it go.
-#[tauri::command]
-pub async fn resolve_conflict(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    event_id: String,
-    resolution: String,
-) -> Result<CommunitiesPage, String> {
-    let reapply = match resolution.as_str() {
-        "reapply" => true,
-        "ignore" => false,
-        other => return Err(format!("Unknown resolution {other}")),
-    };
-    let device = &state.device;
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.db_path())?;
-    store::resolve_conflict(&connection, &profile.id, &event_id, reapply, &now_iso8601())?;
-    drop(connection);
-
-    if reapply {
-        spawn_sync(app);
-    }
-    page(device)
-}
-
-/// Syncs now and returns what happened.
-#[tauri::command]
-pub async fn sync_now(app: AppHandle) -> Result<SyncReport, String> {
-    run_sync(&app).await
-}
-
-fn page(device: &Device) -> Result<CommunitiesPage, String> {
-    let profile = device.profile().ok_or("Not logged in on this device")?;
-    let connection = schema::open(&device.db_path())?;
-
-    Ok(CommunitiesPage {
-        communities: store::member_communities(&connection, &profile.id)?,
-        profile: store::profile(&connection, &profile.id)?,
-        posts: store::feed(&connection, &profile.id)?,
-        pending: store::pending_count(&connection)?,
-        conflicts: store::conflicts(&connection)?,
-        cursor: store::cursor(&connection)?,
-    })
-}
-
 /// One sync, reported to the main window as a `synced` event with the
 /// report or the error.
 pub async fn run_sync(app: &AppHandle) -> Result<SyncReport, String> {
@@ -345,7 +156,7 @@ pub async fn run_sync(app: &AppHandle) -> Result<SyncReport, String> {
     result
 }
 
-fn spawn_sync(app: AppHandle) {
+pub(crate) fn spawn_sync(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let _ = run_sync(&app).await;
     });

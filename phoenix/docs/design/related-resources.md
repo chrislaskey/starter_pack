@@ -17,8 +17,8 @@ Built on the server, in sync and on the web: `App.Data.EventFlow`
 applies an event to any of these resources, `App.Data.Deletes` copies
 deletes, `App.Data.Events` is the log, and `App.Data.Posting` and
 `App.Data.Tagging` hold each resource's rules. The web's posts page and
-`/tags` write with `App.Data.Sync.save/4`. The desktop app syncs the new
-tables; its screens for them come next.
+`/tags` write with `App.Data.Sync.save/4`. The desktop app has the same
+screens, writing through the same events, see `tauri/docs/offline-sync.md`.
 
 ## Decisions
 
@@ -273,9 +273,6 @@ Each is a test.
   reason `server_wins` and the server's row, even when the flow did what
   was asked. The web treats that as success. A clearer answer, such as
   `applied` with the row, can come with the web UI.
-- The desktop screens come after this, against the same tests' flows.
-  The desktop then also has to copy a delete onto the rows below on its
-  own file, so its screens hide them before the next pull, see "Deletes".
 - The web shows a tag's position and lets the owner add and remove tags,
   but has no screen yet to reorder them or edit a note; the events allow
   both.

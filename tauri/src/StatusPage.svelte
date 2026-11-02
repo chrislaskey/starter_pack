@@ -10,7 +10,7 @@
   import { setAppEmitContext } from "./lib/app-emit.js";
   import { log } from "./lib/log.svelte.js";
   import LogList from "./lib/LogList.svelte";
-  import { communitiesIndexUrl, tmuxExampleUrl } from "./lib/routes.js";
+  import { communitiesIndexUrl, postsIndexUrl, profileUrl, tagsIndexUrl, tmuxExampleUrl } from "./lib/routes.js";
 
   setAppEmitContext();
 
@@ -140,7 +140,13 @@
 
   <section>
     <h2>Examples</h2>
-    <p><a href={communitiesIndexUrl()}>Your communities, offline-first →</a></p>
+    <p>Offline-first, mirroring the web app's pages:</p>
+    <p class="flex flex-wrap gap-4">
+      <a href={communitiesIndexUrl()}>Communities →</a>
+      <a href={postsIndexUrl()}>Posts →</a>
+      <a href={tagsIndexUrl()}>Tags →</a>
+      <a href={profileUrl()}>Profile →</a>
+    </p>
     <p><a href={tmuxExampleUrl()}>tmux sessions in your terminal app →</a></p>
   </section>
 

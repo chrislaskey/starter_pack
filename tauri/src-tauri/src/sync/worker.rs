@@ -113,6 +113,11 @@ fn apply_push_response(
                 store::dequeue(connection, &rejected.table, &rejected.id, started)?;
                 apply_page(connection, user_id, &[server_row])?;
             }
+            // The server has no such row and keeps it so
+            None if rejected.reason == "server_wins" => {
+                store::dequeue(connection, &rejected.table, &rejected.id, started)?;
+                store::delete_row(connection, &rejected.table, &rejected.id)?;
+            }
             None => {
                 store::record_failure(connection, &rejected.table, &rejected.id, &rejected.reason)?
             }
@@ -135,10 +140,18 @@ fn apply_push_response(
             _ => {
                 let reason = answer.reason.as_deref().unwrap_or("rejected");
                 log::info!("Event {} was rejected: {reason}", answer.id);
-                if answer.server.is_some() {
-                    store::delete_event(connection, &answer.id)?;
-                } else {
-                    store::record_event_failure(connection, &answer.id, reason)?;
+                let server_row_id = answer
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.row.get("id"))
+                    .and_then(serde_json::Value::as_str);
+                match store::event_kind_and_row(connection, &answer.id)? {
+                    // A create refused: the server's row, if any, takes its place
+                    Some((kind, row_id)) if kind == "create" && server_row_id != Some(&row_id) => {
+                        store::drop_rejected_create(connection, &answer.id)?
+                    }
+                    _ if answer.server.is_some() => store::delete_event(connection, &answer.id)?,
+                    _ => store::record_event_failure(connection, &answer.id, reason)?,
                 }
                 report.rejected += 1;
             }
@@ -381,6 +394,89 @@ mod tests {
         assert!(store::outbox(&connection).unwrap().is_empty());
     }
 
+    #[test]
+    fn a_rejected_create_drops_the_row_it_made_and_takes_the_servers() {
+        let (mut connection, post_id) = device_with_my_post();
+        let tag = crate::sync::tagging::create_tag(&connection, ME, "Elixir", AT).unwrap();
+        crate::sync::tagging::tag_post(&connection, ME, &post_id, "Elixir", AT).unwrap();
+        let events = store::pending_events(&connection).unwrap();
+        let (tag_event, pair_event) = (&events[0], &events[1]);
+
+        // Another device made "Elixir" first; this device's tag and the post's
+        // tag row pointing at it are both refused, see edge case 4
+        let report = answer(
+            &mut connection,
+            json!({"accepted": [], "rejected": [], "events": [
+                {"id": tag_event.id, "status": "rejected", "reason": "invalid: name", "server": null},
+                {"id": pair_event.id, "status": "rejected", "reason": "unknown_tag", "server": null}
+            ]}),
+        );
+
+        assert_eq!(report.rejected, 2);
+        assert!(store::pending_events(&connection).unwrap().is_empty());
+        assert_eq!(
+            store::row_json(&connection, "app_tags", &tag).unwrap(),
+            None
+        );
+        assert!(
+            crate::sync::pages::feed(&connection, ME).unwrap()[0]
+                .tags
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_tag_row_the_server_already_has_is_replaced_by_the_servers() {
+        let (mut connection, post_id) = device_with_my_post();
+        crate::sync::tagging::tag_post(&connection, ME, &post_id, "Elixir", AT).unwrap();
+        let events = store::pending_events(&connection).unwrap();
+        let tag_id = events[0].row_id.clone();
+        let mine = events[1].row_id.clone();
+        let theirs = "01a17558-0000-7000-8000-0000000000e1";
+        let server = json!({"table": "app_posts_tags", "row": {
+            "id": theirs, "post_id": post_id, "tag_id": tag_id, "position": 0, "note": null,
+            "version": 1, "last_synced_at": AT, "inserted_at": AT, "updated_at": AT,
+            "deleted_at": null, "deleted_by_id": null}});
+
+        answer(
+            &mut connection,
+            json!({"accepted": [], "rejected": [], "events": [
+                {"id": events[0].id, "status": "applied", "conflicts": {}, "server": null},
+                {"id": events[1].id, "status": "rejected", "reason": "exists", "server": server}
+            ]}),
+        );
+
+        assert_eq!(
+            store::row_json(&connection, "app_posts_tags", &mine).unwrap(),
+            None
+        );
+        let tags = &crate::sync::pages::feed(&connection, ME).unwrap()[0].tags;
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, theirs);
+    }
+
+    #[test]
+    fn a_server_wins_row_the_server_does_not_have_is_dropped() {
+        let (mut connection, post_id) = device_with_my_post();
+        let community = server_rows()[2].row["id"].as_str().unwrap().to_string();
+        crate::sync::posting::remove_from_community(&connection, ME, &post_id, &community, AT)
+            .unwrap();
+        let row_id = store::outbox(&connection).unwrap()[0].id.clone();
+
+        answer(
+            &mut connection,
+            json!({"accepted": [], "rejected": [
+                {"table": "app_posts_communities", "id": row_id, "reason": "server_wins", "server": null}
+            ], "events": []}),
+        );
+
+        assert!(store::outbox(&connection).unwrap().is_empty());
+        assert_eq!(
+            store::row_json(&connection, "app_posts_communities", &row_id).unwrap(),
+            None
+        );
+    }
+
     /// Against a running server, as a device would sync. Needs, see
     /// `docs/offline-sync.md`: `SYNC_SERVER_URL`, `SYNC_TOKEN` and
     /// `SYNC_USER_ID` of a user who is a member of the
@@ -430,7 +526,7 @@ mod tests {
 
         let mut laptop = open_in_memory().unwrap();
         sync(&server, &mut laptop, &user_id).await.unwrap();
-        let on_laptop = store::feed(&laptop, &user_id).unwrap();
+        let on_laptop = crate::sync::pages::feed(&laptop, &user_id).unwrap();
         assert!(
             on_laptop
                 .iter()

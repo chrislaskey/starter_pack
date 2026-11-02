@@ -1,8 +1,9 @@
 # Offline-first communities
 
-The communities page shows the user's communities and feed, read from a
-SQLite file on this device. Writing a
-post works with the network off. A sync pushes local changes, pulls the
+The main window's data pages mirror the Phoenix app's: communities, a
+community with its comments, posts with their links and tags, tags, and
+the profile, each read from a SQLite file on this device. Every write on
+them works with the network off. A sync pushes local changes, pulls the
 server's, and the two converge. The design is
 `phoenix/docs/design/offline-sync.md`, and what a client must do is
 `phoenix/docs/design/offline-sync-client.md`; this is what the desktop app does
@@ -12,18 +13,35 @@ with it, built 2026-10-25 as phase 6 of
 ## Code
 
 ```
-src/communities/                       the communities page, at /communities (src/lib/router.js)
+src/communities/CommunitiesPage.svelte  /communities, App.Web.CommunitiesLive
+src/communities/CommunityPage.svelte    /communities/:id, App.Web.CommunityLive
+src/posts/PostsPage.svelte              /posts, App.Web.PostsLive
+src/tags/TagsPage.svelte                /tags, App.Web.TagsLive
+src/profile/ProfilePage.svelte          /profile, App.Web.ProfileLive
+src/lib/SyncBar.svelte                  on every data page: Sync now, pending changes, conflicts
+src/lib/write.js                        a page's write: the command, then the page read again
 src-tauri/src/sync/
-  mod.rs      the profile, the commands and the half-minute timer
-  schema.rs   opening the file: the embedded client migrations
-  store.rs    reads and local writes on the file, applying server rows
-  http.rs     the three sync endpoints over HTTP with the API token
-  worker.rs   one sync
+  mod.rs          the profile, a sync and the half-minute timer
+  commands.rs     the commands the pages call
+  pages.rs        what each page shows, read from the file
+  schema.rs       opening the file: the embedded client migrations
+  store.rs        the file's rows, outbox and events; posts and the profile
+  posting.rs      a post's links and its place in a community
+  tagging.rs      tags, and tags on posts
+  commenting.rs   comments
+  memberships.rs  leaving a community
+  deletes.rs      a delete copied onto the rows below it
+  http.rs         the three sync endpoints over HTTP with the API token
+  worker.rs       one sync
 src-tauri/build.rs                     embeds phoenix/priv/client_migrations/*.sql
 ```
 
-The page is a thin view. Every decision is on the Rust side: which rows
-to apply, what to push, what to prune.
+The pages are thin views over the same markup and Tailwind classes as the
+web's HEEx, with Phoenix's generated components (`$phoenix/...`). Every
+decision is on the Rust side: who may change what, which rows to apply,
+what to push, what to prune. A page reads itself with one command, a write
+returns nothing, and the page reads itself again; the sync bar reads it
+again after every sync. Each page shows what is waiting to sync faded.
 
 ### On the device
 
@@ -33,7 +51,7 @@ to apply, what to push, what to prune.
 ```
 
 `profile.json` is who the user is, from the `auth.user.get` request on
-the websocket API, kept so the page opens offline. Logging out deletes it
+the websocket API, kept so the pages open offline. Logging out deletes it
 and `app.db`.
 
 `app.db` has the same `app_` tables as the server's database, created
@@ -60,31 +78,58 @@ not yet on the server. The post is queued as a `create` event in
 The page shows the post at once, marked as waiting to sync, and a sync
 starts in the background.
 
-`edit_post`, `delete_post` and `edit_profile` change the row at once and
-queue an `update` event of the fields that changed, with the version the
-device has and their values before the change, so the server can tell a
-field someone else changed meanwhile. The profile is the user's own,
-created by the server at registration; the page shows it with an Edit
-profile form.
-The device never changes a version itself; the server's comes back with
-the row.
+Every other write follows the same pattern as the server's flow of the
+same name, checked first with the server's own changeset where it has one
+(`src-tauri/src/changesets.rs`):
+
+| Write | Server flow | Queued as |
+| --- | --- | --- |
+| edit, delete a post | `App.Data.Posting` | `update` event on `app_posts` |
+| add, remove a link | `Posting.add_link/3`, `remove_link/2` | `create`, `update` event on `app_links` |
+| remove a post from a community | `Posting.remove_from_community/3` | `app_posts_communities` row in the outbox, server-wins |
+| make, rename, delete a tag | `App.Data.Tagging` | `create`, `update` event on `app_tags` |
+| tag a post | `Tagging.tag_post/3` | the tag's `create` when it is new, then a `create` of the `app_posts_tags` row, or an `update` reviving the row the post had |
+| take a tag off a post | `Tagging.untag/2` | `update` event on `app_posts_tags` |
+| comment, delete a comment | `App.Data.Commenting` | `create`, `update` event on `app_comments` |
+| leave a community | `App.Data.Memberships.leave/2` | `app_users_communities` row in the outbox, server-wins |
+| edit the profile | `App.Data.Profiles` | `update` event of the fields that changed |
+
+An `update` carries the version the device has and the changed fields'
+values before the change, so the server can tell a field someone else
+changed meanwhile. The device never changes a version itself; the
+server's comes back with the row. The profile is the user's own,
+created by the server at registration.
+
+A delete is copied onto the rows below it on the device at once, as
+`App.Data.Deletes` does on the server, so the pages hide them: a post's
+links, tags and community rows, a tag's rows on posts, a membership's
+post rows, and a community row's comments. The copies are not queued;
+the server makes its own and they arrive on the next pull. Leaving a
+community also prunes at once what the user can no longer see.
+
+Creating and joining communities stay on the web for now, see
+`docs/suggestions/offline-pages.md`.
 
 ### A sync
 
-`worker::sync` runs after every local write, when the page is opened,
+`worker::sync` runs after every local write, when a data page is opened,
 from the Sync now button, and every half minute:
 
 1. **Push** the outbox and the pending events. An accepted row gets the
    server's `last_synced_at` and `version`.
    A rejected row is replaced by the server's version when there is one;
    memberships and `app_posts_communities` rows always come back this way,
-   since the server wins on them. Without one, the row and its entry
-   stay, with the attempt counted and the reason in `last_error`, for the
-   user to fix. A row edited again while the push was in flight stays
+   since the server wins on them, and one the server answers `server_wins`
+   without a row is dropped, since the server has none. Without one, the
+   row and its entry stay, with the attempt counted and the reason in
+   `last_error`, for the user to fix. A row edited again while the push was in flight stays
    queued. An applied event is dropped. An event the server answers with
    conflicts, a field someone else changed first, is kept as a conflict
-   for the person. A rejected event is dropped when the server sends its
-   row, else kept pending with the reason. Then each answered event's
+   for the person. A rejected `create` drops the row it made, its other
+   events and the rows below it, and the server's row, if any, takes its
+   place: a tag another device made first, or a tag row the post already
+   has. Another rejected event is dropped when the server sends its row,
+   else kept pending with the reason. Then each answered event's
    server row is applied, unless an event for that row is still pending.
    A push that fails as a whole does not stop the pull.
 2. **Pull** every page from the stored cursor, applying each page as
@@ -100,10 +145,11 @@ from the Sync now button, and every half minute:
    that brought the membership and cleared after the last page, so a
    backfill cut short is finished on the next sync.
 4. **Prune** every post not by the user that is no longer in a community
-   the user is a live member of. Its community rows go with it through
-   the foreign key.
+   the user is a live member of. Its community rows, links, tag rows and
+   comments go with it through the foreign keys, and so does someone
+   else's tag left on none of the posts here.
 
-The report, or the error, reaches the page as a `synced` event.
+The report, or the error, reaches the pages as a `synced` event.
 
 Two rules keep local edits safe. One sync runs at a time, on a lock. And a row pulled from the server, or returned with a
 rejection, never replaces a row that has a local change waiting in the
@@ -111,8 +157,9 @@ outbox or a pending event: the push decides that row's fate first.
 
 ### Conflicts
 
-When the page has conflicts it shows "N changes were not saved on the
-server. See details". Each lists the post, the person's value and the
+When there are conflicts the sync bar shows "N changes were not saved
+on the server. See details" on every data page. Each lists what it was
+on, such as the post or the tag, the person's value and the
 value now on the device, which is the server's as of the last sync, with
 **Reapply**, which queues the person's value again as a new event from
 the current version and syncs, and **Let it go**, which drops it. A
@@ -123,14 +170,13 @@ conflict on a post that is gone can only be let go.
 | Command | Does |
 | --- | --- |
 | `get_profile` | the user, from the server when connected, else as saved |
-| `get_communities_page` | the user's profile, communities, feed, pending count, conflicts and cursor, from the file |
-| `show_post_form` | the post form for the entries typed so far, with the errors of the inputs used |
-| `write_post` | submits the post form: writes the post into the file and starts a sync, or returns the form with its errors |
-| `edit_post` | edits the user's own post in the file and starts a sync |
-| `delete_post` | deletes the user's own post in the file and starts a sync |
-| `edit_profile` | edits the user's profile in the file and starts a sync |
-| `resolve_conflict` | `reapply` queues a conflicted change again and starts a sync, `ignore` lets it go |
+| `get_sync_status` | the pending count, conflicts and cursor, for the sync bar |
 | `sync_now` | syncs now and returns the report |
+| `resolve_conflict` | `reapply` queues a conflicted change again and starts a sync, `ignore` lets it go |
+| `get_communities_page`, `get_community_page`, `get_posts_page`, `get_tags_page`, `get_profile_page` | a page, from the file |
+| `show_post_form`, `change_post_form` | the post form as it first shows, and after a change, with its errors once a submit failed |
+| `write_post` | submits the post form: writes the post and starts a sync, or returns the form with its errors |
+| `edit_post`, `delete_post`, `add_link`, `remove_link`, `tag_post`, `untag_post`, `create_tag`, `rename_tag`, `delete_tag`, `remove_post_from_community`, `create_comment`, `delete_comment`, `leave_community`, `edit_profile` | a write on the file, then a sync in the background; an error is the reason to show |
 
 ### Development
 
@@ -139,8 +185,9 @@ websocket API uses. The server refuses sync requests unless
 `API_SOCKET=true`, like the websocket API.
 
 Run the Rust tests with `cargo test` in `src-tauri`. They exercise the
-file, the outbox, the events, conflicts and the answers to a push, and
-the pruning against an in-memory database; the
+file, the outbox, the events, conflicts and the answers to a push, every
+write above with its permission checks and copied deletes, and the
+pruning, against an in-memory database; the
 server side is tested in Phoenix with its own simulated client,
 `App.SyncClient`.
 
