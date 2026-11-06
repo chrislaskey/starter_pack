@@ -12,6 +12,9 @@
   </head>
 
   <body>
+    <!-- The title bar's strip: the window has no title bar of its own (see
+         tauri.conf.json), so this empty strip over the page drags it -->
+    <div class="title-bar-drag" data-tauri-drag-region></div>
     <div id="app"></div>
   </body>
 </html>

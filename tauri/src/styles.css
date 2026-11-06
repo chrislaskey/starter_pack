@@ -8,6 +8,9 @@
   --disconnected: #9a9a9a;
   --pending: #e0a800;
   --joined: #2da44e;
+  /* The room at the top of the window for the macOS window controls, which
+     are drawn over the page */
+  --title-bar-height: 32px;
   font-size: 15px;
   color: var(--fg);
   background-color: var(--bg);
@@ -26,6 +29,15 @@
 
 body {
   margin: 0;
+  padding-top: var(--title-bar-height);
+}
+
+/* The title bar's strip over the page: nothing of ours, so it drags the window. */
+.title-bar-drag {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 20;
+  height: var(--title-bar-height);
 }
 
 .page {
