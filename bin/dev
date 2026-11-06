@@ -19,7 +19,8 @@ Usage: $0 [COMMAND] [TAURI ARGS...]
 Commands:
   all       Phoenix in the background, then the Tauri window; closing the
             window stops Phoenix too. The default.
-  phoenix   The Phoenix server only (\`mix phx.server\`).
+  phoenix   The Phoenix server only (\`mix phx.server\`), after \`mix deps.get\`
+            and \`mix ecto.migrate\`.
   tauri     The desktop app only, connecting to the Phoenix on PORT.
   ports     Print the ports the commands would use, without starting anything.
   help      Show this help. Also -h and --help.
@@ -76,6 +77,11 @@ print_ports() {
 
 start_phoenix() {
   cd "$ROOT/phoenix"
+  # A no-op when deps are already fetched, so it also picks up mix.lock changes.
+  mix deps.get
+  # Creates the SQLite database file if missing, then runs any pending migrations.
+  mix ecto.create --quiet
+  mix ecto.migrate
   echo "bin/dev: Phoenix on http://localhost:$phoenix_port"
   PORT="$phoenix_port" API_SOCKET="${API_SOCKET:-true}" exec mix phx.server
 }
