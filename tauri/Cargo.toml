@@ -1,0 +1,20 @@
+[package]
+name = "app_tauri"
+description = "Starter Pack's desktop and mobile app: app_core behind Tauri commands, and the Svelte pages"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# Tauri's mobile targets link the app as a library; the `_lib` suffix keeps
+# its name distinct from the binary's.
+name = "app_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+app_core = { workspace = true }
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }

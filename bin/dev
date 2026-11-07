@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Starts the Phoenix server and the desktop app in dev mode, on ports taken
-# from PORT so several worktrees can run at the same time.
+# Starts a deployment in dev mode, on ports taken from PORT so several
+# worktrees can run at the same time.
 #
 # Run `bin/dev --help` for the commands.
 
@@ -11,40 +11,37 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 help() {
   cat <<USAGE
-Starts the Phoenix server and the desktop app in dev mode, on ports taken
-from PORT so several worktrees can run at the same time.
+Starts a deployment in dev mode, on ports taken from PORT so several
+worktrees can run at the same time.
 
-Usage: $0 [COMMAND] [TAURI ARGS...]
+Usage: $0 [COMMAND] [ARGS...]
 
 Commands:
-  all       Phoenix in the background, then the Tauri window; closing the
-            window stops Phoenix too. The default.
-  phoenix   The Phoenix server only (\`mix phx.server\`), after \`mix deps.get\`
-            and \`mix ecto.migrate\`.
-  tauri     The desktop app only, connecting to the Phoenix on PORT.
+  web       The web server (\`cargo run -p app_web\`) in the background and
+            the Svelte dev server, which sends /api to it, in front; closing
+            the dev server stops the web server too. The default.
+  desktop   The desktop app (\`cargo tauri dev\`), which starts the Svelte
+            dev server itself. Extra arguments go to \`cargo tauri dev\`.
+  ios       The iOS app in a simulator (\`cargo tauri ios dev\`), after
+            \`cargo tauri ios init\` the first time. Needs Xcode and the
+            iOS Rust targets, see README.md.
+  android   The Android app in an emulator (\`cargo tauri android dev\`),
+            after \`cargo tauri android init\` the first time. Needs Android
+            Studio and the Android Rust targets, see README.md.
   ports     Print the ports the commands would use, without starting anything.
   help      Show this help. Also -h and --help.
 
 Ports:
-  PORT unset   Phoenix on 4000 and Vite on 1420, as the READMEs say.
-  PORT set     Phoenix on PORT and Vite, which the Tauri window loads in dev,
-               on PORT + 1000, so consecutive ports never meet. Code Reviewer
+  PORT unset   The web server on 4000 and the Svelte dev server on 1420, as
+               the README says.
+  PORT set     The web server on PORT and the Svelte dev server on
+               PORT + 1000, so consecutive ports never meet. Code Reviewer
                sets a distinct PORT in each session's tmux environment, so
-               each worktree's apps run on ports of their own. The SQLite
-               database is a file in the worktree, so it is already one per
-               worktree.
-
-Phoenix reads PORT itself (phoenix/config/runtime.exs; it wins over a PORT in
-phoenix/.env). The app is pointed at Phoenix through PHOENIX_URL, and Tauri at
-Vite through its dev URL. API_SOCKET defaults to true, which the app needs to
-connect; set it to false to run the server without the API.
-
-Extra arguments go to \`cargo tauri dev\`.
+               each worktree's apps run on ports of their own.
 
 Examples:
-  bin/dev                   # both, on 4000 and 1420
-  PORT=4003 bin/dev         # both, on 4003 and 5003, as in a Code Reviewer session
-  bin/dev phoenix           # the server alone, say in a second tmux window
+  bin/dev                   # the web, on 4000 and 1420
+  PORT=4003 bin/dev desktop # the desktop app, its pages served on 5003
 USAGE
 }
 
@@ -55,69 +52,82 @@ fail() {
 
 case "${PORT:-}" in
   '')
-    phoenix_port=4000
+    web_port=4000
     vite_port=1420
     ;;
   *[!0-9]*)
     fail "PORT must be a number, got '$PORT'"
     ;;
   *)
-    phoenix_port="$PORT"
+    web_port="$PORT"
     vite_port=$((PORT + 1000))
     ;;
 esac
-if [ "$phoenix_port" -lt 1024 ] || [ "$vite_port" -gt 65535 ]; then
-  fail "PORT must be between 1024 and 64535, got '$phoenix_port'"
+if [ "$web_port" -lt 1024 ] || [ "$vite_port" -gt 65535 ]; then
+  fail "PORT must be between 1024 and 64535, got '$web_port'"
 fi
 
 print_ports() {
-  echo "Phoenix  http://localhost:$phoenix_port"
-  echo "Vite     http://localhost:$vite_port"
+  echo "Web server  http://localhost:$web_port"
+  echo "Svelte dev  http://localhost:$vite_port"
 }
 
-start_phoenix() {
-  cd "$ROOT/phoenix"
-  # A no-op when deps are already fetched, so it also picks up mix.lock changes.
-  mix deps.get
-  # Creates the SQLite database file if missing, then runs any pending migrations.
-  mix ecto.create --quiet
-  mix ecto.migrate
-  echo "bin/dev: Phoenix on http://localhost:$phoenix_port"
-  PORT="$phoenix_port" API_SOCKET="${API_SOCKET:-true}" exec mix phx.server
-}
-
-start_tauri() {
-  cd "$ROOT/tauri"
-  if [ ! -d node_modules ]; then
-    pnpm install
+install_svelte_packages() {
+  if [ ! -d "$ROOT/svelte/node_modules" ]; then
+    (cd "$ROOT/svelte" && pnpm install)
   fi
-  echo "bin/dev: Vite on http://localhost:$vite_port, the app connecting to http://localhost:$phoenix_port"
-  local config
-  config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"pnpm dev --port $vite_port\"}}"
-  PHOENIX_URL="http://localhost:$phoenix_port" exec cargo tauri dev --config "$config" ${1+"$@"}
 }
 
-start_all() {
-  (start_phoenix) &
-  local phoenix_pid=$!
-  # Stops Phoenix when the Tauri window closes, or this script is interrupted.
-  trap 'kill "$phoenix_pid" 2>/dev/null || true' EXIT
-  (start_tauri ${1+"$@"})
+start_web() {
+  install_svelte_packages
+  echo "bin/dev: the web server on http://localhost:$web_port"
+  (cd "$ROOT" && PORT="$web_port" exec cargo run -p app_web) &
+  local web_pid=$!
+  # Stops the web server when the dev server closes, or this script is interrupted.
+  trap 'kill "$web_pid" 2>/dev/null || true' EXIT
+  echo "bin/dev: the pages on http://localhost:$vite_port, sending /api to the web server"
+  cd "$ROOT/svelte"
+  WEB_SERVER_URL="http://localhost:$web_port" pnpm dev --port "$vite_port"
 }
 
-command="${1:-all}"
+# The Tauri CLI's config override: the Svelte dev server on vite_port.
+tauri_config() {
+  echo "{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":{\"script\":\"pnpm dev --port $vite_port\",\"cwd\":\"../svelte\"}}}"
+}
+
+start_desktop() {
+  install_svelte_packages
+  echo "bin/dev: the desktop app, its pages on http://localhost:$vite_port"
+  cd "$ROOT/tauri"
+  exec cargo tauri dev --config "$(tauri_config)" ${1+"$@"}
+}
+
+start_mobile() {
+  local platform="$1"
+  shift
+  install_svelte_packages
+  cd "$ROOT/tauri"
+  case "$platform" in
+    ios) [ -d gen/apple ] || cargo tauri ios init ;;
+    android) [ -d gen/android ] || cargo tauri android init ;;
+  esac
+  echo "bin/dev: the $platform app, its pages on http://localhost:$vite_port"
+  exec cargo tauri "$platform" dev --config "$(tauri_config)" ${1+"$@"}
+}
+
+command="${1:-web}"
 if [ $# -gt 0 ]; then
   shift
 fi
 
 case "$command" in
-  all) start_all ${1+"$@"} ;;
-  phoenix) start_phoenix ;;
-  tauri) start_tauri ${1+"$@"} ;;
+  web) start_web ;;
+  desktop) start_desktop ${1+"$@"} ;;
+  ios|android) start_mobile "$command" ${1+"$@"} ;;
   ports) print_ports ;;
   help|-h|--help) help ;;
   *)
-    echo "Usage: $0 [all|phoenix|tauri|ports|help] [TAURI ARGS...]" >&2
+    echo "Usage: $0 [web|desktop|ios|android|ports|help] [ARGS...]" >&2
     echo "Run \`$0 --help\` for what each command does." >&2
     exit 1
     ;;

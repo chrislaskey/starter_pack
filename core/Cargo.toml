@@ -1,0 +1,9 @@
+[package]
+name = "app_core"
+description = "Starter Pack's application logic, shared by the web server and the Tauri app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

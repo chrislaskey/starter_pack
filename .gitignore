@@ -2,4 +2,7 @@
 /.claude/worktrees/
 /.worktrees/
 
+# Cargo's build output for the whole workspace
+/target/
+
 .DS_Store
