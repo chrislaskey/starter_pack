@@ -1,9 +1,9 @@
 //! The database a deployment opens: a SQLite file on the device for the
-//! desktop and mobile apps, and for the web server too by default. Opening
+//! desktop and mobile apps, and for the web server too by default, or
+//! PostgreSQL for the web server, behind the `postgres` feature. Opening
 //! runs the migrations under `migrations/`, so every deployment has the
-//! same tables. The PostgreSQL variant for the web server joins the enum
-//! when it is built; each resource module matches on the variant and
-//! calls the database's own functions, see `sqlite`.
+//! same tables. Each resource module matches on the variant and calls the
+//! database's own functions, see `sqlite` and `postgres`.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -16,6 +16,8 @@ use crate::sqlite;
 #[derive(Clone, Debug)]
 pub enum Database {
     Sqlite(SqlitePool),
+    #[cfg(feature = "postgres")]
+    Postgres(sqlx::PgPool),
 }
 
 #[derive(Debug, Error)]
@@ -66,5 +68,67 @@ impl Database {
     async fn migrate_sqlite(pool: SqlitePool) -> Result<Database, DatabaseError> {
         sqlite::MIGRATOR.run(&pool).await?;
         Ok(Database::Sqlite(pool))
+    }
+
+    /// Connects to the PostgreSQL database at the URL, which must exist,
+    /// and brings it up to date.
+    #[cfg(feature = "postgres")]
+    pub async fn open_postgres(url: &str) -> Result<Database, DatabaseError> {
+        let options =
+            sqlx::postgres::PgConnectOptions::from_str(url).map_err(DatabaseError::Open)?;
+        Self::open_postgres_with(options).await
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn open_postgres_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Database, DatabaseError> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(options)
+            .await
+            .map_err(DatabaseError::Open)?;
+        crate::postgres::MIGRATOR.run(&pool).await?;
+        Ok(Database::Postgres(pool))
+    }
+}
+
+/// Runs a test against every database the tests can reach: SQLite in
+/// memory always, and PostgreSQL when `TEST_POSTGRES_URL` names a database
+/// to use, each test in a schema of its own that is dropped afterwards.
+/// Every resource test runs through here, so the two databases' modules
+/// never drift apart.
+#[cfg(test)]
+pub(crate) async fn with_each_database<Test, Run>(test: Test)
+where
+    Test: Fn(Database) -> Run,
+    Run: Future<Output = ()>,
+{
+    let sqlite = Database::open_sqlite_in_memory()
+        .await
+        .expect("an in-memory SQLite database");
+    test(sqlite).await;
+
+    #[cfg(feature = "postgres")]
+    if let Ok(url) = std::env::var("TEST_POSTGRES_URL") {
+        let schema = format!("test_{}", uuid::Uuid::now_v7().simple());
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("TEST_POSTGRES_URL is a PostgreSQL URL")
+            .options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(options.clone())
+            .await
+            .expect("a connection to TEST_POSTGRES_URL");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&pool)
+            .await
+            .expect("a schema for the test");
+        let postgres = Database::open_postgres_with(options)
+            .await
+            .expect("a migrated PostgreSQL schema");
+        test(postgres).await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&pool)
+            .await
+            .expect("the schema dropped");
     }
 }

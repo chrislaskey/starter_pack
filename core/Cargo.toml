@@ -8,6 +8,8 @@ edition.workspace = true
 default = ["sqlite"]
 # The database each deployment keeps on its own device, and the web server's by default
 sqlite = ["sqlx/sqlite"]
+# The web server's database when it outgrows a file; never in the Tauri app
+postgres = ["sqlx/postgres"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

@@ -1,7 +1,7 @@
 //! The web server: `app_core` over a JSON API under `/api`, and the Svelte
 //! pages (`../svelte/dist`) at every other path. Listens on `PORT`, 4000
-//! when unset, and opens the database `DATABASE_URL` names, a SQLite file
-//! under `data/` beside this crate when unset.
+//! when unset, and opens the database `DATABASE_URL` names: a SQLite file,
+//! under `data/` beside this crate when unset, or a PostgreSQL database.
 
 mod posts;
 mod router;
@@ -34,18 +34,26 @@ fn port() -> Result<u16, String> {
     }
 }
 
-/// The database `DATABASE_URL` names: `sqlite:<path>`, else the file under `data/`.
+/// The database `DATABASE_URL` names: `sqlite:<path>`, relative to this
+/// crate, or `postgres://...`; the file under `data/` when unset.
 async fn open_database() -> Result<Database, String> {
     let url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/app.db".to_string());
-    let Some(path) = url.strip_prefix("sqlite:") else {
-        return Err(format!("DATABASE_URL must be sqlite:<path>, got '{url}'"));
-    };
-    let path = crate_directory().join(path);
-    let database = Database::open_sqlite_file(&path)
-        .await
-        .map_err(|error| error.to_string())?;
-    tracing::info!("database {}", path.display());
-    Ok(database)
+    if let Some(path) = url.strip_prefix("sqlite:") {
+        let path = crate_directory().join(path);
+        tracing::info!("database {}", path.display());
+        return Database::open_sqlite_file(&path)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        tracing::info!("database PostgreSQL");
+        return Database::open_postgres(&url)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    Err(format!(
+        "DATABASE_URL must be sqlite:<path> or postgres://..., got '{url}'"
+    ))
 }
 
 #[tokio::main]

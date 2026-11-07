@@ -48,34 +48,54 @@ on it, so all three have the same tables: the web server's is the system
 of record the apps will sync with; the desktop and mobile apps each keep a
 SQLite file on the device, so they work with the network off. That is
 `core/src/database.rs`: a `Database` enum of the open connection pool,
-SQLite now, with PostgreSQL for the web server to join it as a second
-variant. Each resource module in `core/` matches on the variant and calls
-the database's own module of plain SQL (`core/src/sqlite/posts.rs`), so
-the rules of a resource are written once and the SQL once per database.
+SQLite, or PostgreSQL for a web server that has outgrown a file. Each
+resource module in `core/` matches on the variant and calls the
+database's own module of plain SQL (`core/src/sqlite/posts.rs`,
+`core/src/postgres/posts.rs`), so the rules of a resource are written
+once and the SQL once per database.
 
 The database is [sqlx](https://github.com/launchbadge/sqlx): async, one
 library for both databases, with `$1` placeholders in both. Ids are
 UUIDv7, made by whichever device writes the row, so an offline write never
 collides; they are text in SQLite, so the file reads well in the `sqlite3`
-shell. Times are `DateTime<Utc>`, RFC 3339 text in SQLite. The migrations
-are `.sql` files under `core/migrations/sqlite/`, named
-`<version>_<name>.sql`, embedded at build time by sqlx's `migrate!` and
-run when a database opens; add one by hand or with the sqlx CLI
-(`cargo install sqlx-cli`, then
+shell. Times are `DateTime<Utc>` to the microsecond, RFC 3339 text in SQLite
+and `timestamptz` in PostgreSQL. The migrations are `.sql` files under
+`core/migrations/sqlite/` and `core/migrations/postgres/`, one per
+database since their SQL differs, named `<version>_<name>.sql`, embedded
+at build time by sqlx's `migrate!` and run when a database opens; add
+one by hand or with the sqlx CLI (`cargo install sqlx-cli`, then
 `sqlx migrate add --source core/migrations/sqlite <name>`). `core/`'s
-`sqlite` feature is on by default; the Tauri app only ever has SQLite.
+`sqlite` feature is on by default and the web server turns on `postgres`
+too; the Tauri app only ever has SQLite, so no PostgreSQL client is
+compiled into the desktop or phone build.
 
 Where each deployment's file is:
 
 * The web server: `DATABASE_URL`, `sqlite:<path>` relative to `axum/`,
-  by default `sqlite:data/app.db`, a gitignored file in the worktree.
+  by default `sqlite:data/app.db`, a gitignored file in the worktree, or
+  `postgres://user@host/database`, which must exist (`createdb`). So
+  `DATABASE_URL=postgres://postgres@localhost/starter_pack bin/dev` runs
+  the web on PostgreSQL while the apps keep their SQLite files, the
+  mix the sync will face.
 * The Tauri app: `DATABASE_PATH` when set, else `app.db` in the app data
   directory Tauri gives it, under `~/Library/Application Support` on macOS
   and inside the app's sandbox on a phone. Set `DATABASE_PATH` in dev to
   keep worktrees apart.
 
 Debug builds write three sample posts into an empty database, a stand-in
-until the pages can write posts. Tests open an in-memory SQLite database.
+until the pages can write posts.
+
+Every resource test in `core/` runs through `with_each_database`
+(`core/src/database.rs`): against an in-memory SQLite database always,
+and against PostgreSQL too when `TEST_POSTGRES_URL` names a database to
+use, each test in a schema of its own that is dropped afterwards. That is
+what keeps the two databases' modules in step: a function added to one
+and not the other fails the tests wherever PostgreSQL is reachable.
+
+```sh
+createdb starter_pack_test
+TEST_POSTGRES_URL=postgres://postgres@localhost/starter_pack_test cargo test -p app_core --features postgres
+```
 
 ## Pages
 
@@ -199,12 +219,14 @@ cargo test --workspace --all-targets
 (cd svelte && pnpm check)
 ```
 
+With `TEST_POSTGRES_URL` set, the core tests run against PostgreSQL too,
+see [The database](#the-database).
+
 ## Not yet
 
 * Writes from the pages: `update_post` and `delete_post` in `core/`, and
   the New, Edit and Delete pages
-* PostgreSQL for the web server, behind a `postgres` feature of `core/`,
-  with the same tests run against it
+* TLS to a PostgreSQL server elsewhere: sqlx's `tls-rustls-*` features
 * Who the user is, and logging in
 * The sync between the devices' files and the web server
 * The `main` branch's desktop app has a quick search popup, a tmux example

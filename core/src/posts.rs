@@ -1,11 +1,13 @@
 //! Posts: the first resource.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::database::Database;
+#[cfg(feature = "postgres")]
+use crate::postgres;
 use crate::sqlite;
 
 /// A post as the pages show it.
@@ -29,6 +31,8 @@ pub enum PostError {
 pub async fn list_posts(database: &Database) -> Result<Vec<Post>, PostError> {
     match database {
         Database::Sqlite(pool) => Ok(sqlite::posts::list_posts(pool).await?),
+        #[cfg(feature = "postgres")]
+        Database::Postgres(pool) => Ok(postgres::posts::list_posts(pool).await?),
     }
 }
 
@@ -36,13 +40,16 @@ pub async fn list_posts(database: &Database) -> Result<Vec<Post>, PostError> {
 pub async fn get_post(database: &Database, id: Uuid) -> Result<Post, PostError> {
     let post = match database {
         Database::Sqlite(pool) => sqlite::posts::get_post(pool, id).await?,
+        #[cfg(feature = "postgres")]
+        Database::Postgres(pool) => postgres::posts::get_post(pool, id).await?,
     };
     post.ok_or(PostError::NotFound { id })
 }
 
-/// Writes a new post, with an id and the time from this device.
+/// Writes a new post, with an id and the time from this device. The time
+/// is kept to the microsecond, which is what the databases keep.
 pub async fn create_post(database: &Database, body: String) -> Result<Post, PostError> {
-    let now = Utc::now();
+    let now = Utc::now().trunc_subsecs(6);
     let post = Post {
         id: Uuid::now_v7(),
         body,
@@ -51,6 +58,8 @@ pub async fn create_post(database: &Database, body: String) -> Result<Post, Post
     };
     match database {
         Database::Sqlite(pool) => sqlite::posts::create_post(pool, &post).await?,
+        #[cfg(feature = "postgres")]
+        Database::Postgres(pool) => postgres::posts::create_post(pool, &post).await?,
     }
     Ok(post)
 }
@@ -60,6 +69,8 @@ pub async fn create_post(database: &Database, body: String) -> Result<Post, Post
 pub async fn seed_sample_posts(database: &Database) -> Result<(), PostError> {
     let count = match database {
         Database::Sqlite(pool) => sqlite::posts::count_posts(pool).await?,
+        #[cfg(feature = "postgres")]
+        Database::Postgres(pool) => postgres::posts::count_posts(pool).await?,
     };
     if count > 0 {
         return Ok(());
@@ -77,53 +88,56 @@ pub async fn seed_sample_posts(database: &Database) -> Result<(), PostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn database() -> Database {
-        Database::open_sqlite_in_memory()
-            .await
-            .expect("an in-memory database")
-    }
+    use crate::database::with_each_database;
 
     #[tokio::test]
     async fn lists_posts_newest_first() {
-        let database = database().await;
-        let first = create_post(&database, "first".to_string())
-            .await
-            .expect("a post");
-        let second = create_post(&database, "second".to_string())
-            .await
-            .expect("a post");
+        with_each_database(|database| async move {
+            let first = create_post(&database, "first".to_string())
+                .await
+                .expect("a post");
+            let second = create_post(&database, "second".to_string())
+                .await
+                .expect("a post");
 
-        let posts = list_posts(&database).await.expect("the posts");
-        assert_eq!(posts, vec![second, first]);
+            let posts = list_posts(&database).await.expect("the posts");
+            assert_eq!(posts, vec![second, first]);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn gets_a_post_by_id() {
-        let database = database().await;
-        let written = create_post(&database, "a post".to_string())
-            .await
-            .expect("a post");
+        with_each_database(|database| async move {
+            let written = create_post(&database, "a post".to_string())
+                .await
+                .expect("a post");
 
-        let post = get_post(&database, written.id).await.expect("the post");
-        assert_eq!(post, written);
+            let post = get_post(&database, written.id).await.expect("the post");
+            assert_eq!(post, written);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn reports_a_missing_post() {
-        let database = database().await;
-        let id = Uuid::now_v7();
+        with_each_database(|database| async move {
+            let id = Uuid::now_v7();
 
-        let error = get_post(&database, id).await.expect_err("no such post");
-        assert!(matches!(error, PostError::NotFound { id: missing } if missing == id));
+            let error = get_post(&database, id).await.expect_err("no such post");
+            assert!(matches!(error, PostError::NotFound { id: missing } if missing == id));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn seeds_sample_posts_once() {
-        let database = database().await;
-        seed_sample_posts(&database).await.expect("seeded");
-        seed_sample_posts(&database).await.expect("seeded again");
+        with_each_database(|database| async move {
+            seed_sample_posts(&database).await.expect("seeded");
+            seed_sample_posts(&database).await.expect("seeded again");
 
-        assert_eq!(list_posts(&database).await.expect("the posts").len(), 3);
+            assert_eq!(list_posts(&database).await.expect("the posts").len(), 3);
+        })
+        .await;
     }
 }

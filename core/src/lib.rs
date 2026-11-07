@@ -6,5 +6,7 @@
 //! translate between their transport and these functions.
 
 pub mod database;
+#[cfg(feature = "postgres")]
+mod postgres;
 pub mod posts;
 mod sqlite;
