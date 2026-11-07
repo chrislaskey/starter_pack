@@ -10,7 +10,8 @@ One application in Rust, with Svelte pages, deployed three ways:
 
 ```
 core/      app_core, the application: one module per resource, with
-           list/get/create/update/delete functions returning plain data
+           list/get/create/update/delete functions returning plain data,
+           the database they read and write, and its migrations
 axum/      app_web, the web server: app_core over HTTP under /api, and svelte/dist
 tauri/     app_tauri, the desktop and mobile app: app_core behind Tauri commands
 svelte/    the pages, one Svelte app the web server serves and the Tauri app bundles
@@ -37,9 +38,44 @@ To add to a resource, or add one: the function in `core/`, a route in
 `axum/src/router.rs` with its handler, a command in `tauri/src/lib.rs`
 with its function, the two calls in `svelte/src/lib/core/`, then the page.
 
-The posts are hard-coded in `core/` for now. The database, who the user
-is, and the sync between the apps' local SQLite files and the web server,
-the system of record, come in later stages.
+Who the user is, and the sync between the apps' local databases and the
+web server, the system of record, come in later stages.
+
+## The database
+
+Every deployment opens a database of its own and runs the same migrations
+on it, so all three have the same tables: the web server's is the system
+of record the apps will sync with; the desktop and mobile apps each keep a
+SQLite file on the device, so they work with the network off. That is
+`core/src/database.rs`: a `Database` enum of the open connection pool,
+SQLite now, with PostgreSQL for the web server to join it as a second
+variant. Each resource module in `core/` matches on the variant and calls
+the database's own module of plain SQL (`core/src/sqlite/posts.rs`), so
+the rules of a resource are written once and the SQL once per database.
+
+The database is [sqlx](https://github.com/launchbadge/sqlx): async, one
+library for both databases, with `$1` placeholders in both. Ids are
+UUIDv7, made by whichever device writes the row, so an offline write never
+collides; they are text in SQLite, so the file reads well in the `sqlite3`
+shell. Times are `DateTime<Utc>`, RFC 3339 text in SQLite. The migrations
+are `.sql` files under `core/migrations/sqlite/`, named
+`<version>_<name>.sql`, embedded at build time by sqlx's `migrate!` and
+run when a database opens; add one by hand or with the sqlx CLI
+(`cargo install sqlx-cli`, then
+`sqlx migrate add --source core/migrations/sqlite <name>`). `core/`'s
+`sqlite` feature is on by default; the Tauri app only ever has SQLite.
+
+Where each deployment's file is:
+
+* The web server: `DATABASE_URL`, `sqlite:<path>` relative to `axum/`,
+  by default `sqlite:data/app.db`, a gitignored file in the worktree.
+* The Tauri app: `DATABASE_PATH` when set, else `app.db` in the app data
+  directory Tauri gives it, under `~/Library/Application Support` on macOS
+  and inside the app's sandbox on a phone. Set `DATABASE_PATH` in dev to
+  keep worktrees apart.
+
+Debug builds write three sample posts into an empty database, a stand-in
+until the pages can write posts. Tests open an in-memory SQLite database.
 
 ## Pages
 
@@ -120,8 +156,9 @@ cargo run -p app_web                        # http://localhost:4000, serving sve
 (cd tauri && cargo tauri build)             # the app bundle, under target/release/bundle
 ```
 
-The web server reads `PORT` and `SVELTE_DIST` (default `svelte/dist`),
-and logs with `RUST_LOG` (default `app_web=info,tower_http=info`).
+The web server reads `PORT`, `DATABASE_URL` and `SVELTE_DIST` (default
+`svelte/dist`), and logs with `RUST_LOG` (default
+`app_web=info,tower_http=info`).
 `pnpm check` in `svelte/` type-checks the pages.
 
 ### Mobile
@@ -164,8 +201,10 @@ cargo test --workspace --all-targets
 
 ## Not yet
 
-* The database: SQLite on the devices, the web server's database, and
-  `create_post`, `update_post`, `delete_post` in `core/`
+* Writes from the pages: `update_post` and `delete_post` in `core/`, and
+  the New, Edit and Delete pages
+* PostgreSQL for the web server, behind a `postgres` feature of `core/`,
+  with the same tests run against it
 * Who the user is, and logging in
 * The sync between the devices' files and the web server
 * The `main` branch's desktop app has a quick search popup, a tmux example

@@ -1,6 +1,7 @@
 //! The web server: `app_core` over a JSON API under `/api`, and the Svelte
 //! pages (`../svelte/dist`) at every other path. Listens on `PORT`, 4000
-//! when unset.
+//! when unset, and opens the database `DATABASE_URL` names, a SQLite file
+//! under `data/` beside this crate when unset.
 
 mod posts;
 mod router;
@@ -9,13 +10,19 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use app_core::database::Database;
+
 const DEFAULT_PORT: u16 = 4000;
+
+fn crate_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
 
 /// The built Svelte pages: `SVELTE_DIST`, else `../svelte/dist` beside this crate.
 fn svelte_dist() -> PathBuf {
     env::var_os("SVELTE_DIST")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../svelte/dist"))
+        .unwrap_or_else(|| crate_directory().join("../svelte/dist"))
 }
 
 fn port() -> Result<u16, String> {
@@ -27,6 +34,20 @@ fn port() -> Result<u16, String> {
     }
 }
 
+/// The database `DATABASE_URL` names: `sqlite:<path>`, else the file under `data/`.
+async fn open_database() -> Result<Database, String> {
+    let url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/app.db".to_string());
+    let Some(path) = url.strip_prefix("sqlite:") else {
+        return Err(format!("DATABASE_URL must be sqlite:<path>, got '{url}'"));
+    };
+    let path = crate_directory().join(path);
+    let database = Database::open_sqlite_file(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    tracing::info!("database {}", path.display());
+    Ok(database)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), String> {
     tracing_subscriber::fmt()
@@ -36,13 +57,21 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
+    let database = open_database().await?;
+    // The sample posts, until the pages can write posts
+    if cfg!(debug_assertions) {
+        app_core::posts::seed_sample_posts(&database)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("could not listen on {address}: {error}"))?;
     tracing::info!("listening on http://{address}");
 
-    axum::serve(listener, router::router(&svelte_dist()))
+    axum::serve(listener, router::router(&svelte_dist(), database))
         .await
         .map_err(|error| format!("server stopped: {error}"))
 }

@@ -6,3 +6,6 @@
 /target/
 
 .DS_Store
+
+# The web server's SQLite file in dev
+/axum/data/

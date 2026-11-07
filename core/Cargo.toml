@@ -4,6 +4,17 @@ description = "Starter Pack's application logic, shared by the web server and th
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["sqlite"]
+# The database each deployment keeps on its own device, and the web server's by default
+sqlite = ["sqlx/sqlite"]
+
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 serde = { workspace = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "uuid"] }
 thiserror = { workspace = true }
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

@@ -1,86 +1,129 @@
-//! Posts: the first resource. Hard-coded for now; the database comes later.
+//! Posts: the first resource.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
+
+use crate::database::Database;
+use crate::sqlite;
 
 /// A post as the pages show it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Post {
-    pub id: String,
+    pub id: Uuid,
     pub body: String,
-    /// When the post was written, as an RFC 3339 timestamp.
-    pub inserted_at: String,
+    pub inserted_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum PostError {
     #[error("post {id} not found")]
-    NotFound { id: String },
+    NotFound { id: Uuid },
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Every post, newest first.
-pub fn list_posts() -> Vec<Post> {
-    sample_posts()
+pub async fn list_posts(database: &Database) -> Result<Vec<Post>, PostError> {
+    match database {
+        Database::Sqlite(pool) => Ok(sqlite::posts::list_posts(pool).await?),
+    }
 }
 
 /// One post by its id.
-pub fn get_post(id: &str) -> Result<Post, PostError> {
-    sample_posts()
-        .into_iter()
-        .find(|post| post.id == id)
-        .ok_or_else(|| PostError::NotFound { id: id.to_string() })
+pub async fn get_post(database: &Database, id: Uuid) -> Result<Post, PostError> {
+    let post = match database {
+        Database::Sqlite(pool) => sqlite::posts::get_post(pool, id).await?,
+    };
+    post.ok_or(PostError::NotFound { id })
 }
 
-fn sample_posts() -> Vec<Post> {
-    vec![
-        Post {
-            id: "3".to_string(),
-            body: "The same Svelte pages run in the browser, on the desktop and on a phone."
-                .to_string(),
-            inserted_at: "2026-11-07T09:30:00Z".to_string(),
-        },
-        Post {
-            id: "2".to_string(),
-            body: "The web server answers over HTTP, the apps over Tauri commands, and both call app_core."
-                .to_string(),
-            inserted_at: "2026-11-06T17:15:00Z".to_string(),
-        },
-        Post {
-            id: "1".to_string(),
-            body: "Hello from app_core.".to_string(),
-            inserted_at: "2026-11-05T08:00:00Z".to_string(),
-        },
-    ]
+/// Writes a new post, with an id and the time from this device.
+pub async fn create_post(database: &Database, body: String) -> Result<Post, PostError> {
+    let now = Utc::now();
+    let post = Post {
+        id: Uuid::now_v7(),
+        body,
+        inserted_at: now,
+        updated_at: now,
+    };
+    match database {
+        Database::Sqlite(pool) => sqlite::posts::create_post(pool, &post).await?,
+    }
+    Ok(post)
+}
+
+/// Writes three sample posts when there are none, so a fresh database has
+/// something to show. A stand-in until the pages can write posts.
+pub async fn seed_sample_posts(database: &Database) -> Result<(), PostError> {
+    let count = match database {
+        Database::Sqlite(pool) => sqlite::posts::count_posts(pool).await?,
+    };
+    if count > 0 {
+        return Ok(());
+    }
+    for body in [
+        "Hello from app_core.",
+        "The web server answers over HTTP, the apps over Tauri commands, and both call app_core.",
+        "The same Svelte pages run in the browser, on the desktop and on a phone.",
+    ] {
+        create_post(database, body.to_string()).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn lists_posts_newest_first() {
-        let posts = list_posts();
-        assert_eq!(posts.len(), 3);
-        assert!(
-            posts
-                .windows(2)
-                .all(|pair| pair[0].inserted_at > pair[1].inserted_at)
-        );
+    async fn database() -> Database {
+        Database::open_sqlite_in_memory()
+            .await
+            .expect("an in-memory database")
     }
 
-    #[test]
-    fn gets_a_post_by_id() {
-        let post = get_post("1").expect("post 1 exists");
-        assert_eq!(post.body, "Hello from app_core.");
+    #[tokio::test]
+    async fn lists_posts_newest_first() {
+        let database = database().await;
+        let first = create_post(&database, "first".to_string())
+            .await
+            .expect("a post");
+        let second = create_post(&database, "second".to_string())
+            .await
+            .expect("a post");
+
+        let posts = list_posts(&database).await.expect("the posts");
+        assert_eq!(posts, vec![second, first]);
     }
 
-    #[test]
-    fn reports_a_missing_post() {
-        assert_eq!(
-            get_post("missing"),
-            Err(PostError::NotFound {
-                id: "missing".to_string()
-            })
-        );
+    #[tokio::test]
+    async fn gets_a_post_by_id() {
+        let database = database().await;
+        let written = create_post(&database, "a post".to_string())
+            .await
+            .expect("a post");
+
+        let post = get_post(&database, written.id).await.expect("the post");
+        assert_eq!(post, written);
+    }
+
+    #[tokio::test]
+    async fn reports_a_missing_post() {
+        let database = database().await;
+        let id = Uuid::now_v7();
+
+        let error = get_post(&database, id).await.expect_err("no such post");
+        assert!(matches!(error, PostError::NotFound { id: missing } if missing == id));
+    }
+
+    #[tokio::test]
+    async fn seeds_sample_posts_once() {
+        let database = database().await;
+        seed_sample_posts(&database).await.expect("seeded");
+        seed_sample_posts(&database).await.expect("seeded again");
+
+        assert_eq!(list_posts(&database).await.expect("the posts").len(), 3);
     }
 }
