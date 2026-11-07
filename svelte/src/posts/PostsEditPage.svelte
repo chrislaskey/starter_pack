@@ -1,0 +1,49 @@
+<!-- Editing a post, at /posts/:id/edit; done, it shows the post -->
+<script>
+  import AppNav from "../lib/AppNav.svelte";
+  import { postsGet, postsUpdate } from "../lib/core/index.js";
+  import { navigateToUrl, pathParams } from "../lib/router.js";
+  import { postsShowUrl } from "../lib/routes.js";
+  import PostsForm from "./PostsForm.svelte";
+
+  const id = pathParams().id;
+  let loaded = $state(false);
+  let text = $state("");
+  let error = $state("");
+  let busy = $state(false);
+
+  async function load() {
+    try {
+      const post = await postsGet(id);
+      text = post.body;
+      loaded = true;
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  async function save() {
+    busy = true;
+    try {
+      await postsUpdate(id, text);
+      await navigateToUrl(postsShowUrl(id));
+    } catch (problem) {
+      error = String(problem);
+    } finally {
+      busy = false;
+    }
+  }
+
+  load();
+</script>
+
+<main class="page">
+  <AppNav />
+  <h1>Edit post</h1>
+  {#if loaded}
+    <PostsForm bind:text submitText="Save" {error} {busy} onsubmit={save} />
+  {:else if error}
+    <p class="error">{error}</p>
+  {/if}
+  <a href={postsShowUrl(id)}>Back to the post</a>
+</main>

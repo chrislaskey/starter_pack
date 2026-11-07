@@ -13,7 +13,13 @@ pub fn run() {
             database::open_and_manage(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![posts::list_posts, posts::get_post])
+        .invoke_handler(tauri::generate_handler![
+            posts::list,
+            posts::get,
+            posts::create,
+            posts::update,
+            posts::delete
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

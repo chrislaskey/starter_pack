@@ -24,19 +24,34 @@ phones, not for speed; `AGENTS.md` says how the code is written.
 
 ## How a page reaches the application
 
-A page calls `listPosts()` or `getPost(id)` from `svelte/src/lib/core/`.
-Inside the Tauri app that is the `list_posts` or `get_post` command
-(`tauri/src/posts.rs`); in a browser it is `GET /api/posts` or
-`GET /api/posts/:id` (`axum/src/posts.rs`). Both call
-`app_core::posts::list_posts` or `get_post` (`core/src/posts.rs`) and
-answer with the same JSON, serialized from the same Rust types, so the
-page never knows which it is on. The server answers an error as a status
-and `{"error": "..."}`, the app as the message, and the page shows the
-message either way.
+A page calls `postsList()`, `postsGet(id)`, `postsCreate(body)`,
+`postsUpdate(id, body)` or `postsDelete(id)` from `svelte/src/lib/core/`.
+Inside the Tauri app each is a command of the same name
+(`tauri/src/posts.rs`); in a browser each is a request to the JSON API
+(`axum/src/posts.rs`):
+
+| Call | Request |
+| --- | --- |
+| `postsList()` | `GET /api/posts` |
+| `postsGet(id)` | `GET /api/posts/:id` |
+| `postsCreate(body)` | `POST /api/posts` with `{"body": "..."}`, 201 |
+| `postsUpdate(id, body)` | `PUT /api/posts/:id` with `{"body": "..."}` |
+| `postsDelete(id)` | `DELETE /api/posts/:id`, 204 |
+
+Both call the function in `app_core::posts` (`core/src/posts.rs`),
+`posts::list`, `posts::get` and so on, named through their module as the
+standard library's `fs::read` is, and answer with the same JSON,
+serialized from the same Rust types, so the page never knows which it is
+on. The rules live
+there too: a post's body is trimmed and may not be blank. The server
+answers an error as a status, 404 for a missing post and 422 for a blank
+one, and `{"error": "..."}`; the app answers the message; and the page
+shows the message either way.
 
 To add to a resource, or add one: the function in `core/`, a route in
 `axum/src/router.rs` with its handler, a command in `tauri/src/lib.rs`
-with its function, the two calls in `svelte/src/lib/core/`, then the page.
+with its function, named on the wire with the resource (`posts_list`),
+the two calls in `svelte/src/lib/core/`, then the page.
 
 Who the user is, and the sync between the apps' local databases and the
 web server, the system of record, come in later stages.
@@ -61,7 +76,8 @@ collides; they are text in SQLite, so the file reads well in the `sqlite3`
 shell. Times are `DateTime<Utc>` to the microsecond, RFC 3339 text in SQLite
 and `timestamptz` in PostgreSQL. The migrations are `.sql` files under
 `core/migrations/sqlite/` and `core/migrations/postgres/`, one per
-database since their SQL differs, named `<version>_<name>.sql`, embedded
+database since their SQL differs, named `<version>_<name>.sql` with the
+name resource first (`posts_create`), embedded
 at build time by sqlx's `migrate!` and run when a database opens; add
 one by hand or with the sqlx CLI (`cargo install sqlx-cli`, then
 `sqlx migrate add --source core/migrations/sqlite <name>`). `core/`'s
@@ -81,9 +97,6 @@ Where each deployment's file is:
   directory Tauri gives it, under `~/Library/Application Support` on macOS
   and inside the app's sandbox on a phone. Set `DATABASE_PATH` in dev to
   keep worktrees apart.
-
-Debug builds write three sample posts into an empty database, a stand-in
-until the pages can write posts.
 
 Every resource test in `core/` runs through `with_each_database`
 (`core/src/database.rs`): against an in-memory SQLite database always,
@@ -107,7 +120,13 @@ shows the page at the path, swapped in place:
 | --- | --- |
 | `/` | `HomePage.svelte` |
 | `/posts` | `posts/PostsIndexPage.svelte` |
-| `/posts/:id` | `posts/PostShowPage.svelte` |
+| `/posts/new` | `posts/PostsNewPage.svelte` |
+| `/posts/:id` | `posts/PostsShowPage.svelte`, with Edit and Delete |
+| `/posts/:id/edit` | `posts/PostsEditPage.svelte` |
+
+The New and Edit pages share `posts/PostsForm.svelte`. A write that
+worked navigates to the post, or the list after a delete, through
+`navigateToUrl` in `router.js`.
 
 The paths are real paths, named once in `svelte/src/lib/routes.js`, which
 pages link through. Every path is reloadable: the dev server, the web
@@ -224,8 +243,6 @@ see [The database](#the-database).
 
 ## Not yet
 
-* Writes from the pages: `update_post` and `delete_post` in `core/`, and
-  the New, Edit and Delete pages
 * TLS to a PostgreSQL server elsewhere: sqlx's `tls-rustls-*` features
 * Who the user is, and logging in
 * The sync between the devices' files and the web server

@@ -25,7 +25,7 @@ impl From<PostRow> for Post {
     }
 }
 
-pub async fn list_posts(pool: &PgPool) -> Result<Vec<Post>, sqlx::Error> {
+pub async fn list(pool: &PgPool) -> Result<Vec<Post>, sqlx::Error> {
     let rows: Vec<PostRow> =
         sqlx::query_as("SELECT id, body, inserted_at, updated_at FROM app_posts ORDER BY inserted_at DESC, id DESC")
             .fetch_all(pool)
@@ -33,7 +33,7 @@ pub async fn list_posts(pool: &PgPool) -> Result<Vec<Post>, sqlx::Error> {
     Ok(rows.into_iter().map(Post::from).collect())
 }
 
-pub async fn get_post(pool: &PgPool, id: Uuid) -> Result<Option<Post>, sqlx::Error> {
+pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<Post>, sqlx::Error> {
     let row: Option<PostRow> =
         sqlx::query_as("SELECT id, body, inserted_at, updated_at FROM app_posts WHERE id = $1")
             .bind(id)
@@ -42,7 +42,7 @@ pub async fn get_post(pool: &PgPool, id: Uuid) -> Result<Option<Post>, sqlx::Err
     Ok(row.map(Post::from))
 }
 
-pub async fn create_post(pool: &PgPool, post: &Post) -> Result<(), sqlx::Error> {
+pub async fn create(pool: &PgPool, post: &Post) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO app_posts (id, body, inserted_at, updated_at) VALUES ($1, $2, $3, $4)",
     )
@@ -55,8 +55,22 @@ pub async fn create_post(pool: &PgPool, post: &Post) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
-pub async fn count_posts(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM app_posts")
-        .fetch_one(pool)
-        .await
+/// Writes the post's body and `updated_at` over the row; false when there is no such row.
+pub async fn update(pool: &PgPool, post: &Post) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE app_posts SET body = $2, updated_at = $3 WHERE id = $1")
+        .bind(post.id)
+        .bind(&post.body)
+        .bind(post.updated_at)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Deletes the row; false when there is no such row.
+pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM app_posts WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() == 1)
 }

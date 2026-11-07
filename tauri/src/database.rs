@@ -16,10 +16,6 @@ pub fn open_and_manage(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     };
     let database = tauri::async_runtime::block_on(Database::open_sqlite_file(&path))?;
     log::info!("database {}", path.display());
-    // The sample posts, until the pages can write posts
-    if cfg!(debug_assertions) {
-        tauri::async_runtime::block_on(app_core::posts::seed_sample_posts(&database))?;
-    }
     app.manage(database);
     Ok(())
 }

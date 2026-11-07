@@ -6,7 +6,9 @@
 
 export const HOME_PATH = "/";
 export const POSTS_INDEX_PATH = "/posts";
-export const POST_SHOW_PATH = "/posts/:id";
+export const POSTS_NEW_PATH = "/posts/new";
+export const POSTS_SHOW_PATH = "/posts/:id";
+export const POSTS_EDIT_PATH = "/posts/:id/edit";
 
 export function homeUrl() {
   return HOME_PATH;
@@ -16,7 +18,16 @@ export function postsIndexUrl() {
   return POSTS_INDEX_PATH;
 }
 
+export function postsNewUrl() {
+  return POSTS_NEW_PATH;
+}
+
 /** @param {string} id */
-export function postShowUrl(id) {
-  return POST_SHOW_PATH.replace(":id", encodeURIComponent(id));
+export function postsShowUrl(id) {
+  return POSTS_SHOW_PATH.replace(":id", encodeURIComponent(id));
+}
+
+/** @param {string} id */
+export function postsEditUrl(id) {
+  return POSTS_EDIT_PATH.replace(":id", encodeURIComponent(id));
 }

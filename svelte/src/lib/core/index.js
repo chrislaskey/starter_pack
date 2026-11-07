@@ -9,5 +9,8 @@ import * as tauriCommands from "./tauri-commands.js";
 
 const core = isTauri() ? tauriCommands : httpApi;
 
-export const listPosts = core.listPosts;
-export const getPost = core.getPost;
+export const postsList = core.postsList;
+export const postsGet = core.postsGet;
+export const postsCreate = core.postsCreate;
+export const postsUpdate = core.postsUpdate;
+export const postsDelete = core.postsDelete;
