@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "identifier": "com.starterpack.app",
   "build": {
-    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../svelte" },
+    "beforeDevCommand": {
+      "script": "pnpm dev",
+      "cwd": "../svelte"
+    },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../svelte" },
+    "beforeBuildCommand": {
+      "script": "pnpm build",
+      "cwd": "../svelte"
+    },
     "frontendDist": "../svelte/dist"
   },
   "app": {
@@ -17,7 +23,14 @@
         "width": 1040,
         "height": 820,
         "minWidth": 400,
-        "minHeight": 400
+        "minHeight": 400,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 16
+        },
+        "backgroundColor": "#ffffff"
       }
     ],
     "security": {

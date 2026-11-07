@@ -57,6 +57,37 @@ The paths are real paths, named once in `svelte/src/lib/routes.js`, which
 pages link through. Every path is reloadable: the dev server, the web
 server and the Tauri app all answer an unknown path with `index.html`.
 
+### Theme and font
+
+The pages are styled with Tailwind v4 and daisyUI, with all of daisyUI's
+themes (`svelte/src/lib/theme.css`), and the `hero-*` icon classes come
+from the `heroicons` npm package (`svelte/vendor/heroicons.js`) for the
+`Icon` component. The theme sets the font, Plus Jakarta Sans, vendored in
+`svelte/src/public/fonts` (OFL licence alongside) and served from `/fonts`,
+so it works offline on every deployment.
+
+The theme is `data-theme` on `<html>`. `svelte/src/lib/theme_script.js`
+sets it before the first paint and switches it on the `app:set-theme`
+events the theme menu (`ThemeMenu.svelte`, `ThemeChoices.svelte`, in the
+nav) dispatches, keeping the choice in `localStorage` under `app:theme`;
+"System" follows the OS light or dark setting. The script isn't bundled:
+`vite.config.js` inlines it at the `<!-- theme-script -->` marker in
+`index.html`, in dev and in builds. The pages' own styles
+(`svelte/src/styles.css`) take their colours from the theme's variables.
+
+### Full bleed
+
+The page runs under the window chrome and keeps its content clear of it.
+On the desktop the macOS title bar is an overlay (`titleBarStyle` in
+`tauri/tauri.conf.json`): the window controls are drawn over the page, the
+page pads its top by the bar's height, and an empty strip there
+(`.title-bar-drag` in `index.html`, allowed by the
+`core:window:allow-start-dragging` permission) drags the window. On a
+phone `viewport-fit=cover` lets the page run under the status bar and the
+home indicator, and the page pads by the safe-area insets. `main.js` sets
+`data-app` on `<html>` to `desktop`, `mobile` or `web`, which the styles
+switch on; a browser gets neither inset.
+
 ## Running
 
 Prerequisites: Rust and Node with pnpm (`.tool-versions`), and for the
@@ -64,13 +95,23 @@ Tauri app the Tauri CLI (`cargo install tauri-cli --version '^2' --locked`)
 and Xcode's command line tools.
 
 ```sh
-bin/dev            # the web: the server on 4000, the pages with hot reload on 1420
-bin/dev desktop    # the desktop app, starting the pages' dev server itself
+bin/dev                # the web: the server on 4000, the pages with hot reload on 1420
+bin/dev desktop        # the desktop app, its pages from the dev server on 1420
+bin/dev desktop ios    # both apps side by side, on the one dev server
 ```
 
-`bin/dev` takes its ports from `PORT` when set (the server on `PORT`, the
-pages on `PORT + 1000`), so worktrees don't collide; `bin/dev --help` has
-the rest. By hand:
+Or to run everything at once:
+
+```
+bin/dev web desktop ios "iPhone 16"
+```
+
+`bin/dev` starts the Svelte dev server once and every target named loads
+its pages from it, so the desktop and the iOS app can run together; two
+Tauri targets compile in turn, since Cargo locks the workspace's build
+directory. It takes its ports from `PORT` when set (the server on `PORT`,
+the pages on `PORT + 1000`), so worktrees don't collide; `bin/dev --help`
+has the rest. By hand:
 
 ```sh
 (cd svelte && pnpm install && pnpm build)   # writes svelte/dist
@@ -127,7 +168,6 @@ cargo test --workspace --all-targets
   `create_post`, `update_post`, `delete_post` in `core/`
 * Who the user is, and logging in
 * The sync between the devices' files and the web server
-* Tailwind and the daisyUI theme the Phoenix pages use
 * The `main` branch's desktop app has a quick search popup, a tmux example
   page and the offline-first pages against Phoenix; they can come back
   from there once the pieces they need are here

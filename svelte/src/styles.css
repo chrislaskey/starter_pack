@@ -1,0 +1,103 @@
+/* The pages' own styles, in Tailwind's base layer so utility classes in
+   markup win. Colours come from the daisyUI theme (lib/theme.css). */
+
+:root {
+  --fg: var(--color-base-content);
+  --muted: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+  --card: var(--color-base-100);
+  --border-color: var(--color-base-300);
+  --accent: var(--color-primary);
+  /* The page runs under the window chrome, full bleed, and keeps its
+     content clear of it: on the desktop the macOS title bar, an overlay
+     (tauri.conf.json) whose window controls are drawn over the page; on a
+     phone the status bar and the home indicator, which `viewport-fit=cover`
+     in index.html lets the page run under. main.js sets `data-app`. */
+  --title-bar-height: 28px;
+  --page-inset-top: 0px;
+  --page-inset-bottom: 0px;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-app="desktop"] {
+  --page-inset-top: var(--title-bar-height);
+}
+
+[data-app="mobile"] {
+  --page-inset-top: env(safe-area-inset-top, 0px);
+  --page-inset-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* The body paints the background and fills the window: WebKit leaves the
+   old colour on the root background below short pages after a theme
+   change. */
+body {
+  margin: 0;
+  padding-top: var(--page-inset-top);
+  padding-bottom: var(--page-inset-bottom);
+  min-height: 100vh;
+  box-sizing: border-box;
+  background: var(--color-base-100);
+  color: var(--fg);
+}
+
+/* The title bar's strip over the page on the desktop: nothing of ours, so
+   it drags the window. */
+.title-bar-drag {
+  display: none;
+}
+
+[data-app="desktop"] .title-bar-drag {
+  display: block;
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 20;
+  height: var(--title-bar-height);
+}
+
+.page {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+h1 {
+  font-size: 1.4rem;
+  font-weight: bold;
+  margin: 0;
+}
+
+p {
+  margin: 0;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.error {
+  color: var(--color-error);
+}
+
+.posts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.post {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}

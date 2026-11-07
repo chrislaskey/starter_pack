@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Starts a deployment in dev mode, on ports taken from PORT so several
-# worktrees can run at the same time.
+# Starts one or more deployments in dev mode against one Svelte dev server,
+# on ports taken from PORT so several worktrees can run at the same time.
 #
 # Run `bin/dev --help` for the commands.
 
@@ -11,25 +11,32 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 help() {
   cat <<USAGE
-Starts a deployment in dev mode, on ports taken from PORT so several
-worktrees can run at the same time.
+Starts one or more deployments in dev mode against one Svelte dev server,
+on ports taken from PORT so several worktrees can run at the same time.
 
-Usage: $0 [COMMAND] [ARGS...]
+Usage: $0 [TARGET...] [ARGS...]
 
-Commands:
-  web       The web server (\`cargo run -p app_web\`) in the background and
-            the Svelte dev server, which sends /api to it, in front; closing
-            the dev server stops the web server too. The default.
-  desktop   The desktop app (\`cargo tauri dev\`), which starts the Svelte
-            dev server itself. Extra arguments go to \`cargo tauri dev\`.
+Targets, any number of them, \`web\` when none:
+  web       The web server (\`cargo run -p app_web\`), with the dev server
+            sending /api to it.
+  desktop   The desktop app (\`cargo tauri dev\`).
   ios       The iOS app in a simulator (\`cargo tauri ios dev\`), after
-            \`cargo tauri ios init\` the first time. Needs Xcode and the
-            iOS Rust targets, see README.md.
+            \`cargo tauri ios init\` the first time. Needs Xcode, see README.md.
   android   The Android app in an emulator (\`cargo tauri android dev\`),
             after \`cargo tauri android init\` the first time. Needs Android
-            Studio and the Android Rust targets, see README.md.
-  ports     Print the ports the commands would use, without starting anything.
+            Studio, see README.md.
+  ports     Print the ports the targets would use, without starting anything.
   help      Show this help. Also -h and --help.
+
+ARGS, whatever follows the targets, go to the mobile app's dev command:
+\`bin/dev ios "iPhone 16"\` picks that simulator. Closing the dev server
+(Ctrl-C) stops every target.
+
+The Svelte dev server is started once, here, and every target loads its
+pages from it, so the desktop and the iOS app can run side by side on one
+server. A Tauri target then builds with an empty \`beforeDevCommand\`, which
+the Tauri CLI skips. Two Tauri targets compile in turn: Cargo locks the
+workspace's target/ while it builds, so the second waits for the first.
 
 Ports:
   PORT unset   The web server on 4000 and the Svelte dev server on 1420, as
@@ -40,8 +47,9 @@ Ports:
                each worktree's apps run on ports of their own.
 
 Examples:
-  bin/dev                   # the web, on 4000 and 1420
-  PORT=4003 bin/dev desktop # the desktop app, its pages served on 5003
+  bin/dev                          # the web, on 4000 and 1420
+  bin/dev desktop                  # the desktop app, its pages on 1420
+  PORT=4003 bin/dev desktop ios    # both apps, their pages on 5003
 USAGE
 }
 
@@ -72,63 +80,82 @@ print_ports() {
   echo "Svelte dev  http://localhost:$vite_port"
 }
 
-install_svelte_packages() {
-  if [ ! -d "$ROOT/svelte/node_modules" ]; then
-    (cd "$ROOT/svelte" && pnpm install)
-  fi
-}
-
-start_web() {
-  install_svelte_packages
-  echo "bin/dev: the web server on http://localhost:$web_port"
-  (cd "$ROOT" && PORT="$web_port" exec cargo run -p app_web) &
-  local web_pid=$!
-  # Stops the web server when the dev server closes, or this script is interrupted.
-  trap 'kill "$web_pid" 2>/dev/null || true' EXIT
-  echo "bin/dev: the pages on http://localhost:$vite_port, sending /api to the web server"
-  cd "$ROOT/svelte"
-  WEB_SERVER_URL="http://localhost:$web_port" pnpm dev --port "$vite_port"
-}
-
-# The Tauri CLI's config override: the Svelte dev server on vite_port.
-tauri_config() {
-  echo "{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":{\"script\":\"pnpm dev --port $vite_port\",\"cwd\":\"../svelte\"}}}"
-}
-
-start_desktop() {
-  install_svelte_packages
-  echo "bin/dev: the desktop app, its pages on http://localhost:$vite_port"
-  cd "$ROOT/tauri"
-  exec cargo tauri dev --config "$(tauri_config)" ${1+"$@"}
-}
-
-start_mobile() {
-  local platform="$1"
-  shift
-  install_svelte_packages
-  cd "$ROOT/tauri"
-  case "$platform" in
-    ios) [ -d gen/apple ] || cargo tauri ios init ;;
-    android) [ -d gen/android ] || cargo tauri android init ;;
+# The targets are the leading arguments; the rest go to the mobile dev command.
+targets=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    web|desktop|ios|android) targets+=("$1"); shift ;;
+    ports) print_ports; exit 0 ;;
+    help|-h|--help) help; exit 0 ;;
+    -*) fail "unknown option '$1'; run \`$0 --help\`" ;;
+    *) break ;;
   esac
-  echo "bin/dev: the $platform app, its pages on http://localhost:$vite_port"
-  exec cargo tauri "$platform" dev --config "$(tauri_config)" ${1+"$@"}
-}
-
-command="${1:-web}"
-if [ $# -gt 0 ]; then
-  shift
+done
+if [ ${#targets[@]} -eq 0 ]; then
+  if [ $# -gt 0 ]; then
+    fail "unknown target '$1'; run \`$0 --help\`"
+  fi
+  targets=(web)
 fi
 
-case "$command" in
-  web) start_web ;;
-  desktop) start_desktop ${1+"$@"} ;;
-  ios|android) start_mobile "$command" ${1+"$@"} ;;
-  ports) print_ports ;;
-  help|-h|--help) help ;;
-  *)
-    echo "Usage: $0 [web|desktop|ios|android|ports|help] [ARGS...]" >&2
-    echo "Run \`$0 --help\` for what each command does." >&2
-    exit 1
-    ;;
-esac
+pids=()
+# Stops every target and the dev server when one of them is closed, or this
+# script is interrupted.
+stop_all() {
+  trap - EXIT INT TERM
+  for pid in "${pids[@]}"; do
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+  done
+}
+trap stop_all EXIT INT TERM
+
+if [ ! -d "$ROOT/svelte/node_modules" ]; then
+  (cd "$ROOT/svelte" && pnpm install)
+fi
+
+# The Svelte dev server, listening on every address so a simulator or a
+# phone on the network reaches it too, sending /api to the web server.
+echo "bin/dev: the pages on http://localhost:$vite_port"
+(cd "$ROOT/svelte" && WEB_SERVER_URL="http://localhost:$web_port" exec pnpm dev --port "$vite_port" --host) &
+pids+=($!)
+
+# The Tauri CLI's config override: the pages from the dev server above, and
+# no dev server of the CLI's own.
+tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"}}"
+
+for target in "${targets[@]}"; do
+  case "$target" in
+    web)
+      echo "bin/dev: the web server on http://localhost:$web_port"
+      (cd "$ROOT" && PORT="$web_port" exec cargo run -p app_web) &
+      pids+=($!)
+      ;;
+    desktop)
+      echo "bin/dev: the desktop app"
+      (cd "$ROOT/tauri" && exec cargo tauri dev --config "$tauri_config") &
+      pids+=($!)
+      ;;
+    ios|android)
+      echo "bin/dev: the $target app"
+      (
+        cd "$ROOT/tauri"
+        case "$target" in
+          ios) [ -d gen/apple ] || cargo tauri ios init ;;
+          android) [ -d gen/android ] || cargo tauri android init ;;
+        esac
+        exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
+      ) &
+      pids+=($!)
+      ;;
+  esac
+done
+
+# Over when the first target or the dev server stops. The bash macOS ships,
+# 3.2, has no `wait -n`, so this looks in on them.
+while true; do
+  for pid in "${pids[@]}"; do
+    kill -0 "$pid" 2>/dev/null || exit 0
+  done
+  sleep 1
+done
