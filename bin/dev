@@ -133,7 +133,7 @@ for target in "${targets[@]}"; do
       ;;
     desktop)
       echo "bin/dev: the desktop app"
-      (cd "$ROOT/tauri" && exec cargo tauri dev --config "$tauri_config") &
+      (cd "$ROOT/tauri" && SYNC_SERVER_URL="http://localhost:$web_port" exec cargo tauri dev --config "$tauri_config") &
       pids+=($!)
       ;;
     ios|android)
@@ -144,7 +144,7 @@ for target in "${targets[@]}"; do
           ios) [ -d gen/apple ] || cargo tauri ios init ;;
           android) [ -d gen/android ] || cargo tauri android init ;;
         esac
-        exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
+        SYNC_SERVER_URL="http://localhost:$web_port" exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
       ) &
       pids+=($!)
       ;;

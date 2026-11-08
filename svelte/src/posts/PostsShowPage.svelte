@@ -1,7 +1,7 @@
 <!-- One post, at /posts/:id, with its Edit and Delete -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
-  import { postsDelete, postsGet } from "../lib/core/index.js";
+  import { onSynced, postsDelete, postsGet } from "../lib/core/index.js";
   import { navigateToUrl, pathParams } from "../lib/router.js";
   import { postsEditUrl, postsIndexUrl } from "../lib/routes.js";
 
@@ -27,6 +27,7 @@
     }
   }
 
+  $effect(() => onSynced(load));
   load();
 </script>
 

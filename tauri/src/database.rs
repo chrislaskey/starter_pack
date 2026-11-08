@@ -1,12 +1,15 @@
 //! The app's SQLite file: `DATABASE_PATH` when set, as in dev with several
 //! worktrees, else `app.db` in the app data directory Tauri gives the app
-//! on each platform. Opened as the app starts and handed to the commands
-//! as managed state.
+//! on each platform. Opened as the app starts, as a device that syncs
+//! with the web server, its settings brought up to date, and handed to
+//! the commands as managed state.
 
 use std::env;
 use std::path::PathBuf;
 
 use app_core::database::Database;
+use app_core::deployment::{Deployment, Role};
+use app_core::device_settings;
 use tauri::{App, Manager};
 
 pub fn open_and_manage(app: &App) -> Result<(), Box<dyn std::error::Error>> {
@@ -16,6 +19,9 @@ pub fn open_and_manage(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     };
     let database = tauri::async_runtime::block_on(Database::open_sqlite_file(&path))?;
     log::info!("database {}", path.display());
-    app.manage(database);
+    let deployment = Deployment::new(database, Role::Device);
+    let added = tauri::async_runtime::block_on(device_settings::upgrade(&deployment))?;
+    log::info!("device settings up to date, {added} added");
+    app.manage(deployment);
     Ok(())
 }

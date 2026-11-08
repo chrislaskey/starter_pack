@@ -4,7 +4,14 @@
 // first time it is visited, so each page's code stays a chunk of its own.
 import { createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
-import { HOME_PATH, POSTS_EDIT_PATH, POSTS_INDEX_PATH, POSTS_NEW_PATH, POSTS_SHOW_PATH } from "./routes.js";
+import {
+  CONFLICTS_INDEX_PATH,
+  HOME_PATH,
+  POSTS_EDIT_PATH,
+  POSTS_INDEX_PATH,
+  POSTS_NEW_PATH,
+  POSTS_SHOW_PATH,
+} from "./routes.js";
 
 const { navigate, route } = createRouter({
   layout: RemountPageOnNavigation,
@@ -13,6 +20,7 @@ const { navigate, route } = createRouter({
   [POSTS_NEW_PATH]: () => import("../posts/PostsNewPage.svelte"),
   [POSTS_SHOW_PATH]: () => import("../posts/PostsShowPage.svelte"),
   [POSTS_EDIT_PATH]: () => import("../posts/PostsEditPage.svelte"),
+  [CONFLICTS_INDEX_PATH]: () => import("../conflicts/ConflictsIndexPage.svelte"),
 });
 
 /**

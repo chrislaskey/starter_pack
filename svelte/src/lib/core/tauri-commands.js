@@ -1,5 +1,6 @@
 // app_core over the Tauri app's commands (../../../../tauri/src/).
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export function postsList() {
   return invoke("posts_list");
@@ -26,4 +27,48 @@ export function postsUpdate(id, body) {
 /** @param {string} id */
 export function postsDelete(id) {
   return invoke("posts_delete", { id });
+}
+
+/** One sync now: the report, or the error as the message. */
+export function syncRun() {
+  return invoke("sync_run");
+}
+
+/**
+ * Works offline, or online again, which syncs at once.
+ * @param {boolean} offline
+ */
+export function syncSetOffline(offline) {
+  return invoke("sync_set_offline", { offline });
+}
+
+/** Whether working offline, what waits, what conflicted, where the pull is. */
+export function syncStatus() {
+  return invoke("sync_status");
+}
+
+/**
+ * Calls back after every sync with `{report, error}`.
+ * @param {(outcome: unknown) => void} callback
+ * @returns {() => void} stops listening
+ */
+export function onSynced(callback) {
+  const stopping = listen("synced", (event) => callback(event.payload));
+  return () => {
+    stopping.then((stop) => stop());
+  };
+}
+
+export function conflictsList() {
+  return invoke("conflicts_list");
+}
+
+/** @param {string} id */
+export function conflictsReapply(id) {
+  return invoke("conflicts_reapply", { id });
+}
+
+/** @param {string} id */
+export function conflictsLetGo(id) {
+  return invoke("conflicts_let_go", { id });
 }

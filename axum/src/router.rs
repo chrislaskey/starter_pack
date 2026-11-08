@@ -5,15 +5,15 @@
 
 use std::path::Path;
 
-use app_core::database::Database;
+use app_core::deployment::Deployment;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::posts;
+use crate::{posts, sync};
 
-pub fn router(svelte_dist: &Path, database: Database) -> Router {
+pub fn router(svelte_dist: &Path, deployment: Deployment) -> Router {
     let pages = ServeDir::new(svelte_dist).fallback(ServeFile::new(svelte_dist.join("index.html")));
 
     Router::new()
@@ -22,7 +22,9 @@ pub fn router(svelte_dist: &Path, database: Database) -> Router {
             "/api/posts/{id}",
             get(posts::get).put(posts::update).delete(posts::delete),
         )
-        .with_state(database)
+        .route("/api/sync/push", post(sync::push))
+        .route("/api/sync/pull", post(sync::pull))
+        .with_state(deployment)
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
 }
@@ -47,12 +49,15 @@ mod tests {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
-        let database = Database::open_sqlite_in_memory().await.expect("a database");
-        let post = app_core::posts::create(&database, "the first post")
+        let database = app_core::database::Database::open_sqlite_in_memory()
+            .await
+            .expect("a database");
+        let deployment = Deployment::new(database, app_core::deployment::Role::Server);
+        let post = app_core::posts::create(&deployment, "the first post")
             .await
             .expect("a post");
         let post = serde_json::to_value(post).expect("json");
-        (router(&dist, database), post)
+        (router(&dist, deployment), post)
     }
 
     async fn send(
@@ -189,6 +194,51 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = send(&router, Method::DELETE, &path, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sync_push_applies_an_event_and_pull_returns_the_row() {
+        let (router, post) = test_router().await;
+        let event = json!({
+            "id": "01900000-0000-7000-8000-000000000001",
+            "table": "app_posts",
+            "row_id": post["id"],
+            "type": "update",
+            "base_version": 1,
+            "base": { "body": "the first post" },
+            "changes": { "body": "pushed" },
+            "made_at": "2026-11-08T10:00:00Z"
+        });
+        let (status, body) = send(
+            &router,
+            Method::POST,
+            "/api/sync/push",
+            Some(json!({ "events": [event] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["events"][0]["status"], json!("applied"));
+        assert_eq!(body["events"][0]["version"], json!(2));
+        assert_eq!(body["events"][0]["server"]["row"]["body"], json!("pushed"));
+
+        let (status, body) = send(&router, Method::POST, "/api/sync/pull", Some(json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["rows"][0]["table"], json!("app_posts"));
+        assert_eq!(body["rows"][0]["row"]["body"], json!("pushed"));
+        assert_eq!(body["next"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn sync_push_rejects_a_malformed_request() {
+        let (router, _) = test_router().await;
+        let (status, _) = send(
+            &router,
+            Method::POST,
+            "/api/sync/push",
+            Some(json!({ "events": [{ "id": "x" }] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

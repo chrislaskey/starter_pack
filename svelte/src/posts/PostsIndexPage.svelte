@@ -1,7 +1,7 @@
 <!-- Every post, newest first, at /posts -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
-  import { postsList } from "../lib/core/index.js";
+  import { onSynced, postsList } from "../lib/core/index.js";
   import { postsNewUrl, postsShowUrl } from "../lib/routes.js";
 
   let posts = $state([]);
@@ -15,6 +15,7 @@
     }
   }
 
+  $effect(() => onSynced(load));
   load();
 </script>
 

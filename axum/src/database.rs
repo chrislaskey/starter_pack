@@ -1,13 +1,20 @@
 //! The web server's database: what `DATABASE_URL` names, `sqlite:<path>`
 //! relative to this crate, or `postgres://...`; the file under `data/`
-//! when unset.
+//! when unset. Opened as the server, the system of record the apps sync
+//! with.
 
 use std::env;
 use std::path::PathBuf;
 
 use app_core::database::Database;
+use app_core::deployment::{Deployment, Role};
 
-pub async fn open() -> Result<Database, String> {
+pub async fn open() -> Result<Deployment, String> {
+    let database = open_database().await?;
+    Ok(Deployment::new(database, Role::Server))
+}
+
+async fn open_database() -> Result<Database, String> {
     let url = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/app.db".to_string());
     if let Some(path) = url.strip_prefix("sqlite:") {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);

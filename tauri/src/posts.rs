@@ -1,45 +1,68 @@
 //! The posts commands: `app_core::posts` as the pages call it with `invoke`.
-//! A command's name on the wire is resource first, `posts_list`, like the
-//! page's `postsList`, since the names are one namespace across resources. A command's error is the
-//! message the page shows.
+//! A command is named resource first, `posts_list`, like the page's
+//! `postsList`, since the commands are one namespace across resources,
+//! and that is its name on the wire. A command's error is the message the
+//! page shows. A write starts a sync in the background once it is on the
+//! device, see `sync`.
 
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use app_core::database::Database;
+use app_core::deployment::Deployment;
 use app_core::posts::{self, Post};
 
-#[tauri::command(rename = "posts_list")]
-pub async fn list(database: State<'_, Database>) -> Result<Vec<Post>, String> {
-    posts::list(&database)
+use crate::sync;
+
+#[tauri::command]
+pub async fn posts_list(deployment: State<'_, Deployment>) -> Result<Vec<Post>, String> {
+    posts::list(&deployment)
         .await
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(rename = "posts_get")]
-pub async fn get(database: State<'_, Database>, id: Uuid) -> Result<Post, String> {
-    posts::get(&database, id)
+#[tauri::command]
+pub async fn posts_get(deployment: State<'_, Deployment>, id: Uuid) -> Result<Post, String> {
+    posts::get(&deployment, id)
         .await
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command(rename = "posts_create")]
-pub async fn create(database: State<'_, Database>, body: String) -> Result<Post, String> {
-    posts::create(&database, &body)
+#[tauri::command]
+pub async fn posts_create(
+    app: AppHandle,
+    deployment: State<'_, Deployment>,
+    body: String,
+) -> Result<Post, String> {
+    let post = posts::create(&deployment, &body)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    Ok(post)
 }
 
-#[tauri::command(rename = "posts_update")]
-pub async fn update(database: State<'_, Database>, id: Uuid, body: String) -> Result<Post, String> {
-    posts::update(&database, id, &body)
+#[tauri::command]
+pub async fn posts_update(
+    app: AppHandle,
+    deployment: State<'_, Deployment>,
+    id: Uuid,
+    body: String,
+) -> Result<Post, String> {
+    let post = posts::update(&deployment, id, &body)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    Ok(post)
 }
 
-#[tauri::command(rename = "posts_delete")]
-pub async fn delete(database: State<'_, Database>, id: Uuid) -> Result<(), String> {
-    posts::delete(&database, id)
+#[tauri::command]
+pub async fn posts_delete(
+    app: AppHandle,
+    deployment: State<'_, Deployment>,
+    id: Uuid,
+) -> Result<(), String> {
+    posts::delete(&deployment, id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    Ok(())
 }

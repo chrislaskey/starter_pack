@@ -10,11 +10,15 @@ default = ["sqlite"]
 sqlite = ["sqlx/sqlite"]
 # The web server's database when it outgrows a file; never in the Tauri app
 postgres = ["sqlx/postgres"]
+# The HTTP transport to the web server's sync endpoints, for the apps; never on the server
+sync-http = ["dep:reqwest"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 serde = { workspace = true }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "uuid"] }
+serde_json = { workspace = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "json", "uuid"] }
 thiserror = { workspace = true }
 uuid = { version = "1", features = ["v7", "serde"] }
 

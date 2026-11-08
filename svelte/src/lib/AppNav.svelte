@@ -1,5 +1,6 @@
-<!-- The links between the pages, and the theme menu. -->
+<!-- The links between the pages, the theme menu, and inside the app the sync status. -->
 <script>
+  import SyncStatus from "./SyncStatus.svelte";
   import ThemeMenu from "./ThemeMenu.svelte";
   import { homeUrl, postsIndexUrl } from "./routes.js";
 </script>
@@ -10,3 +11,4 @@
   <span class="grow"></span>
   <ThemeMenu />
 </nav>
+<SyncStatus />

@@ -2,8 +2,9 @@
 //! desktop and mobile apps, and for the web server too by default, or
 //! PostgreSQL for the web server, behind the `postgres` feature. Opening
 //! runs the migrations under `migrations/`, so every deployment has the
-//! same tables. Each resource module matches on the variant and calls the
-//! database's own functions, see `sqlite` and `postgres`.
+//! same tables. A core function runs in one `Transaction` on it, and
+//! through the `sql!` macro each statement runs in the database's own SQL
+//! module, see `sqlite` and `postgres`.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -20,6 +21,44 @@ pub enum Database {
     Postgres(sqlx::PgPool),
 }
 
+/// One transaction: what every core function runs in, so a row and the
+/// event that changed it are written together or not at all. The SQL
+/// modules take the connection inside it, never a pool.
+pub enum Transaction {
+    Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
+    #[cfg(feature = "postgres")]
+    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+}
+
+/// Runs one statement of a SQL module on the transaction's connection:
+/// `sql!(tx, posts::list())` is `sqlite::posts::list(connection)` on
+/// SQLite and `postgres::posts::list(connection)` on PostgreSQL, so a
+/// resource's rules are written once and the SQL once per database.
+macro_rules! sql {
+    ($tx:expr, $module:ident :: $function:ident ( $($argument:expr),* $(,)? )) => {
+        match $tx {
+            $crate::database::Transaction::Sqlite(tx) => {
+                $crate::sqlite::$module::$function(&mut **tx, $($argument),*).await
+            }
+            #[cfg(feature = "postgres")]
+            $crate::database::Transaction::Postgres(tx) => {
+                $crate::postgres::$module::$function(&mut **tx, $($argument),*).await
+            }
+        }
+    };
+}
+pub(crate) use sql;
+
+impl Transaction {
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        match self {
+            Transaction::Sqlite(tx) => tx.commit().await,
+            #[cfg(feature = "postgres")]
+            Transaction::Postgres(tx) => tx.commit().await,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DatabaseError {
     #[error("could not open the database: {0}")]
@@ -29,6 +68,14 @@ pub enum DatabaseError {
 }
 
 impl Database {
+    pub async fn begin(&self) -> Result<Transaction, sqlx::Error> {
+        Ok(match self {
+            Database::Sqlite(pool) => Transaction::Sqlite(pool.begin().await?),
+            #[cfg(feature = "postgres")]
+            Database::Postgres(pool) => Transaction::Postgres(pool.begin().await?),
+        })
+    }
+
     /// Opens the SQLite file, creating it and its directory when missing,
     /// and brings it up to date.
     pub async fn open_sqlite_file(path: &Path) -> Result<Database, DatabaseError> {

@@ -57,3 +57,41 @@ export function postsUpdate(id, body) {
 export function postsDelete(id) {
   return send("DELETE", postPath(id));
 }
+
+// The web has nothing to sync: it is the server. The nav shows no sync
+// status, and the conflicts page shows none.
+
+export function syncRun() {
+  return Promise.resolve(null);
+}
+
+export function syncStatus() {
+  return Promise.resolve(null);
+}
+
+/** @param {boolean} _offline */
+export function syncSetOffline(_offline) {
+  return Promise.resolve(null);
+}
+
+/**
+ * @param {(outcome: unknown) => void} _callback
+ * @returns {() => void} stops listening
+ */
+export function onSynced(_callback) {
+  return () => {};
+}
+
+export function conflictsList() {
+  return Promise.resolve([]);
+}
+
+/** @param {string} _id */
+export function conflictsReapply(_id) {
+  return Promise.reject(new Error("nothing to reapply on the web"));
+}
+
+/** @param {string} _id */
+export function conflictsLetGo(_id) {
+  return Promise.reject(new Error("nothing to let go on the web"));
+}
