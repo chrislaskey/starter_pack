@@ -4,16 +4,16 @@
 use tauri::{AppHandle, State};
 
 use app_core::communities::{self, Community, CommunityAndMembership};
-use app_core::deployment::Deployment;
 
+use crate::device_accounts::DeviceAccounts;
 use crate::sync;
 use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn communities_list(
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
 ) -> Result<Vec<CommunityAndMembership>, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     communities::list(&deployment, &user)
         .await
         .map_err(|error| error.to_string())
@@ -22,10 +22,10 @@ pub async fn communities_list(
 #[tauri::command]
 pub async fn communities_create(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     name: String,
 ) -> Result<Community, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     let community = communities::create(&deployment, &user, &name)
         .await
         .map_err(|error| error.to_string())?;

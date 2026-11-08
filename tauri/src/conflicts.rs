@@ -5,13 +5,14 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use app_core::conflicts::{self, Conflict};
-use app_core::deployment::Deployment;
 
+use crate::device_accounts::DeviceAccounts;
 use crate::sync;
 use crate::users::signed_in;
 
 #[tauri::command]
-pub async fn conflicts_list(deployment: State<'_, Deployment>) -> Result<Vec<Conflict>, String> {
+pub async fn conflicts_list(device: State<'_, DeviceAccounts>) -> Result<Vec<Conflict>, String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
     conflicts::list(&deployment)
         .await
         .map_err(|error| error.to_string())
@@ -20,10 +21,10 @@ pub async fn conflicts_list(deployment: State<'_, Deployment>) -> Result<Vec<Con
 #[tauri::command]
 pub async fn conflicts_reapply(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     id: Uuid,
 ) -> Result<(), String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     conflicts::reapply(&deployment, &user, id)
         .await
         .map_err(|error| error.to_string())?;
@@ -32,7 +33,8 @@ pub async fn conflicts_reapply(
 }
 
 #[tauri::command]
-pub async fn conflicts_let_go(deployment: State<'_, Deployment>, id: Uuid) -> Result<(), String> {
+pub async fn conflicts_let_go(device: State<'_, DeviceAccounts>, id: Uuid) -> Result<(), String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
     conflicts::let_go(&deployment, id)
         .await
         .map_err(|error| error.to_string())

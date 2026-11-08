@@ -95,13 +95,14 @@ apps send the token as `Authorization: Bearer`, a browser the cookie a
 sign-in set. A device keeps who signed in and their token as one device
 setting, `signed_in`, null until a sign-in, and `users::signed_in` reads
 it before every command; a sync with nobody signed in does nothing. A
-sign-out tells the server to forget the token, then drops the device's
-whole copy of the data; while a change is pending or in conflict it
-does nothing and answers the counts, `SignOut::ChangesWouldBeLost`, so
-the app asks the person, who views the changes (`pending_changes::list`
-and `conflicts::list`) or signs out `losing_changes`. A sign-in drops
-whatever the device held too, so the first sync pulls the person's own
-data from nothing.
+sign-out tells the server to forget the token and clears the setting;
+the data stays, pending and conflicted changes included, so a sign-in
+by the same user resumes from the cursor. Core writes into whatever
+database it is given and never deletes one: which file a user signs
+into, and when a file goes, is the app's business, a file per account
+on a device, see `device-accounts.md`. A sign-in's two halves,
+`accounts::sign_in_through` and `accounts::keep_signed_in`, are
+callable apart for that.
 There is no default user on any deployment.
 
 ## Columns on every synced table

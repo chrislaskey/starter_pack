@@ -1,15 +1,16 @@
 //! The desktop and mobile app: one window showing the Svelte pages
 //! (`../svelte`), and a Tauri command per `app_core` function the pages
 //! call, one module per resource, each command named resource first,
-//! `posts_list`, since the commands are one namespace. The app opens its
-//! own SQLite file, see `database`, the commands read and write it as the
-//! user signed in, see `users` and `accounts`, and it syncs with the web
+//! `posts_list`, since the commands are one namespace. The app keeps a
+//! SQLite file per account signed in on it and one of them active, see
+//! `device_accounts`; the other commands read and write the active one
+//! as its user, see `users` and `accounts`, and it syncs with the web
 //! server, see `sync`.
 
 mod accounts;
 mod communities;
 mod conflicts;
-mod database;
+mod device_accounts;
 mod memberships;
 mod pending_changes;
 mod posts;
@@ -22,7 +23,7 @@ use tauri::{Manager, WindowEvent};
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            database::open_and_manage(app)?;
+            device_accounts::open_and_manage(app)?;
             sync::setup(app)?;
             Ok(())
         })
@@ -51,7 +52,11 @@ pub fn run() {
             conflicts::conflicts_list,
             conflicts::conflicts_reapply,
             conflicts::conflicts_let_go,
-            pending_changes::pending_changes_list
+            pending_changes::pending_changes_list,
+            device_accounts::device_accounts_list,
+            device_accounts::device_accounts_switch,
+            device_accounts::device_accounts_deactivate,
+            device_accounts::device_accounts_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -16,6 +16,7 @@ axum/      app_web, the web server: app_core over HTTP under /api, and svelte/di
 tauri/     app_tauri, the desktop and mobile app: app_core behind Tauri commands
 svelte/    the pages, one Svelte app the web server serves and the Tauri app bundles
 bin/dev    starts a deployment in dev mode
+bin/reset  deletes the local SQLite files and drops the dev PostgreSQL database
 phoenix/   the Phoenix version this one replaces in stages, kept as the reference
 ```
 
@@ -44,8 +45,9 @@ Inside the Tauri app each is a command of the same name
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
 | `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 201 with the user and the token |
 | `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
-| `accountsSignOut(losingChanges)` | `DELETE /api/accounts/sign-out`, 204; `losingChanges` is for the apps |
+| `accountsSignOut()` | `DELETE /api/accounts/sign-out`, 204 |
 | `pendingChangesList()` | none: the web has nothing waiting |
+| `deviceAccountsList()`, `deviceAccountsSwitch(userId)`, `deviceAccountsDeactivate()`, `deviceAccountsRemove(userId, losingChanges)` | none: the web keeps no accounts, see "Accounts on a device" |
 
 Both call the function in `app_core::posts` (`core/src/posts.rs`),
 `posts::list`, `posts::get` and so on, named through their module as the
@@ -89,14 +91,12 @@ localhost). A request with no token, or a token the server does not
 know, is 401, whatever it asks for; the pages send a visitor to the
 sign-in page before showing anything that needs one (`svelte/src/lib/router.js`).
 
-A device signs up or in through the same transport it syncs over, keeps
-who signed in and their token as the `signed_in` device setting, and
-drops its copy of the data at a sign-out, so the next person starts from
-nothing. A sign-out syncs first; while a change still has not reached
-the server, or was not kept by it, the app answers with the counts
-instead of signing out, and the nav asks the person, who views the
-changes on `/conflicts` or signs out anyway, losing them. Nobody acts
-until someone signs in: there is no default user anywhere. To try a second user over HTTP:
+A device signs up or in through the same transport it syncs over and
+keeps who signed in and their token as the `signed_in` device setting.
+A sign-out syncs first, then tells the server to forget the token and
+clears the setting; the data stays, pending changes included, so
+signing in again resumes from the cursor. Nobody acts until someone
+signs in: there is no default user anywhere. To try a second user over HTTP:
 
 ```sh
 curl -H "Content-Type: application/json" \
@@ -162,10 +162,16 @@ Where each deployment's file is:
   `DATABASE_URL=postgres://postgres@localhost/starter_pack bin/dev` runs
   the web on PostgreSQL while the apps keep their SQLite files, the
   mix the sync will face.
-* The Tauri app: `DATABASE_PATH` when set, else `app.db` in the app data
-  directory Tauri gives it, under `~/Library/Application Support` on macOS
-  and inside the app's sandbox on a phone. Set `DATABASE_PATH` in dev to
-  keep worktrees apart.
+* The Tauri app: a file per account under `accounts/`, listed in
+  `device.db`, in `DATA_DIR` when set, else the app data directory Tauri
+  gives it, under `~/Library/Application Support` on macOS and inside the
+  app's sandbox on a phone. Set `DATA_DIR` in dev to keep worktrees
+  apart. See "Accounts on a device".
+
+`bin/reset` deletes every one of these SQLite files and drops the dev
+PostgreSQL database, creating it again empty, with the servers stopped,
+so the next start rebuilds each from nothing; `--dry-run` lists what it
+would do.
 
 Every resource test in `core/` runs through `with_each_database`
 (`core/src/database.rs`): against an in-memory SQLite database always,
@@ -259,6 +265,7 @@ shows the page at the path, swapped in place:
 | `/posts/:id/edit` | `posts/PostsEditPage.svelte` |
 | `/communities` | `communities/CommunitiesIndexPage.svelte`, to create, join and leave |
 | `/conflicts` | `conflicts/ConflictsIndexPage.svelte`, inside the apps: the changes waiting to reach the server and those it did not keep |
+| `/accounts` | `accounts/AccountsIndexPage.svelte`, inside the apps: the accounts on the device, to switch, add and remove |
 
 The New and Edit pages share `posts/PostsForm.svelte`, the body and a
 checkbox per community the person is in. A write that worked navigates
@@ -266,8 +273,27 @@ to the post, or the list after a delete, through `navigateToUrl` in
 `router.js`. The post page shows Edit and Delete to the owner, which it
 tells by `usersMe()`, asked once per visit and kept in
 `svelte/src/lib/current_user.js`; the nav shows who is signed in with
-Sign out, or Sign in and Sign up, and asks before a sign-out that would
-lose changes (`accounts/AccountsSignOutDialog.svelte`).
+Sign out, or Sign in and Sign up.
+
+### Accounts on a device
+
+The app keeps the accounts signed in on it, each in a SQLite file of
+its own under `accounts/`, listed in `device.db`, and one of them
+active, whose file every command reads and writes (`tauri/src/device_accounts.rs`,
+the design in `docs/design/device-accounts.md`). The accounts page,
+`/accounts`, lists them: the active one, the others to switch to at once
+or, signed out, to sign in to with the password, each with Remove from
+device, and Add account. Adding or signing in closes the active account
+first, so no account's file is open while the sign-in page shows, and
+the server's answer goes into the file of the user it names. A sign-out
+closes the account and keeps its file; Remove from device deletes it,
+after a confirmation, and asks again when a change in it has not
+reached the server (`accounts/AccountsRemoveDialog.svelte`). Only the
+active account syncs. A sync answered 401, the token expired or deleted
+elsewhere, signs the account out on the device, data kept. At most 100
+accounts. At start every account's file is brought up to date, orphan
+rows and files are swept, and the last active account is opened again.
+The web has none of this: one browser session, sign in and sign out.
 
 The paths are real paths, named once in `svelte/src/lib/routes.js`, which
 pages link through. Every path is reloadable: the dev server, the web
@@ -338,7 +364,7 @@ cargo run -p app_web                        # http://localhost:4000, serving sve
 
 The web server reads `PORT`, `DATABASE_URL` and `SVELTE_DIST` (default
 `svelte/dist`), and logs with `RUST_LOG` (default
-`app_web=info,tower_http=info`). The app reads `DATABASE_PATH` and
+`app_web=info,tower_http=info`). The app reads `DATA_DIR` and
 `SYNC_SERVER_URL`.
 `pnpm check` in `svelte/` type-checks the pages.
 

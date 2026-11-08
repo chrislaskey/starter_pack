@@ -8,17 +8,17 @@
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use app_core::deployment::Deployment;
 use app_core::posts::{self, Post, PostWithOwnerAndCommunities};
 
+use crate::device_accounts::DeviceAccounts;
 use crate::sync;
 use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn posts_list(
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
 ) -> Result<Vec<PostWithOwnerAndCommunities>, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     posts::list(&deployment, &user)
         .await
         .map_err(|error| error.to_string())
@@ -26,10 +26,10 @@ pub async fn posts_list(
 
 #[tauri::command]
 pub async fn posts_get(
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     id: Uuid,
 ) -> Result<PostWithOwnerAndCommunities, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     posts::get(&deployment, &user, id)
         .await
         .map_err(|error| error.to_string())
@@ -38,11 +38,11 @@ pub async fn posts_get(
 #[tauri::command]
 pub async fn posts_create(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     body: String,
     community_ids: Vec<Uuid>,
 ) -> Result<Post, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     let post = posts::create(&deployment, &user, &body, &community_ids)
         .await
         .map_err(|error| error.to_string())?;
@@ -53,12 +53,12 @@ pub async fn posts_create(
 #[tauri::command]
 pub async fn posts_update(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     id: Uuid,
     body: String,
     community_ids: Vec<Uuid>,
 ) -> Result<Post, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     let post = posts::update(&deployment, &user, id, &body, &community_ids)
         .await
         .map_err(|error| error.to_string())?;
@@ -69,10 +69,10 @@ pub async fn posts_update(
 #[tauri::command]
 pub async fn posts_delete(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     id: Uuid,
 ) -> Result<(), String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     posts::delete(&deployment, &user, id)
         .await
         .map_err(|error| error.to_string())?;

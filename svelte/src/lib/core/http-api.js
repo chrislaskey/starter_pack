@@ -55,12 +55,31 @@ export function accountsSignIn(email, password) {
   return send("POST", "/api/accounts/sign-in", { email, password }).then(({ user }) => user);
 }
 
-/**
- * The web has nothing that could be lost: it is the server.
- * @param {boolean} _losingChanges
- */
-export function accountsSignOut(_losingChanges = false) {
-  return send("DELETE", "/api/accounts/sign-out").then(() => ({ outcome: "signed_out" }));
+export function accountsSignOut() {
+  return send("DELETE", "/api/accounts/sign-out");
+}
+
+// The web is one browser session: sign in and sign out, no accounts kept
+// on the device. The accounts page is never linked.
+
+export const hasDeviceAccounts = false;
+
+export function deviceAccountsList() {
+  return Promise.resolve([]);
+}
+
+/** @param {string} _userId */
+export function deviceAccountsSwitch(_userId) {
+  return Promise.reject(new Error("no accounts are kept on the web"));
+}
+
+export function deviceAccountsDeactivate() {
+  return Promise.resolve(null);
+}
+
+/** @param {string} _userId @param {boolean} _losingChanges */
+export function deviceAccountsRemove(_userId, _losingChanges) {
+  return Promise.reject(new Error("no accounts are kept on the web"));
 }
 
 export function postsList() {

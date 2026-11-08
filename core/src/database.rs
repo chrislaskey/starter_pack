@@ -76,6 +76,16 @@ impl Database {
         })
     }
 
+    /// Closes the connections, waiting for the ones in use to finish, so
+    /// a SQLite file can be deleted or opened again.
+    pub async fn close(&self) {
+        match self {
+            Database::Sqlite(pool) => pool.close().await,
+            #[cfg(feature = "postgres")]
+            Database::Postgres(pool) => pool.close().await,
+        }
+    }
+
     /// Opens the SQLite file, creating it and its directory when missing,
     /// and brings it up to date.
     pub async fn open_sqlite_file(path: &Path) -> Result<Database, DatabaseError> {

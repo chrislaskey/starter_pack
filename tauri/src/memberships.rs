@@ -5,19 +5,19 @@
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use app_core::deployment::Deployment;
 use app_core::memberships::{self, Membership};
 
+use crate::device_accounts::DeviceAccounts;
 use crate::sync;
 use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn memberships_join(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     community_id: Uuid,
 ) -> Result<Membership, String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     let membership = memberships::join(&deployment, &user, community_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -28,10 +28,10 @@ pub async fn memberships_join(
 #[tauri::command]
 pub async fn memberships_leave(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     community_id: Uuid,
 ) -> Result<(), String> {
-    let user = signed_in(&deployment).await?;
+    let (deployment, user) = signed_in(&device).await?;
     memberships::leave(&deployment, &user, community_id)
         .await
         .map_err(|error| error.to_string())?;

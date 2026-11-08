@@ -1,5 +1,6 @@
-<!-- Signing in with an email and a password, at /accounts/sign-in; done,
-     the person sees the posts -->
+<!-- Signing in with an email and a password, at /accounts/sign-in, the
+     email filled in from ?email= for an account signed out on this
+     device; done, the person sees the posts -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import { accountsSignIn } from "../lib/core/index.js";
@@ -8,7 +9,7 @@
   import { accountsSignUpUrl, postsIndexUrl } from "../lib/routes.js";
   import AccountsForm from "./AccountsForm.svelte";
 
-  let email = $state("");
+  let email = $state(new URLSearchParams(window.location.search).get("email") ?? "");
   let password = $state("");
   let error = $state("");
   let busy = $state(false);

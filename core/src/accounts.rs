@@ -2,20 +2,22 @@
 //! password. The server does the work: a sign-up writes the user's row,
 //! their password hash and a token in one transaction, a sign-in checks
 //! the password and makes a token, a sign-out deletes the token. A
-//! device asks the server through the sync transport, keeps who signed
-//! in and their token as the `signed_in` device setting, and drops its
-//! copy of the data at a sign-out, so the next person starts from
-//! nothing. The web server keeps a browser signed in with the same token
-//! in a cookie, see `axum/src/current_user.rs`.
+//! device asks the server through the sync transport and keeps who
+//! signed in and their token as the `signed_in` device setting. A
+//! sign-out clears the setting and keeps the data, so signing in again
+//! resumes from the cursor; which file a device signs into, and when a
+//! file is deleted, is the app's business, see
+//! `docs/design/device-accounts.md`. The web server keeps a browser
+//! signed in with the same token in a cookie, see
+//! `axum/src/current_user.rs`.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::credentials::{self, CredentialError};
-use crate::database::sql;
 use crate::deployment::{Deployment, Role};
 use crate::device_settings::{self, DeviceSettingsError, SIGNED_IN};
-use crate::sync::{self, SyncError, Transport};
+use crate::sync::{SyncError, Transport};
 use crate::tokens;
 use crate::users::{self, SignedIn, User, UserError};
 
@@ -25,18 +27,6 @@ use crate::users::{self, SignedIn, User, UserError};
 pub struct Session {
     pub user: User,
     pub token: String,
-}
-
-/// What a sign-out on a device answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum SignOut {
-    /// Nobody is signed in on the device any more.
-    SignedOut,
-    /// Nothing was done: these changes have not reached the server, or
-    /// were not kept by it, and the sign-out would lose them. The app
-    /// asks the person, who signs out losing them or keeps them.
-    ChangesWouldBeLost { pending: i64, conflicts: i64 },
 }
 
 #[derive(Debug, Error)]
@@ -113,8 +103,8 @@ pub async fn sign_out(deployment: &Deployment, token: &str) -> Result<(), Accoun
     Ok(())
 }
 
-/// Signs up on the server through the transport, then signs in on this
-/// device, see `sign_in_on_device`.
+/// Signs up on the server through the transport, `sign_up_through`,
+/// then keeps the answer on this device, `keep_signed_in`.
 pub async fn sign_up_on_device<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -122,14 +112,14 @@ pub async fn sign_up_on_device<T: Transport>(
     password: &str,
 ) -> Result<User, AccountError> {
     nobody_signed_in(deployment).await?;
-    let session = transport.sign_up(email, password).await?;
+    let session = sign_up_through(transport, email, password).await?;
     keep_signed_in(deployment, session).await
 }
 
-/// Signs in on the server through the transport and keeps the answer on
-/// this device: the user's row, and the setting naming them with their
-/// token. Whatever the device held before goes, so the first sync pulls
-/// the user's own data from nothing.
+/// Signs in on the server through the transport, `sign_in_through`,
+/// then keeps the answer on this device, `keep_signed_in`. The two
+/// halves are callable apart, for an app that chooses the device
+/// database by the user the server answered.
 pub async fn sign_in_on_device<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -137,45 +127,84 @@ pub async fn sign_in_on_device<T: Transport>(
     password: &str,
 ) -> Result<User, AccountError> {
     nobody_signed_in(deployment).await?;
-    let session = match transport.sign_in(email, password).await {
-        Err(SyncError::Unauthorized) => return Err(AccountError::InvalidEmailOrPassword),
-        answer => answer?,
-    };
+    let session = sign_in_through(transport, email, password).await?;
     keep_signed_in(deployment, session).await
 }
 
-/// Tells the server to forget the device's token, then drops the
-/// device's copy of the data and the setting, so nobody is signed in.
-/// While a change has not reached the server, or was not kept by it,
-/// nothing is done and the counts are answered instead, unless the
-/// person chose to sign out `losing_changes`.
+/// Asks the server, through the transport, to register the user and
+/// sign them in: the user and a token, kept nowhere yet.
+pub async fn sign_up_through<T: Transport>(
+    transport: &T,
+    email: &str,
+    password: &str,
+) -> Result<Session, AccountError> {
+    Ok(transport.sign_up(email, password).await?)
+}
+
+/// Asks the server, through the transport, to sign the user in: the
+/// user and a token, kept nowhere yet.
+pub async fn sign_in_through<T: Transport>(
+    transport: &T,
+    email: &str,
+    password: &str,
+) -> Result<Session, AccountError> {
+    match transport.sign_in(email, password).await {
+        Err(SyncError::Unauthorized) => Err(AccountError::InvalidEmailOrPassword),
+        answer => Ok(answer?),
+    }
+}
+
+/// Keeps a sign-in on this device: the user's row, and the setting
+/// naming them with their token. Whatever the device holds stays, so a
+/// sync resumes from its cursor; the app hands a user their own
+/// database, never another's.
+pub async fn keep_signed_in(
+    deployment: &Deployment,
+    session: Session,
+) -> Result<User, AccountError> {
+    if deployment.role != Role::Device {
+        return Err(AccountError::DeviceOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    users::upsert_in(&mut tx, &session.user).await?;
+    let signed_in = SignedIn {
+        user_id: session.user.id,
+        token: session.token,
+    };
+    device_settings::set(&mut tx, SIGNED_IN, &Some(signed_in)).await?;
+    tx.commit().await?;
+    Ok(session.user)
+}
+
+/// Tells the server to forget the device's token and clears the setting,
+/// so nobody is signed in. The data stays, pending and conflicted
+/// changes included, for the next sign-in to resume from; a token the
+/// server no longer knows is already forgotten.
 pub async fn sign_out_on_device<T: Transport>(
     deployment: &Deployment,
     transport: &T,
-    losing_changes: bool,
-) -> Result<SignOut, AccountError> {
+) -> Result<(), AccountError> {
     if deployment.role != Role::Device {
         return Err(AccountError::DeviceOnly);
     }
     let (_user, token) = users::signed_in_with_token(deployment).await?;
-    if !losing_changes {
-        let status = sync::status(deployment).await?;
-        if status.pending > 0 || status.conflicts > 0 {
-            return Ok(SignOut::ChangesWouldBeLost {
-                pending: status.pending,
-                conflicts: status.conflicts,
-            });
-        }
-    }
     match transport.sign_out(&token).await {
         Ok(()) | Err(SyncError::Unauthorized) => {}
         Err(error) => return Err(error.into()),
     }
+    forget_signed_in(deployment).await
+}
+
+/// Clears the setting without telling the server, when the server has
+/// already forgotten the token: it answered 401. The data stays.
+pub async fn forget_signed_in(deployment: &Deployment) -> Result<(), AccountError> {
+    if deployment.role != Role::Device {
+        return Err(AccountError::DeviceOnly);
+    }
     let mut tx = deployment.begin().await?;
-    sql!(&mut tx, sync_state::wipe())?;
     device_settings::set(&mut tx, SIGNED_IN, &None::<SignedIn>).await?;
     tx.commit().await?;
-    Ok(SignOut::SignedOut)
+    Ok(())
 }
 
 async fn nobody_signed_in(deployment: &Deployment) -> Result<(), AccountError> {
@@ -189,24 +218,11 @@ async fn nobody_signed_in(deployment: &Deployment) -> Result<(), AccountError> {
     }
 }
 
-async fn keep_signed_in(deployment: &Deployment, session: Session) -> Result<User, AccountError> {
-    let mut tx = deployment.begin().await?;
-    sql!(&mut tx, sync_state::wipe())?;
-    users::upsert_in(&mut tx, &session.user).await?;
-    let signed_in = SignedIn {
-        user_id: session.user.id,
-        token: session.token,
-    };
-    device_settings::set(&mut tx, SIGNED_IN, &Some(signed_in)).await?;
-    tx.commit().await?;
-    Ok(session.user)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::database::with_each_database;
-    use crate::sync::InProcess;
+    use crate::sync::{self, InProcess};
     use crate::{posts, users};
 
     const PASSWORD: &str = "correct horse battery";
@@ -318,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_a_device_signs_up_syncs_and_signs_out_from_nothing_to_nothing() {
+    async fn accounts_a_device_signs_up_syncs_signs_out_and_resumes_on_the_next_sign_in() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let transport = InProcess { server: &server };
@@ -340,18 +356,9 @@ mod tests {
             let post = posts::create(&device, &alice, "from the device", &[])
                 .await
                 .expect("a post");
-            assert_eq!(
-                sign_out_on_device(&device, &transport, false)
-                    .await
-                    .expect("asked"),
-                SignOut::ChangesWouldBeLost {
-                    pending: 1,
-                    conflicts: 0
-                },
-                "a change waits, so nothing was done"
-            );
-            assert_eq!(users::signed_in(&device).await.expect("still alice"), alice);
             sync::run(&device, &transport).await.expect("synced");
+            let cursor = sync::status(&device).await.expect("status").cursor;
+            assert!(cursor.is_some(), "the first pull set the cursor");
             assert_eq!(
                 posts::get(&server, &alice, post.id)
                     .await
@@ -364,12 +371,9 @@ mod tests {
             let (_, token) = users::signed_in_with_token(&device)
                 .await
                 .expect("the token");
-            assert_eq!(
-                sign_out_on_device(&device, &transport, false)
-                    .await
-                    .expect("signed out"),
-                SignOut::SignedOut
-            );
+            sign_out_on_device(&device, &transport)
+                .await
+                .expect("signed out");
             assert!(matches!(
                 users::signed_in(&device).await,
                 Err(UserError::NotSignedIn)
@@ -383,29 +387,39 @@ mod tests {
                 posts::get_in(&mut tx, post.id)
                     .await
                     .expect("looked")
-                    .is_none(),
-                "the device's copy is gone"
-            );
-            assert!(
-                users::get_in(&mut tx, alice.id)
-                    .await
-                    .expect("looked")
-                    .is_none()
+                    .is_some(),
+                "the device's copy stays"
             );
             tx.commit().await.expect("committed");
+            assert!(
+                sync::run(&device, &transport)
+                    .await
+                    .expect("ran")
+                    .signed_out,
+                "and nothing syncs meanwhile"
+            );
 
             let again = sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD)
                 .await
                 .expect("signed in again");
             assert_eq!(again, alice);
+            assert_eq!(
+                sync::status(&device).await.expect("status").cursor,
+                cursor,
+                "the cursor was kept through the sign-out, so the sync resumes"
+            );
             let report = sync::run(&device, &transport).await.expect("synced");
-            assert_eq!(report.pulled, 2, "her row and her post");
+            assert!(!report.resynced);
+            assert_eq!(
+                posts::list(&device, &alice).await.expect("her posts").len(),
+                1
+            );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn accounts_a_device_signs_out_losing_changes_when_the_person_chose_to() {
+    async fn accounts_a_sign_out_keeps_a_pending_change_for_the_next_sign_in_to_push() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let transport = InProcess { server: &server };
@@ -413,25 +427,66 @@ mod tests {
             let alice = sign_up_on_device(&device, &transport, "alice@example.com", PASSWORD)
                 .await
                 .expect("signed up");
-            let post = posts::create(&device, &alice, "never synced", &[])
+            let post = posts::create(&device, &alice, "written, then signed out", &[])
                 .await
                 .expect("a post");
-            assert_eq!(
-                sign_out_on_device(&device, &transport, true)
-                    .await
-                    .expect("signed out"),
-                SignOut::SignedOut
+            sign_out_on_device(&device, &transport)
+                .await
+                .expect("signed out");
+            assert!(
+                posts::get(&server, &alice, post.id).await.is_err(),
+                "not on the server yet"
             );
+            assert_eq!(sync::status(&device).await.expect("status").pending, 1);
+
+            sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed in again");
+            let report = sync::run(&device, &transport).await.expect("synced");
+            assert_eq!(report.pushed, 1);
+            assert!(posts::get(&server, &alice, post.id).await.is_ok());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_the_two_halves_of_a_sign_in_and_a_401_forgotten() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let transport = InProcess { server: &server };
+            let session = sign_up_through(&transport, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed up on the server");
+            let device = users::tests::device().await;
             assert!(matches!(
                 users::signed_in(&device).await,
                 Err(UserError::NotSignedIn)
             ));
-            assert!(
-                posts::get(&server, &alice, post.id).await.is_err(),
-                "the change never reached the server"
-            );
-            let status = sync::status(&device).await.expect("the status");
-            assert_eq!((status.pending, status.conflicts), (0, 0), "and is gone");
+            let alice = keep_signed_in(&device, session.clone())
+                .await
+                .expect("kept");
+            assert_eq!(users::signed_in(&device).await.expect("alice"), alice);
+
+            sign_out(&server, &session.token)
+                .await
+                .expect("the token deleted elsewhere");
+            let error = sync::run(&device, &transport)
+                .await
+                .expect_err("the server no longer knows the token");
+            assert!(matches!(error, SyncError::Unauthorized));
+            forget_signed_in(&device).await.expect("forgotten");
+            assert!(matches!(
+                users::signed_in(&device).await,
+                Err(UserError::NotSignedIn)
+            ));
+            let session = sign_in_through(&transport, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed in on the server");
+            assert_eq!(session.user, alice);
+            let error = sign_in_through(&transport, "alice@example.com", "wrong horse battery")
+                .await
+                .expect_err("wrong");
+            assert!(matches!(error, AccountError::InvalidEmailOrPassword));
         })
         .await;
     }

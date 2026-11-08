@@ -1,19 +1,16 @@
 <!-- The links between the pages, who is signed in with Sign out, or Sign
-     in and Sign up, the theme menu, and inside the app the sync status.
-     A sign-out that would lose changes asks first, AccountsSignOutDialog. -->
+     in and Sign up, the theme menu, and inside the app the sync status
+     and the accounts on the device. -->
 <script>
-  import AccountsSignOutDialog from "../accounts/AccountsSignOutDialog.svelte";
   import SyncStatus from "./SyncStatus.svelte";
   import ThemeMenu from "./ThemeMenu.svelte";
-  import { accountsSignOut } from "./core/index.js";
+  import { accountsSignOut, hasDeviceAccounts } from "./core/index.js";
   import { currentUser, forgetCurrentUser } from "./current_user.js";
   import { navigateToUrl } from "./router.js";
-  import { accountsSignInUrl, accountsSignUpUrl, communitiesIndexUrl, homeUrl, postsIndexUrl } from "./routes.js";
+  import { accountsIndexUrl, accountsSignInUrl, accountsSignUpUrl, communitiesIndexUrl, homeUrl, postsIndexUrl } from "./routes.js";
 
   /** @type {{email: string} | null} */
   let me = $state(null);
-  /** @type {{pending: number, conflicts: number} | null} */
-  let loss = $state(null);
   let busy = $state(false);
   let error = $state("");
 
@@ -22,21 +19,14 @@
     () => (me = null),
   );
 
-  /** @param {boolean} losingChanges */
-  async function signOut(losingChanges) {
+  async function signOut() {
     error = "";
     busy = true;
     try {
-      const answer = await accountsSignOut(losingChanges);
-      if (answer.outcome === "changes_would_be_lost") {
-        loss = { pending: answer.pending, conflicts: answer.conflicts };
-        return;
-      }
-      loss = null;
+      await accountsSignOut();
       forgetCurrentUser();
-      await navigateToUrl(accountsSignInUrl());
+      await navigateToUrl(hasDeviceAccounts ? accountsIndexUrl() : accountsSignInUrl());
     } catch (problem) {
-      loss = null;
       error = String(problem);
     } finally {
       busy = false;
@@ -52,9 +42,16 @@
   {/if}
   <span class="grow"></span>
   {#if me}
-    <span class="muted text-sm">{me.email}</span>
-    <button type="button" class="btn btn-ghost btn-sm" onclick={() => signOut(false)} disabled={busy}>Sign out</button>
+    {#if hasDeviceAccounts}
+      <a href={accountsIndexUrl()} class="link text-sm">{me.email}</a>
+    {:else}
+      <span class="muted text-sm">{me.email}</span>
+    {/if}
+    <button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={busy}>Sign out</button>
   {:else}
+    {#if hasDeviceAccounts}
+      <a href={accountsIndexUrl()} class="link">Accounts</a>
+    {/if}
     <a href={accountsSignInUrl()} class="link">Sign in</a>
     <a href={accountsSignUpUrl()} class="link">Sign up</a>
   {/if}
@@ -65,5 +62,4 @@
 {/if}
 {#if me}
   <SyncStatus />
-  <AccountsSignOutDialog {loss} {busy} onsignout={() => signOut(true)} oncancel={() => (loss = null)} />
 {/if}

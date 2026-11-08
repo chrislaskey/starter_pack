@@ -1,19 +1,23 @@
-//! The user signed in on this device, for every command that acts as
-//! them, see `app_core::users::signed_in`, and as the pages ask for it:
-//! an error, "Nobody is signed in", until someone does, see `accounts`.
+//! The user signed in on the active account, for every command that acts
+//! as them, with the account's deployment, see `device_accounts`; an
+//! error, "Nobody is signed in", until someone is active.
 
 use tauri::State;
 
 use app_core::deployment::Deployment;
 use app_core::users::{self, User};
 
-pub async fn signed_in(deployment: &Deployment) -> Result<User, String> {
-    users::signed_in(deployment)
+use crate::device_accounts::DeviceAccounts;
+
+pub async fn signed_in(device: &DeviceAccounts) -> Result<(Deployment, User), String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
+    let user = users::signed_in(&deployment)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok((deployment, user))
 }
 
 #[tauri::command]
-pub async fn users_me(deployment: State<'_, Deployment>) -> Result<User, String> {
-    signed_in(&deployment).await
+pub async fn users_me(device: State<'_, DeviceAccounts>) -> Result<User, String> {
+    Ok(signed_in(&device).await?.1)
 }

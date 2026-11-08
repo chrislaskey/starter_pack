@@ -24,14 +24,43 @@ export function accountsSignIn(email, password) {
 }
 
 /**
- * Syncs what waits first, then signs out and drops the device's copy of
- * the data. Answers `{outcome: "signed_out"}`, or, when a change would be
- * lost and the person has not chosen to lose it,
- * `{outcome: "changes_would_be_lost", pending, conflicts}` with nothing done.
- * @param {boolean} losingChanges the person chose to sign out losing them
+ * Syncs what waits first, then signs out and closes the account, whose
+ * data stays on the device for the next sign-in.
  */
-export function accountsSignOut(losingChanges = false) {
-  return invoke("accounts_sign_out", { losingChanges });
+export function accountsSignOut() {
+  return invoke("accounts_sign_out");
+}
+
+/** The app keeps the accounts signed in on this device, see deviceAccountsList. */
+export const hasDeviceAccounts = true;
+
+export function deviceAccountsList() {
+  return invoke("device_accounts_list");
+}
+
+/**
+ * Makes a signed-in account the active one, which then syncs.
+ * @param {string} userId
+ */
+export function deviceAccountsSwitch(userId) {
+  return invoke("device_accounts_switch", { userId });
+}
+
+/** Closes the active account, which stays signed in, before adding another. */
+export function deviceAccountsDeactivate() {
+  return invoke("device_accounts_deactivate");
+}
+
+/**
+ * Removes an account and its data from this device. Answers
+ * `{outcome: "removed"}`, or, when a change would be lost and the person
+ * has not chosen to lose it, `{outcome: "changes_would_be_lost", pending,
+ * conflicts}` with nothing done.
+ * @param {string} userId
+ * @param {boolean} losingChanges
+ */
+export function deviceAccountsRemove(userId, losingChanges) {
+  return invoke("device_accounts_remove", { userId, losingChanges });
 }
 
 export function postsList() {

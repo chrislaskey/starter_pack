@@ -749,7 +749,7 @@ pub struct Report {
 
 /// Where a device stands: whether it works offline, what waits, what
 /// conflicted, where the pull is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub signed_in: bool,
     pub offline: bool,
@@ -2414,10 +2414,10 @@ pub(crate) mod tests {
         conflicts::let_go(&b, conflicts::list(&b).await.expect("one")[0].id)
             .await
             .expect("let go");
-        accounts::sign_out_on_device(&b, &server, false)
+        accounts::sign_out_on_device(&b, &server)
             .await
             .expect("signed out on b");
-        accounts::sign_out_on_device(&a, &server, false)
+        accounts::sign_out_on_device(&a, &server)
             .await
             .expect("signed out on a");
     }

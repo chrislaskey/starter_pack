@@ -5,6 +5,7 @@
 // another page or from a bookmark.
 
 export const HOME_PATH = "/";
+export const ACCOUNTS_INDEX_PATH = "/accounts";
 export const ACCOUNTS_SIGN_UP_PATH = "/accounts/sign-up";
 export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
 export const POSTS_INDEX_PATH = "/posts";
@@ -15,18 +16,24 @@ export const COMMUNITIES_INDEX_PATH = "/communities";
 export const CONFLICTS_INDEX_PATH = "/conflicts";
 
 /** The pages anyone sees; every other page needs someone signed in. */
-export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH];
+export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH];
 
 export function homeUrl() {
   return HOME_PATH;
+}
+
+/** The accounts on this device, inside the app only. */
+export function accountsIndexUrl() {
+  return ACCOUNTS_INDEX_PATH;
 }
 
 export function accountsSignUpUrl() {
   return ACCOUNTS_SIGN_UP_PATH;
 }
 
-export function accountsSignInUrl() {
-  return ACCOUNTS_SIGN_IN_PATH;
+/** @param {string} [email] filled in on the page, for an account signed out on this device */
+export function accountsSignInUrl(email) {
+  return email ? `${ACCOUNTS_SIGN_IN_PATH}?email=${encodeURIComponent(email)}` : ACCOUNTS_SIGN_IN_PATH;
 }
 
 export function postsIndexUrl() {

@@ -60,22 +60,3 @@ pub async fn reset(connection: &mut SqliteConnection, user_id: Uuid) -> Result<(
         .await?;
     Ok(())
 }
-
-/// Deletes every synced row, every event, the cursor and the backfills:
-/// the device's whole copy, at a sign-out, so the next person starts
-/// from nothing. The device's settings stay.
-pub async fn wipe(connection: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-    for statement in [
-        "DELETE FROM app_events",
-        "DELETE FROM app_posts_communities",
-        "DELETE FROM app_posts",
-        "DELETE FROM app_users_communities",
-        "DELETE FROM app_communities",
-        "DELETE FROM app_users",
-        "DELETE FROM sync_state",
-        "DELETE FROM sync_backfills",
-    ] {
-        sqlx::query(statement).execute(&mut *connection).await?;
-    }
-    Ok(())
-}

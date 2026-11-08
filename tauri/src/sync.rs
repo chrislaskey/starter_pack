@@ -1,4 +1,4 @@
-//! Syncing the device's database with the web server, see
+//! Syncing the active account's database with the web server, see
 //! `docs/design/offline-sync.md`: `app_core::sync::run` over HTTP to the
 //! server at `SYNC_SERVER_URL`, read when the app starts, else the value
 //! compiled in, which is how a phone build learns it, else the dev
@@ -7,7 +7,10 @@
 //! every half minute. Each one ends with a `synced` event to the pages,
 //! carrying the report or the error.
 //! A device working offline, `sync_set_offline`, makes no request until
-//! it goes online again, and neither does one nobody is signed in on.
+//! it goes online again, and neither does one with no account active,
+//! see `device_accounts`, which holds the same lock while it switches
+//! files. A 401 means the server has forgotten the token: the account is
+//! signed out on the device, its data kept.
 //! A sync is a spawned task, not a queued job, and the only queue is the
 //! pending events: see "How a sync is started and run" in the design.
 
@@ -17,10 +20,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{App, AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
-use app_core::deployment::Deployment;
-use app_core::sync::{self, Http, Report, Status};
+use app_core::sync::{self, Http, Report, Status, SyncError};
+
+use crate::device_accounts::DeviceAccounts;
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:4000";
 const INTERVAL: Duration = Duration::from_secs(30);
@@ -41,6 +45,13 @@ impl SyncServer {
     /// The server, for the accounts commands to sign up, in and out through.
     pub fn transport(&self) -> &Http {
         &self.transport
+    }
+
+    /// Keeps any sync from starting, and waits for one in flight to
+    /// finish, while the guard is held: for the moments the active
+    /// account's file changes under the commands.
+    pub async fn hold(&self) -> MutexGuard<'_, ()> {
+        self.one_at_a_time.lock().await
     }
 }
 
@@ -93,18 +104,30 @@ pub fn spawn_on_foreground(app: &AppHandle) {
     }
 }
 
-/// One sync, reported to the pages as a `synced` event.
+/// One sync of the active account, reported to the pages as a `synced`
+/// event; with nobody active, a report saying so.
 pub async fn run(app: &AppHandle) -> Result<Report, String> {
     let server = app.state::<SyncServer>();
-    let deployment = app.state::<Deployment>();
+    let device = app.state::<DeviceAccounts>();
     let _one_at_a_time = server.one_at_a_time.lock().await;
     *server
         .last_started
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
-    let result = sync::run(&deployment, &server.transport)
-        .await
-        .map_err(|error| error.to_string());
+    let result = match device.active().await {
+        Ok(deployment) => sync::run(&deployment, &server.transport).await,
+        Err(_) => Ok(Report {
+            signed_out: true,
+            ..Report::default()
+        }),
+    };
+    if let Err(SyncError::Unauthorized) = &result {
+        log::warn!("the server no longer knows the token: signing out, data kept");
+        if let Err(error) = device.forget_signed_in().await {
+            log::warn!("could not sign out: {error}");
+        }
+    }
+    let result = result.map_err(|error| error.to_string());
     match &result {
         Ok(report) => log::info!("synced: {report:?}"),
         Err(error) => log::warn!("sync failed: {error:?}"),
@@ -125,9 +148,10 @@ pub async fn sync_run(app: AppHandle) -> Result<Report, String> {
 #[tauri::command]
 pub async fn sync_set_offline(
     app: AppHandle,
-    deployment: State<'_, Deployment>,
+    device: State<'_, DeviceAccounts>,
     offline: bool,
 ) -> Result<(), String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
     sync::set_offline(&deployment, offline)
         .await
         .map_err(|error| error.to_string())?;
@@ -138,7 +162,11 @@ pub async fn sync_set_offline(
 }
 
 #[tauri::command]
-pub async fn sync_status(deployment: State<'_, Deployment>) -> Result<Status, String> {
+pub async fn sync_status(device: State<'_, DeviceAccounts>) -> Result<Status, String> {
+    let deployment = match device.active().await {
+        Ok(deployment) => deployment,
+        Err(_) => return Ok(Status::default()),
+    };
     sync::status(&deployment)
         .await
         .map_err(|error| error.to_string())

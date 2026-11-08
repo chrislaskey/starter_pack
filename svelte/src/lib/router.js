@@ -3,11 +3,14 @@
 // routes.js's, the one module that spells them out. A page is loaded the
 // first time it is visited, so each page's code stays a chunk of its own.
 // Before a page that needs someone signed in, the router asks who is,
-// and sends a visitor to the sign-in page instead when nobody is.
+// and sends a visitor to the sign-in page instead when nobody is, or in
+// the app to the accounts on the device, where sign-in is reached from.
 import { createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
+import { hasDeviceAccounts } from "./core/index.js";
 import { currentUser } from "./current_user.js";
 import {
+  ACCOUNTS_INDEX_PATH,
   ACCOUNTS_SIGN_IN_PATH,
   ACCOUNTS_SIGN_UP_PATH,
   COMMUNITIES_INDEX_PATH,
@@ -18,6 +21,7 @@ import {
   POSTS_INDEX_PATH,
   POSTS_NEW_PATH,
   POSTS_SHOW_PATH,
+  accountsIndexUrl,
   accountsSignInUrl,
 } from "./routes.js";
 
@@ -29,11 +33,12 @@ const { navigate, route } = createRouter({
       try {
         await currentUser();
       } catch {
-        throw navigateToUrl(accountsSignInUrl());
+        throw navigateToUrl(hasDeviceAccounts ? accountsIndexUrl() : accountsSignInUrl());
       }
     },
   },
   [HOME_PATH]: () => import("../HomePage.svelte"),
+  [ACCOUNTS_INDEX_PATH]: () => import("../accounts/AccountsIndexPage.svelte"),
   [ACCOUNTS_SIGN_UP_PATH]: () => import("../accounts/AccountsSignUpPage.svelte"),
   [ACCOUNTS_SIGN_IN_PATH]: () => import("../accounts/AccountsSignInPage.svelte"),
   [POSTS_INDEX_PATH]: () => import("../posts/PostsIndexPage.svelte"),

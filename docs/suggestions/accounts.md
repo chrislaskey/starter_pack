@@ -20,14 +20,16 @@ top of this one:
   the browser session; a "remember me" would give it the token's year.
 - **Signing out everywhere**: deleting every token of the user, not
   just the one the request carried, and a page listing the tokens.
-- **Signing out while offline.** A device cannot sign out without
-  reaching the server to forget its token, so a person offline cannot
-  hand the device over. The alternative, dropping the data and leaving
-  the token to expire, is a choice to make deliberately.
-- **A device signed out by the server.** A pull answered 401, because
-  the token expired or was deleted elsewhere, is reported as an error
-  today; the device could sign itself out, keeping the pending changes
-  as conflicts.
+- **Signing out, or removing an account, while offline.** A device
+  cannot sign out without reaching the server to forget its token, and
+  Remove from device signs out first, so a person offline cannot hand
+  the device over. The alternative, dropping the data and leaving the
+  token to expire, is a choice to make deliberately.
+- **Encrypting the account files.** A signed-out account's file stays
+  readable on disk until it is removed, the same exposure the active
+  account has; SQLCipher would close it for every file.
+- **Returning to the page an account was last on** after a switch,
+  instead of the landing page.
 - **Rate limiting sign-in attempts**, which belongs in front of the web
   server.
 - **Tokens with a context**, `session` and `api` as Phoenix keeps them,
