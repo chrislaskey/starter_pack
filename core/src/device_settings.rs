@@ -1,9 +1,9 @@
 //! Device settings: what a person chooses on a device, such as working
-//! offline, kept in the device's database as a JSON value per key so a
-//! new setting needs no migration. Every setting is declared here, with
-//! the value a device starts with, and `upgrade` brings a device up to
-//! date with that list when the app starts, so a setting is always there
-//! to read. Never synced.
+//! offline or who is signed in, kept in the device's database as a JSON
+//! value per key so a new setting needs no migration. Every setting is
+//! declared here, with the value a device starts with, and `upgrade`
+//! brings a device up to date with that list when the app starts, so a
+//! setting is always there to read. Never synced.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -12,29 +12,19 @@ use thiserror::Error;
 
 use crate::database::{Transaction, sql};
 use crate::deployment::Deployment;
-use crate::users;
 
 /// Whether the device works offline, making no request, see `sync`.
 pub const WORK_OFFLINE: &str = "work_offline";
-/// The user signed in on this device, a `users::User`, see
-/// `users::signed_in`: the dev user until there is a login.
-pub const SIGNED_IN_USER: &str = "signed_in_user";
-/// The token the device sends the server as a bearer token, or null,
-/// which the server answers as the dev user until there is a login.
-pub const API_TOKEN: &str = "api_token";
+/// Who is signed in on this device and the token the device sends the
+/// server for them, a `users::SignedIn`, or null when nobody is: written
+/// by a sign-in and cleared by a sign-out, see `accounts`.
+pub const SIGNED_IN: &str = "signed_in";
 
 /// Every setting, with the value a device starts with. Add a setting
 /// here, with its key as a constant above, and read it from the module
 /// that owns it.
 pub fn defaults() -> Vec<(&'static str, Value)> {
-    vec![
-        (WORK_OFFLINE, Value::Bool(false)),
-        (
-            SIGNED_IN_USER,
-            serde_json::to_value(users::dev_user()).unwrap_or_default(),
-        ),
-        (API_TOKEN, Value::Null),
-    ]
+    vec![(WORK_OFFLINE, Value::Bool(false)), (SIGNED_IN, Value::Null)]
 }
 
 #[derive(Debug, Error)]
@@ -99,6 +89,7 @@ mod tests {
     use super::*;
     use crate::database::with_each_database;
     use crate::deployment::Role;
+    use crate::users::SignedIn;
 
     #[tokio::test]
     async fn device_settings_upgrade_adds_what_is_missing_and_keeps_what_is_set() {
@@ -118,15 +109,9 @@ mod tests {
             let mut tx = deployment.begin().await.expect("a transaction");
             assert!(!get::<bool>(&mut tx, WORK_OFFLINE).await.expect("read"));
             assert_eq!(
-                get::<users::User>(&mut tx, SIGNED_IN_USER)
+                get::<Option<SignedIn>>(&mut tx, SIGNED_IN)
                     .await
-                    .expect("a user"),
-                users::dev_user()
-            );
-            assert_eq!(
-                get::<Option<String>>(&mut tx, API_TOKEN)
-                    .await
-                    .expect("no token"),
+                    .expect("nobody"),
                 None
             );
             set(&mut tx, WORK_OFFLINE, &true).await.expect("set");

@@ -6,7 +6,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use app_core::accounts::AccountError;
 use app_core::communities::CommunityError;
+use app_core::credentials::CredentialError;
 use app_core::memberships::MembershipError;
 use app_core::posts::PostError;
 use app_core::posts_communities::PostCommunityError;
@@ -106,13 +108,33 @@ impl From<UserError> for ApiError {
     fn from(error: UserError) -> Self {
         let status = match error {
             UserError::NotFound { .. } => StatusCode::NOT_FOUND,
-            UserError::UnknownToken => StatusCode::UNAUTHORIZED,
-            UserError::BlankEmail | UserError::EmailTaken | UserError::Invalid(_) => {
+            UserError::UnknownToken | UserError::NotSignedIn => StatusCode::UNAUTHORIZED,
+            UserError::InvalidEmail | UserError::EmailTaken | UserError::Invalid(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             UserError::ServerOnly | UserError::DeviceSettings(_) | UserError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<AccountError> for ApiError {
+    fn from(error: AccountError) -> Self {
+        let status = match error {
+            AccountError::User(error) => return error.into(),
+            AccountError::Sync(error) => return error.into(),
+            AccountError::InvalidEmailOrPassword => StatusCode::UNAUTHORIZED,
+            AccountError::Credential(
+                CredentialError::PasswordTooShort | CredentialError::PasswordTooLong,
+            ) => StatusCode::UNPROCESSABLE_ENTITY,
+            AccountError::ServerOnly
+            | AccountError::DeviceOnly
+            | AccountError::AlreadySignedIn
+            | AccountError::Credential(_)
+            | AccountError::DeviceSettings(_)
+            | AccountError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
     }
@@ -128,7 +150,7 @@ impl From<SyncError> for ApiError {
             SyncError::User(error) => error.into(),
             SyncError::Unauthorized => ApiError::new(StatusCode::UNAUTHORIZED, error.to_string()),
             SyncError::NotAMember { .. } => ApiError::new(StatusCode::FORBIDDEN, error.to_string()),
-            SyncError::Transport(_) | SyncError::Malformed(_) => {
+            SyncError::Transport(_) | SyncError::Refused(_) | SyncError::Malformed(_) => {
                 ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
             }
             SyncError::Database(_) | SyncError::DeviceSettings(_) | SyncError::Purge(_) => {

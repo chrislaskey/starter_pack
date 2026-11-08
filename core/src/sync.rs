@@ -21,10 +21,11 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::accounts::{self, AccountError, Session};
 use crate::communities::{self, Community, CommunityError};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, now};
-use crate::device_settings::{self, API_TOKEN, DeviceSettingsError, WORK_OFFLINE};
+use crate::device_settings::{self, DeviceSettingsError, WORK_OFFLINE};
 use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus};
 use crate::memberships::{self, Membership, MembershipError};
 use crate::posts::{self, Post, PostError};
@@ -162,10 +163,15 @@ pub enum SyncError {
     /// A backfill of a community the user is not in.
     #[error("not a member of community {community_id}")]
     NotAMember { community_id: Uuid },
-    /// The server could not be reached, or refused the request: the
-    /// message is for the person, the detail inside for the log.
-    #[error("Could not sync data")]
+    /// The server could not be reached, or answered with an error of
+    /// its own: the message is for the person, the detail inside for
+    /// the log.
+    #[error("Could not reach the server")]
     Transport(String),
+    /// The server refused the request and said why, in words for the
+    /// person: a sign-up with a taken email, say.
+    #[error("{0}")]
+    Refused(String),
     #[error("the server answered with something unexpected: {0}")]
     Malformed(String),
 }
@@ -493,6 +499,17 @@ pub trait Transport {
         token: Option<&str>,
         request: BackfillRequest,
     ) -> impl Future<Output = Result<Page, SyncError>> + Send;
+    fn sign_up(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> impl Future<Output = Result<Session, SyncError>> + Send;
+    fn sign_in(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> impl Future<Output = Result<Session, SyncError>> + Send;
+    fn sign_out(&self, token: &str) -> impl Future<Output = Result<(), SyncError>> + Send;
 }
 
 /// The server in this process: its functions called directly, for tests,
@@ -534,6 +551,34 @@ impl Transport for InProcess<'_> {
     ) -> Result<Page, SyncError> {
         let user = self.user(token).await?;
         backfill(self.server, &user, request).await
+    }
+
+    async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+        accounts::sign_up(self.server, email, password)
+            .await
+            .map_err(refused)
+    }
+
+    async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+        accounts::sign_in(self.server, email, password)
+            .await
+            .map_err(refused)
+    }
+
+    async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+        accounts::sign_out(self.server, token)
+            .await
+            .map_err(refused)
+    }
+}
+
+/// The server's answer as the web server would send it: 401 for a wrong
+/// password, the message for anything else it refused.
+fn refused(error: AccountError) -> SyncError {
+    match error {
+        AccountError::InvalidEmailOrPassword => SyncError::Unauthorized,
+        AccountError::Database(error) => SyncError::Database(error),
+        error => SyncError::Refused(error.to_string()),
     }
 }
 
@@ -577,15 +622,48 @@ impl Http {
             return Err(SyncError::Unauthorized);
         }
         if !status.is_success() {
-            return Err(SyncError::Transport(format!(
-                "the server refused {path} with {status}"
-            )));
+            let answer: Option<ErrorAnswer> = response.json().await.ok();
+            return Err(match answer {
+                Some(answer) if status.is_client_error() => SyncError::Refused(answer.error),
+                _ => SyncError::Transport(format!("the server refused {path} with {status}")),
+            });
+        }
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return serde_json::from_value(Value::Null)
+                .map_err(|error| SyncError::Malformed(error.to_string()));
         }
         response
             .json()
             .await
             .map_err(|error| SyncError::Malformed(error.to_string()))
     }
+
+    async fn delete(&self, token: &str, path: &str) -> Result<(), SyncError> {
+        let response = self
+            .client
+            .delete(format!("{}{path}", self.base_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(SyncError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(SyncError::Transport(format!(
+                "the server refused {path} with {status}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The web server's error answer, `{"error": "..."}`.
+#[cfg(feature = "sync-http")]
+#[derive(Deserialize)]
+struct ErrorAnswer {
+    error: String,
 }
 
 #[cfg(feature = "sync-http")]
@@ -609,11 +687,43 @@ impl Transport for Http {
     ) -> Result<Page, SyncError> {
         self.post(token, "/api/sync/backfill", &request).await
     }
+
+    async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+        self.post(
+            None,
+            "/api/accounts/sign-up",
+            &Credentials { email, password },
+        )
+        .await
+    }
+
+    async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+        self.post(
+            None,
+            "/api/accounts/sign-in",
+            &Credentials { email, password },
+        )
+        .await
+    }
+
+    async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+        self.delete(token, "/api/accounts/sign-out").await
+    }
+}
+
+/// What a sign-up or a sign-in sends.
+#[cfg(feature = "sync-http")]
+#[derive(Serialize)]
+struct Credentials<'a> {
+    email: &'a str,
+    password: &'a str,
 }
 
 /// What one sync did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
+    /// Nobody is signed in on the device: nothing was sent or asked for.
+    pub signed_out: bool,
     /// The device is working offline: nothing was sent or asked for.
     pub offline: bool,
     /// Events the server applied.
@@ -641,6 +751,7 @@ pub struct Report {
 /// conflicted, where the pull is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
+    pub signed_in: bool,
     pub offline: bool,
     pub pending: i64,
     pub conflicts: i64,
@@ -660,14 +771,17 @@ pub async fn run<T: Transport>(
 ) -> Result<Report, SyncError> {
     let mut report = Report::default();
     let before = status(deployment).await?;
+    if !before.signed_in {
+        report.signed_out = true;
+        return Ok(report);
+    }
     if before.offline {
         report.offline = true;
         report.pending = before.pending;
         return Ok(report);
     }
-    let token = api_token(deployment).await?;
-    let token = token.as_deref();
-    let user = users::signed_in(deployment).await?;
+    let (user, token) = users::signed_in_with_token(deployment).await?;
+    let token = Some(token.as_str());
     if let Err(error) = push_pending(deployment, transport, token, &user, &mut report).await {
         report.push_error = Some(error.to_string());
     }
@@ -680,7 +794,10 @@ pub async fn run<T: Transport>(
 
 pub async fn status(deployment: &Deployment) -> Result<Status, SyncError> {
     let mut tx = deployment.begin().await?;
+    let signed_in: Option<users::SignedIn> =
+        device_settings::get(&mut tx, device_settings::SIGNED_IN).await?;
     let status = Status {
+        signed_in: signed_in.is_some(),
         offline: device_settings::get(&mut tx, WORK_OFFLINE).await?,
         pending: events::count(&mut tx, EventStatus::Pending).await?,
         conflicts: events::count(&mut tx, EventStatus::Conflict).await?,
@@ -697,14 +814,6 @@ pub async fn set_offline(deployment: &Deployment, offline: bool) -> Result<(), S
     device_settings::set(&mut tx, WORK_OFFLINE, &offline).await?;
     tx.commit().await?;
     Ok(())
-}
-
-/// The token the device sends, a device setting; none until a login.
-async fn api_token(deployment: &Deployment) -> Result<Option<String>, SyncError> {
-    let mut tx = deployment.begin().await?;
-    let token = device_settings::get(&mut tx, API_TOKEN).await?;
-    tx.commit().await?;
-    Ok(token)
 }
 
 async fn push_pending<T: Transport>(
@@ -863,7 +972,6 @@ async fn reset(deployment: &Deployment, user: &User) -> Result<(), SyncError> {
     let mut tx = deployment.begin().await?;
     sql!(&mut tx, sync_state::reset(user.id))?;
     tx.commit().await?;
-    users::create_if_missing(deployment, user).await?;
     Ok(())
 }
 
@@ -970,40 +1078,17 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::database::{Database, with_each_database};
+    use crate::database::with_each_database;
     use crate::deployment::{Role, now};
-    use crate::device_settings::SIGNED_IN_USER;
-    use crate::{communities, conflicts, memberships, posts, posts_communities, purge, tokens};
+    pub(crate) use crate::users::tests::device_of;
+    use crate::{communities, conflicts, memberships, posts, posts_communities, purge};
 
-    /// A user registered on the server, with a token for their devices.
+    /// A user signed up on the server, with a token for their devices.
     pub(crate) async fn user_with_token(server: &Deployment, email: &str) -> (User, String) {
-        let user = users::create(server, email).await.expect("a user");
-        let token = tokens::create(server, user.id).await.expect("a token");
-        (user, token)
-    }
-
-    /// A device as the app opens it, signed in as the user with their
-    /// token.
-    pub(crate) async fn device_of(user: &User, token: &str) -> Deployment {
-        let database = Database::open_sqlite_in_memory()
+        let session = accounts::sign_up(server, email, "correct horse battery")
             .await
-            .expect("an in-memory SQLite database");
-        let deployment = Deployment::new(database, Role::Device);
-        device_settings::upgrade(&deployment)
-            .await
-            .expect("the settings set up");
-        let mut tx = deployment.begin().await.expect("a transaction");
-        device_settings::set(&mut tx, SIGNED_IN_USER, user)
-            .await
-            .expect("signed in");
-        device_settings::set(&mut tx, API_TOKEN, &Some(token.to_string()))
-            .await
-            .expect("the token");
-        tx.commit().await.expect("committed");
-        users::create_if_missing(&deployment, user)
-            .await
-            .expect("the user's row");
-        deployment
+            .expect("signed up");
+        (session.user, session.token)
     }
 
     async fn sync(device: &Deployment, server: &Deployment) -> Report {
@@ -1282,6 +1367,18 @@ pub(crate) mod tests {
         ) -> Result<Page, SyncError> {
             self.server.backfill(token, request).await
         }
+
+        async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+            self.server.sign_up(email, password).await
+        }
+
+        async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+            self.server.sign_in(email, password).await
+        }
+
+        async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+            self.server.sign_out(token).await
+        }
     }
 
     #[tokio::test]
@@ -1409,6 +1506,18 @@ pub(crate) mod tests {
             request: BackfillRequest,
         ) -> Result<Page, SyncError> {
             self.server.backfill(token, request).await
+        }
+
+        async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+            self.server.sign_up(email, password).await
+        }
+
+        async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+            self.server.sign_in(email, password).await
+        }
+
+        async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+            self.server.sign_out(token).await
         }
     }
 
@@ -1626,6 +1735,18 @@ pub(crate) mod tests {
             _request: BackfillRequest,
         ) -> Result<Page, SyncError> {
             panic!("the device is working offline and must not backfill")
+        }
+
+        async fn sign_up(&self, _email: &str, _password: &str) -> Result<Session, SyncError> {
+            panic!("the device is working offline and must not sign up")
+        }
+
+        async fn sign_in(&self, _email: &str, _password: &str) -> Result<Session, SyncError> {
+            panic!("the device is working offline and must not sign in")
+        }
+
+        async fn sign_out(&self, _token: &str) -> Result<(), SyncError> {
+            panic!("the device is working offline and must not sign out")
         }
     }
 
@@ -2250,22 +2371,22 @@ pub(crate) mod tests {
     async fn sync_two_devices_over_http() {
         let url = std::env::var("SYNC_SERVER_URL").expect("SYNC_SERVER_URL");
         let server = Http::new(&url).expect("a transport");
-        let dev = users::dev_user();
+        let email = format!("{}@example.com", Uuid::now_v7().simple());
         let a = users::tests::device().await;
         let b = users::tests::device().await;
-        users::create_if_missing(&a, &dev)
+        let alice = accounts::sign_up_on_device(&a, &server, &email, "correct horse battery")
             .await
-            .expect("the dev user");
-        users::create_if_missing(&b, &dev)
+            .expect("signed up on a");
+        accounts::sign_in_on_device(&b, &server, &email, "correct horse battery")
             .await
-            .expect("the dev user");
-        let post = posts::create(&a, &dev, "over http from a", &[])
+            .expect("signed in on b");
+        let post = posts::create(&a, &alice, "over http from a", &[])
             .await
             .expect("a post");
         run(&a, &server).await.expect("a sync");
         run(&b, &server).await.expect("a sync");
         assert_eq!(
-            posts::get(&b, &dev, post.id)
+            posts::get(&b, &alice, post.id)
                 .await
                 .expect("the post on b")
                 .post
@@ -2273,22 +2394,31 @@ pub(crate) mod tests {
             "over http from a"
         );
 
-        posts::update(&a, &dev, post.id, "a's edit", &[])
+        posts::update(&a, &alice, post.id, "a's edit", &[])
             .await
             .expect("edited on a");
-        posts::update(&b, &dev, post.id, "b's edit", &[])
+        posts::update(&b, &alice, post.id, "b's edit", &[])
             .await
             .expect("edited on b");
         run(&a, &server).await.expect("a sync");
         let report = run(&b, &server).await.expect("a sync");
         assert_eq!(report.conflicts, 1);
         assert_eq!(
-            posts::get(&b, &dev, post.id)
+            posts::get(&b, &alice, post.id)
                 .await
                 .expect("the post on b")
                 .post
                 .body,
             "a's edit"
         );
+        conflicts::let_go(&b, conflicts::list(&b).await.expect("one")[0].id)
+            .await
+            .expect("let go");
+        accounts::sign_out_on_device(&b, &server, false)
+            .await
+            .expect("signed out on b");
+        accounts::sign_out_on_device(&a, &server, false)
+            .await
+            .expect("signed out on a");
     }
 }

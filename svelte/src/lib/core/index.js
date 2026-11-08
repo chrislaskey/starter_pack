@@ -10,6 +10,9 @@ import * as tauriCommands from "./tauri-commands.js";
 const core = isTauri() ? tauriCommands : httpApi;
 
 export const usersMe = core.usersMe;
+export const accountsSignUp = core.accountsSignUp;
+export const accountsSignIn = core.accountsSignIn;
+export const accountsSignOut = core.accountsSignOut;
 export const postsList = core.postsList;
 export const postsGet = core.postsGet;
 export const postsCreate = core.postsCreate;
@@ -26,3 +29,4 @@ export const onSynced = core.onSynced;
 export const conflictsList = core.conflictsList;
 export const conflictsReapply = core.conflictsReapply;
 export const conflictsLetGo = core.conflictsLetGo;
+export const pendingChangesList = core.pendingChangesList;

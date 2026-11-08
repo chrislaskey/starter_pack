@@ -5,6 +5,7 @@
 use sqlx::migrate::Migrator;
 
 pub mod communities;
+pub mod credentials;
 pub mod device_settings;
 pub mod events;
 pub mod memberships;

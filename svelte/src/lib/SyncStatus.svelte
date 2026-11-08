@@ -43,7 +43,7 @@
   load();
 </script>
 
-{#if status}
+{#if status && status.signed_in}
   <div class="flex flex-wrap items-center gap-3 text-sm">
     {#if status.offline}
       <span class="badge badge-warning badge-sm">Working offline</span>

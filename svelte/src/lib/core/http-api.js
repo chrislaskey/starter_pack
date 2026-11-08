@@ -31,9 +31,36 @@ async function errorMessage(response) {
 /** @param {string} id */
 const postPath = (id) => `/api/posts/${encodeURIComponent(id)}`;
 
-/** The user the server takes the request to be from. */
+/** The user signed in, whom the server takes the request to be from; an error when nobody is. */
 export function usersMe() {
   return send("GET", "/api/users/me");
+}
+
+// A sign-up or a sign-in answers with the user and sets the cookie the
+// browser sends from then on; a sign-out clears it.
+
+/**
+ * @param {string} email
+ * @param {string} password
+ */
+export function accountsSignUp(email, password) {
+  return send("POST", "/api/accounts/sign-up", { email, password }).then(({ user }) => user);
+}
+
+/**
+ * @param {string} email
+ * @param {string} password
+ */
+export function accountsSignIn(email, password) {
+  return send("POST", "/api/accounts/sign-in", { email, password }).then(({ user }) => user);
+}
+
+/**
+ * The web has nothing that could be lost: it is the server.
+ * @param {boolean} _losingChanges
+ */
+export function accountsSignOut(_losingChanges = false) {
+  return send("DELETE", "/api/accounts/sign-out").then(() => ({ outcome: "signed_out" }));
 }
 
 export function postsList() {
@@ -112,6 +139,10 @@ export function onSynced(_callback) {
 }
 
 export function conflictsList() {
+  return Promise.resolve([]);
+}
+
+export function pendingChangesList() {
   return Promise.resolve([]);
 }
 

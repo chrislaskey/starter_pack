@@ -9,6 +9,6 @@
   <h1>Starter Pack</h1>
   <p>
     The same pages on the web, on the desktop and on a phone, over the same Rust application.
-    Start with the <a href={postsIndexUrl()}>posts</a>.
+    Sign in, then start with the <a href={postsIndexUrl()}>posts</a>.
   </p>
 </main>

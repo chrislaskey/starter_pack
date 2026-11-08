@@ -1,5 +1,6 @@
 //! The user signed in on this device, for every command that acts as
-//! them, see `app_core::users::signed_in`, and as the pages ask for it.
+//! them, see `app_core::users::signed_in`, and as the pages ask for it:
+//! an error, "Nobody is signed in", until someone does, see `accounts`.
 
 use tauri::State;
 

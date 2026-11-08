@@ -79,20 +79,30 @@ in-memory databases.
 
 Every core function takes the `users::User` acting. `app_users` is the
 app's view of each account, one row per person, written by the server at
-registration and synced like any row, so a post can show who wrote it;
-credentials never leave the server and come with the login, later, in a
-table of their own with the same ids. `users_tokens` holds the API tokens
-(`core/src/tokens.rs`): the server resolves a request's
-`Authorization: Bearer` token to its user, `users::get_by_token`, and
-answers one it does not know with 401. A device keeps the user signed in
-and its token as two device settings, `signed_in_user` and `api_token`,
-and the HTTP transport sends the token with every request.
+sign-up and synced like any row, so a post can show who wrote it.
+Credentials never leave the server: `users_credentials` holds the
+password hash (`core/src/credentials.rs`) and `users_tokens` the API
+tokens (`core/src/tokens.rs`), as hashes, good for a year, both by the
+user's id. The flows are `core/src/accounts.rs`: `sign_up`, `sign_in`
+and `sign_out` on the server, with an email and a password, each a
+plain server write and never an event; and `sign_up_on_device`,
+`sign_in_on_device` and `sign_out_on_device`, which ask the server
+through the sync `Transport`, so a test signs a device in without HTTP.
 
-Until there is a login, every deployment acts as `users::dev_user`: the
-web server answers a request with no token as it, which is what the pages
-in a browser send, and a device starts signed in as it with no token.
-Those are the two places a login replaces: `axum/src/current_user.rs`
-and the two settings' first values in `core/src/device_settings.rs`.
+The server resolves every request's token to its user,
+`users::get_by_token`, and answers one it does not know with 401: the
+apps send the token as `Authorization: Bearer`, a browser the cookie a
+sign-in set. A device keeps who signed in and their token as one device
+setting, `signed_in`, null until a sign-in, and `users::signed_in` reads
+it before every command; a sync with nobody signed in does nothing. A
+sign-out tells the server to forget the token, then drops the device's
+whole copy of the data; while a change is pending or in conflict it
+does nothing and answers the counts, `SignOut::ChangesWouldBeLost`, so
+the app asks the person, who views the changes (`pending_changes::list`
+and `conflicts::list`) or signs out `losing_changes`. A sign-in drops
+whatever the device held too, so the first sync pulls the person's own
+data from nothing.
+There is no default user on any deployment.
 
 ## Columns on every synced table
 
@@ -445,8 +455,9 @@ Each phase ends in a state that works, is tested and is worth keeping.
 | 6 | communities, memberships, a post's community rows, visibility, rows brought along, backfill, prune, the pages | a post is seen in the communities its owner chose and nowhere else; leaving takes the member's posts along and rejoining brings back exactly what left; joining on the web fills a device and leaving empties it; a device's own join pushes and backfills; a row the server holds under another id replaces the device's |
 | 7 | the purge, the horizon, the resync | what was deleted before the horizon goes with its rows and events; a device away too long starts over and matches; a pending change survives a resync; a change to a purged row is a conflict to let go |
 
-Deferred, roughly in the order they will come: registering and logging
-in, which replaces the dev user; deleting an account; a community's own
+Deferred, roughly in the order they will come: the rest of the login
+flow, magic links, confirmation, password change and reset, see
+`docs/suggestions/accounts.md`; deleting an account; a community's own
 page and its members; roles beyond `member`; the "something changed"
 nudge; a stale-form check on the web, which needs the page to send the
 version it loaded; `server_seq` in place of the time cursor if the

@@ -618,23 +618,21 @@ mod tests {
 
     #[tokio::test]
     async fn posts_create_on_a_device_is_version_zero_and_queued() {
-        let deployment = users::tests::device().await;
-        let dev = users::create_if_missing(&deployment, &users::dev_user())
-            .await
-            .expect("the dev user");
-        let post = create(&deployment, &dev, "a post", &[])
+        let alice = users::tests::alice();
+        let deployment = users::tests::device_of(&alice, "a token").await;
+        let post = create(&deployment, &alice, "a post", &[])
             .await
             .expect("a post");
         assert_eq!(post.version, 0);
         assert_eq!(post.last_synced_at, None);
-        assert_eq!(post.owner_id, dev.id);
+        assert_eq!(post.owner_id, alice.id);
         assert_eq!(
             events_with_status(&deployment, EventStatus::Pending).await,
             1
         );
         let mut tx = deployment.begin().await.expect("a transaction");
         let pending = events::pending(&mut tx).await.expect("the queue");
-        assert_eq!(pending[0].user_id, dev.id);
+        assert_eq!(pending[0].user_id, alice.id);
     }
 
     #[tokio::test]

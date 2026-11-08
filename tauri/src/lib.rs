@@ -3,13 +3,15 @@
 //! call, one module per resource, each command named resource first,
 //! `posts_list`, since the commands are one namespace. The app opens its
 //! own SQLite file, see `database`, the commands read and write it as the
-//! user signed in, see `users`, and it syncs with the web server, see
-//! `sync`.
+//! user signed in, see `users` and `accounts`, and it syncs with the web
+//! server, see `sync`.
 
+mod accounts;
 mod communities;
 mod conflicts;
 mod database;
 mod memberships;
+mod pending_changes;
 mod posts;
 mod sync;
 mod users;
@@ -31,6 +33,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             users::users_me,
+            accounts::accounts_sign_up,
+            accounts::accounts_sign_in,
+            accounts::accounts_sign_out,
             communities::communities_list,
             communities::communities_create,
             memberships::memberships_join,
@@ -45,7 +50,8 @@ pub fn run() {
             sync::sync_set_offline,
             conflicts::conflicts_list,
             conflicts::conflicts_reapply,
-            conflicts::conflicts_let_go
+            conflicts::conflicts_let_go,
+            pending_changes::pending_changes_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

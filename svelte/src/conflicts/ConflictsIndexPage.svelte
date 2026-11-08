@@ -1,16 +1,18 @@
-<!-- The changes made here that the server did not keep, at /conflicts,
-     each to reapply or let go -->
+<!-- The changes made here that are not on the server, at /conflicts:
+     those waiting to reach it, which the next sync sends, and those it
+     did not keep, each to reapply or let go -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
-  import { conflictsLetGo, conflictsList, conflictsReapply, onSynced } from "../lib/core/index.js";
+  import { conflictsLetGo, conflictsList, conflictsReapply, onSynced, pendingChangesList } from "../lib/core/index.js";
   import { postsIndexUrl } from "../lib/routes.js";
 
+  let pending = $state([]);
   let conflicts = $state([]);
   let error = $state("");
 
   async function load() {
     try {
-      conflicts = await conflictsList();
+      [pending, conflicts] = await Promise.all([pendingChangesList(), conflictsList()]);
     } catch (problem) {
       error = String(problem);
     }
@@ -36,16 +38,34 @@
 
 <main class="page">
   <AppNav />
-  <h1>Changes not saved on the server</h1>
+  <h1>Changes not on the server</h1>
 
   {#if error}
     <p class="error">{error}</p>
   {/if}
 
-  {#if conflicts.length === 0 && !error}
+  {#if pending.length === 0 && conflicts.length === 0 && !error}
     <p class="muted">Every change reached the server.</p>
   {/if}
 
+  {#if pending.length > 0}
+    <h2>Waiting to reach the server</h2>
+    <ul class="posts">
+      {#each pending as change (change.id)}
+        <li class="post">
+          <p class="muted">{change.about ?? change.table} · {change.kind} · {change.made_at}</p>
+          {#each Object.entries(change.changes) as [name, value] (name)}
+            <p><strong>{name}</strong></p>
+            <p class="whitespace-pre-wrap">{shown(value)}</p>
+          {/each}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
+  {#if conflicts.length > 0}
+    <h2>Not kept by the server</h2>
+  {/if}
   <ul class="posts">
     {#each conflicts as conflict (conflict.id)}
       <li class="post">

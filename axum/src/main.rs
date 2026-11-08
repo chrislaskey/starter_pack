@@ -6,10 +6,10 @@
 //! beside this crate when unset, or a PostgreSQL database.
 //!
 //! With arguments it runs a command on that database instead and exits:
-//! `users create <email>` registers a user and prints a token for them;
 //! `purge` removes what was deleted longer ago than the retention
 //! window, for a daily cron job, and prints what went.
 
+mod accounts;
 mod api_error;
 mod communities;
 mod current_user;
@@ -56,9 +56,6 @@ async fn main() -> Result<(), String> {
     if !arguments.is_empty() {
         return command(&deployment, &arguments).await;
     }
-    app_core::users::create_if_missing(&deployment, &app_core::users::dev_user())
-        .await
-        .map_err(|error| format!("could not write the dev user: {error}"))?;
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
     let listener = tokio::net::TcpListener::bind(address)
@@ -78,16 +75,6 @@ async fn command(
 ) -> Result<(), String> {
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
-        ["users", "create", email] => {
-            let user = app_core::users::create(deployment, email)
-                .await
-                .map_err(|error| error.to_string())?;
-            let token = app_core::tokens::create(deployment, user.id)
-                .await
-                .map_err(|error| error.to_string())?;
-            println!("{} {}\ntoken {token}", user.id, user.email);
-            Ok(())
-        }
         ["purge"] => {
             let report = app_core::purge::run(deployment, app_core::deployment::now())
                 .await
@@ -98,6 +85,6 @@ async fn command(
             }
             Ok(())
         }
-        _ => Err("commands: users create <email>, purge".to_string()),
+        _ => Err("commands: purge".to_string()),
     }
 }

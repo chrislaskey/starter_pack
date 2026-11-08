@@ -4,7 +4,8 @@
 //! its last write are older than the horizon, so every device that
 //! pulled within the window has seen it go; children first, so a
 //! deleted post's community rows, deleted at the same moment, go with
-//! it; and the events of rows that are gone go too. Each run records
+//! it; the events of rows that are gone go too, and so do the tokens
+//! that have expired, see `tokens`. Each run records
 //! its horizon, and a device whose cursor is older than the latest one
 //! may have missed a deletion, so the pull tells it to start over.
 //!
@@ -19,7 +20,7 @@ use uuid::Uuid;
 
 use crate::database::sql;
 use crate::deployment::{Deployment, Role};
-use crate::{communities, memberships, posts, posts_communities, users};
+use crate::{communities, memberships, posts, posts_communities, tokens, users};
 
 /// How long a deleted row is kept, and how long a device may stay away.
 pub const RETENTION_DAYS: i64 = 90;
@@ -73,6 +74,8 @@ pub async fn run(deployment: &Deployment, now: DateTime<Utc>) -> Result<PurgeRep
     }
     let events = sql!(&mut tx, events::delete_of_missing_rows())?;
     removed.insert("app_events".to_string(), events);
+    let expired_tokens = tokens::delete_expired(&mut tx, now).await?;
+    removed.insert("users_tokens".to_string(), expired_tokens);
     let purge = Purge {
         id: Uuid::now_v7(),
         horizon,

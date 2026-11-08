@@ -7,7 +7,7 @@
 //! every half minute. Each one ends with a `synced` event to the pages,
 //! carrying the report or the error.
 //! A device working offline, `sync_set_offline`, makes no request until
-//! it goes online again.
+//! it goes online again, and neither does one nobody is signed in on.
 //! A sync is a spawned task, not a queued job, and the only queue is the
 //! pending events: see "How a sync is started and run" in the design.
 
@@ -35,6 +35,13 @@ pub struct SyncServer {
     transport: Http,
     one_at_a_time: Mutex<()>,
     last_started: SyncMutex<Option<Instant>>,
+}
+
+impl SyncServer {
+    /// The server, for the accounts commands to sign up, in and out through.
+    pub fn transport(&self) -> &Http {
+        &self.transport
+    }
 }
 
 pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
@@ -87,7 +94,7 @@ pub fn spawn_on_foreground(app: &AppHandle) {
 }
 
 /// One sync, reported to the pages as a `synced` event.
-async fn run(app: &AppHandle) -> Result<Report, String> {
+pub async fn run(app: &AppHandle) -> Result<Report, String> {
     let server = app.state::<SyncServer>();
     let deployment = app.state::<Deployment>();
     let _one_at_a_time = server.one_at_a_time.lock().await;

@@ -7,16 +7,19 @@ use std::path::Path;
 
 use app_core::deployment::Deployment;
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{communities, memberships, posts, sync, users};
+use crate::{accounts, communities, memberships, posts, sync, users};
 
 pub fn router(svelte_dist: &Path, deployment: Deployment) -> Router {
     let pages = ServeDir::new(svelte_dist).fallback(ServeFile::new(svelte_dist.join("index.html")));
 
     Router::new()
+        .route("/api/accounts/sign-up", post(accounts::sign_up))
+        .route("/api/accounts/sign-in", post(accounts::sign_in))
+        .route("/api/accounts/sign-out", delete(accounts::sign_out))
         .route("/api/users/me", get(users::me))
         .route("/api/posts", get(posts::list).post(posts::create))
         .route(
@@ -52,10 +55,17 @@ mod tests {
     use super::*;
 
     const MISSING_ID: &str = "01900000-0000-7000-8000-000000000000";
+    const PASSWORD: &str = "correct horse battery";
 
-    /// A router over an in-memory database with one post, and a stand-in
-    /// `index.html`.
-    async fn test_router() -> (Router, Value) {
+    /// A router over an in-memory database with Alice signed up and one
+    /// post of hers, and a stand-in `index.html`. Every request `send`
+    /// makes is hers, with her token.
+    struct TestRouter {
+        router: Router,
+        token: String,
+    }
+
+    async fn test_router() -> (TestRouter, Value) {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
@@ -63,26 +73,30 @@ mod tests {
             .await
             .expect("a database");
         let deployment = Deployment::new(database, app_core::deployment::Role::Server);
-        let dev = app_core::users::create_if_missing(&deployment, &app_core::users::dev_user())
+        let alice = app_core::accounts::sign_up(&deployment, "alice@example.com", PASSWORD)
             .await
-            .expect("the dev user");
-        let post = app_core::posts::create(&deployment, &dev, "the first post", &[])
+            .expect("alice signed up");
+        let post = app_core::posts::create(&deployment, &alice.user, "the first post", &[])
             .await
             .expect("a post");
-        let post = app_core::posts::get(&deployment, &dev, post.id)
+        let post = app_core::posts::get(&deployment, &alice.user, post.id)
             .await
             .expect("the post");
         let post = serde_json::to_value(post).expect("json");
-        (router(&dist, deployment), post)
+        let test_router = TestRouter {
+            router: router(&dist, deployment),
+            token: alice.token,
+        };
+        (test_router, post)
     }
 
     async fn send(
-        router: &Router,
+        router: &TestRouter,
         method: Method,
         path: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        send_as(router, None, method, path, body).await
+        send_as(&router.router, Some(&router.token), method, path, body).await
     }
 
     async fn send_as(
@@ -92,9 +106,26 @@ mod tests {
         path: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let (status, _headers, body) = send_with(router, token, None, method, path, body).await;
+        (status, body)
+    }
+
+    /// A request with a bearer token, or a `Cookie` header, or neither,
+    /// answered with its status, its headers and its body.
+    async fn send_with(
+        router: &Router,
+        token: Option<&str>,
+        cookie: Option<&str>,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, header::HeaderMap, Value) {
         let mut request = Request::builder().method(method).uri(path);
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
         }
         let request = match body {
             Some(body) => request
@@ -105,6 +136,7 @@ mod tests {
         .expect("a request");
         let response = router.clone().oneshot(request).await.expect("a response");
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .into_body()
             .collect()
@@ -117,10 +149,10 @@ mod tests {
             serde_json::from_slice(&body)
                 .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into()))
         };
-        (status, body)
+        (status, headers, body)
     }
 
-    async fn get(router: &Router, path: &str) -> (StatusCode, Value) {
+    async fn get(router: &TestRouter, path: &str) -> (StatusCode, Value) {
         send(router, Method::GET, path, None).await
     }
 
@@ -130,20 +162,142 @@ mod tests {
         let (status, body) = get(&router, "/api/posts").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!([post]));
-        assert_eq!(
-            post["post"]["owner_id"],
-            json!(app_core::users::DEV_USER_ID)
-        );
-        assert_eq!(post["owner"]["email"], json!("dev@example.com"));
+        assert_eq!(post["owner"]["email"], json!("alice@example.com"));
         assert_eq!(post["communities"], json!([]));
     }
 
     #[tokio::test]
-    async fn users_me_is_the_dev_user_without_a_token() {
+    async fn users_me_is_the_tokens_user_and_nobody_without_one() {
         let (router, _) = test_router().await;
         let (status, body) = get(&router, "/api/users/me").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["id"], json!(app_core::users::DEV_USER_ID));
+        assert_eq!(body["email"], json!("alice@example.com"));
+
+        let (status, body) =
+            send_as(&router.router, None, Method::GET, "/api/users/me", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, json!({ "error": "Sign in first" }));
+        let (status, _) = send_as(&router.router, None, Method::GET, "/api/posts", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn accounts_sign_up_sign_in_and_sign_out_over_the_cookie() {
+        let (router, _) = test_router().await;
+        let bob = json!({ "email": "bob@example.com", "password": PASSWORD });
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/sign-up",
+            Some(bob.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["user"]["email"], json!("bob@example.com"));
+        let set_cookie = headers[header::SET_COOKIE].to_str().expect("a cookie");
+        assert!(set_cookie.starts_with(&format!("token={}", body["token"].as_str().unwrap())));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(set_cookie.contains("Secure"), "no Host, so not localhost");
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+        let (status, _, me) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::GET,
+            "/api/users/me",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["email"], json!("bob@example.com"));
+        let (_, _, posts) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::GET,
+            "/api/posts",
+            None,
+        )
+        .await;
+        assert_eq!(posts, json!([]), "bob does not see alice's post");
+
+        let (status, headers, _) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::DELETE,
+            "/api/accounts/sign-out",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cleared = headers[header::SET_COOKIE].to_str().expect("a cookie");
+        assert!(cleared.starts_with("token=;"), "{cleared}");
+        let (status, _, _) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::GET,
+            "/api/users/me",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(json!({ "email": "bob@example.com", "password": "wrong horse battery" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body,
+            json!({ "error": "That email and password do not match" })
+        );
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(bob),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["user"]["email"], json!("bob@example.com"));
+
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-up",
+            Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({ "error": "that email already has an account" })
+        );
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-up",
+            Some(json!({ "email": "carol@example.com", "password": "short" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({ "error": "a password needs at least 12 characters" })
+        );
     }
 
     #[tokio::test]
@@ -221,43 +375,45 @@ mod tests {
 
     #[tokio::test]
     async fn a_bearer_token_names_the_user_and_an_unknown_one_is_401() {
-        let (router, _) = test_router().await;
-        let (status, body) = send_as(&router, Some("nope"), Method::GET, "/api/posts", None).await;
+        let (router, post) = test_router().await;
+        let (status, body) = send_as(
+            &router.router,
+            Some("nope"),
+            Method::GET,
+            "/api/posts",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(
             body,
             json!({ "error": "The server did not accept this token" })
         );
 
-        let deployment = app_core::database::Database::open_sqlite_in_memory()
-            .await
-            .expect("a database");
-        let deployment = Deployment::new(deployment, app_core::deployment::Role::Server);
-        app_core::users::create_if_missing(&deployment, &app_core::users::dev_user())
-            .await
-            .expect("the dev user");
-        let alice = app_core::users::create(&deployment, "alice@example.com")
-            .await
-            .expect("a user");
-        let token = app_core::tokens::create(&deployment, alice.id)
-            .await
-            .expect("a token");
-        let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
-        let router = super::router(&dist, deployment);
-        let (status, created) = send_as(
-            &router,
-            Some(&token),
+        let (status, body) = send_as(
+            &router.router,
+            None,
             Method::POST,
-            "/api/posts",
-            Some(json!({ "body": "alice's" })),
+            "/api/accounts/sign-up",
+            Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(created["owner_id"], json!(alice.id));
-        let (_, mine) = send_as(&router, Some(&token), Method::GET, "/api/posts", None).await;
-        assert_eq!(mine[0]["post"], created);
-        let (_, devs) = get(&router, "/api/posts").await;
-        assert_eq!(devs, json!([]), "the dev user does not see alice's post");
+        let token = body["token"].as_str().unwrap();
+        let (status, created) = send_as(
+            &router.router,
+            Some(token),
+            Method::POST,
+            "/api/posts",
+            Some(json!({ "body": "bob's" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["owner_id"], body["user"]["id"]);
+        let (_, bobs) = send_as(&router.router, Some(token), Method::GET, "/api/posts", None).await;
+        assert_eq!(bobs[0]["post"], created);
+        let (_, alices) = get(&router, "/api/posts").await;
+        assert_eq!(alices, json!([post]), "alice does not see bob's post");
     }
 
     #[tokio::test]

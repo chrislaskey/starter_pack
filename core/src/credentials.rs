@@ -1,0 +1,169 @@
+//! Passwords: a user's password hash in `users_credentials`, server
+//! only, written at sign-up and checked at sign-in, see `accounts`.
+//! Argon2id with the crate's defaults; hashing and checking run off the
+//! async runtime's threads, since each takes a moment by design.
+
+use argon2::Argon2;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::database::{Transaction, sql};
+use crate::deployment::now;
+
+/// Phoenix's rule: long enough to be worth hashing, and bounded.
+pub const MIN_PASSWORD_LENGTH: usize = 12;
+pub const MAX_PASSWORD_LENGTH: usize = 72;
+
+/// The hash of a password nobody has: checked against when the email is
+/// unknown, so a sign-in takes as long either way and tells nothing by
+/// its timing.
+const NOBODYS_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$VDToes2uMjjUIjjyc6cYUw$osBqQQ/i0dGiz8Z96SZjgzMpXKhznbnS4HD6Z+h5NX4";
+
+#[derive(Debug, Error)]
+pub enum CredentialError {
+    #[error("a password needs at least {MIN_PASSWORD_LENGTH} characters")]
+    PasswordTooShort,
+    #[error("a password may have at most {MAX_PASSWORD_LENGTH} characters")]
+    PasswordTooLong,
+    #[error("could not hash the password: {0}")]
+    Hash(String),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+/// Keeps the user's password, as its hash.
+pub(crate) async fn create(
+    tx: &mut Transaction,
+    user_id: Uuid,
+    password: &str,
+) -> Result<(), CredentialError> {
+    let password = checked_password(password)?;
+    let password_hash = off_the_runtime(move || {
+        Argon2::default()
+            .hash_password(password.as_bytes())
+            .map(|hash| hash.to_string())
+            .map_err(|error| CredentialError::Hash(error.to_string()))
+    })
+    .await?;
+    sql!(
+        &mut *tx,
+        credentials::insert(user_id, &password_hash, now())
+    )?;
+    Ok(())
+}
+
+/// Whether the password is the user's; false for a user with no
+/// password, and for no user at all, after the same work either way.
+pub(crate) async fn verify(
+    tx: &mut Transaction,
+    user_id: Option<Uuid>,
+    password: &str,
+) -> Result<bool, CredentialError> {
+    let password_hash = match user_id {
+        Some(user_id) => sql!(&mut *tx, credentials::get_password_hash(user_id))?,
+        None => None,
+    };
+    let nobody = password_hash.is_none();
+    let password_hash = password_hash.unwrap_or_else(|| NOBODYS_HASH.to_string());
+    let password = password.to_string();
+    let matches = off_the_runtime(move || {
+        Ok(Argon2::default()
+            .verify_password(password.as_bytes(), password_hash.as_str())
+            .is_ok())
+    })
+    .await?;
+    Ok(matches && !nobody)
+}
+
+fn checked_password(password: &str) -> Result<String, CredentialError> {
+    let length = password.chars().count();
+    if length < MIN_PASSWORD_LENGTH {
+        return Err(CredentialError::PasswordTooShort);
+    }
+    if length > MAX_PASSWORD_LENGTH || password.len() > MAX_PASSWORD_LENGTH {
+        return Err(CredentialError::PasswordTooLong);
+    }
+    Ok(password.to_string())
+}
+
+async fn off_the_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CredentialError> + Send + 'static,
+) -> Result<T, CredentialError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| CredentialError::Hash(error.to_string()))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::with_each_database;
+    use crate::deployment::{Deployment, Role};
+    use crate::users;
+
+    #[tokio::test]
+    async fn credentials_create_and_verify() {
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let alice = users::create(&deployment, "alice@example.com")
+                .await
+                .expect("a user");
+            let mut tx = deployment.begin().await.expect("a transaction");
+            create(&mut tx, alice.id, "correct horse battery")
+                .await
+                .expect("kept");
+            assert!(
+                verify(&mut tx, Some(alice.id), "correct horse battery")
+                    .await
+                    .expect("checked")
+            );
+            assert!(
+                !verify(&mut tx, Some(alice.id), "wrong horse battery")
+                    .await
+                    .expect("checked")
+            );
+            assert!(
+                !verify(&mut tx, None, "correct horse battery")
+                    .await
+                    .expect("checked")
+            );
+            tx.commit().await.expect("committed");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn credentials_create_refuses_a_short_or_long_password() {
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let alice = users::create(&deployment, "alice@example.com")
+                .await
+                .expect("a user");
+            let mut tx = deployment.begin().await.expect("a transaction");
+            let error = create(&mut tx, alice.id, "short")
+                .await
+                .expect_err("too short");
+            assert!(matches!(error, CredentialError::PasswordTooShort));
+            let error = create(&mut tx, alice.id, &"x".repeat(73))
+                .await
+                .expect_err("too long");
+            assert!(matches!(error, CredentialError::PasswordTooLong));
+            tx.commit().await.expect("committed");
+        })
+        .await;
+    }
+
+    #[test]
+    fn credentials_nobodys_hash_is_a_real_hash_matching_nothing_anyone_types() {
+        let parsed =
+            argon2::password_hash::phc::PasswordHash::new(NOBODYS_HASH).expect("a PHC string");
+        assert!(parsed.hash.is_some());
+        assert!(Argon2::default().verify_password(b"", &parsed).is_err());
+        assert!(
+            Argon2::default()
+                .verify_password(b"correct horse battery", &parsed)
+                .is_err()
+        );
+    }
+}

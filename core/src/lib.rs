@@ -12,13 +12,16 @@
 //! how the apps' local databases and the web server converge, see `sync`
 //! and `docs/design/offline-sync.md`.
 
+pub mod accounts;
 pub mod communities;
 pub mod conflicts;
+pub mod credentials;
 pub mod database;
 pub mod deployment;
 pub mod device_settings;
 pub mod events;
 pub mod memberships;
+pub mod pending_changes;
 #[cfg(feature = "postgres")]
 mod postgres;
 pub mod posts;

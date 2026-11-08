@@ -14,13 +14,16 @@ postgres = ["sqlx/postgres"]
 sync-http = ["dep:reqwest"]
 
 [dependencies]
+argon2 = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "json", "uuid"] }
 thiserror = { workspace = true }
+tokio = { version = "1", features = ["rt"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]

@@ -41,7 +41,11 @@ Inside the Tauri app each is a command of the same name
 | `communitiesCreate(name)` | `POST /api/communities` with `{"name": "..."}`, 201 |
 | `membershipsJoin(communityId)` | `PUT /api/memberships/:community_id` |
 | `membershipsLeave(communityId)` | `DELETE /api/memberships/:community_id`, 204 |
-| `usersMe()` | `GET /api/users/me` |
+| `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
+| `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 201 with the user and the token |
+| `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
+| `accountsSignOut(losingChanges)` | `DELETE /api/accounts/sign-out`, 204; `losingChanges` is for the apps |
+| `pendingChangesList()` | none: the web has nothing waiting |
 
 Both call the function in `app_core::posts` (`core/src/posts.rs`),
 `posts::list`, `posts::get` and so on, named through their module as the
@@ -68,27 +72,41 @@ Every core function takes the `users::User` acting (`core/src/users.rs`):
 what they write is theirs, `owner_id` on a post, and what they read is
 what they own or what is in a community of theirs, see
 [Communities](#communities). `app_users` is the app's view of each account, one row
-per person with their email, written by the server at registration and
-synced to devices like any row; credentials never leave the server and
-come with the login, later, in a table of their own with the same ids.
+per person with their email, written by the server at sign-up and
+synced to devices like any row. Credentials never leave the server: the
+password hash is in `users_credentials` (`core/src/credentials.rs`,
+Argon2id) and the tokens in `users_tokens` (`core/src/tokens.rs`), kept
+as hashes and good for a year, both by the user's id.
 
-The server resolves the user of a request from its `Authorization:
-Bearer` token, a row of `users_tokens` (`core/src/tokens.rs`), which is
-how the apps call it: the token is the `api_token` device setting, sent
-by the HTTP transport, and the user is the `signed_in_user` device
-setting. A token the server does not know is answered 401.
+Signing up, in and out is `core/src/accounts.rs`, with an email and a
+password, on the server: a sign-up writes the user, the password and a
+token in one transaction, a sign-in checks the password and makes a
+token, a sign-out deletes it. The server resolves the user of every
+other request from its token, `axum/src/current_user.rs`: the apps send
+it as `Authorization: Bearer`, and a browser sends the cookie the
+sign-in set (`HttpOnly`, `SameSite=Strict`, `Secure` away from
+localhost). A request with no token, or a token the server does not
+know, is 401, whatever it asks for; the pages send a visitor to the
+sign-in page before showing anything that needs one (`svelte/src/lib/router.js`).
 
-**There is no login yet.** Until there is, every deployment acts as one
-stand-in, `users::dev_user`: the web server answers a request with no
-token as it, which is what the pages in a browser send, and a device
-starts signed in as it with no token. Those are the two places a login
-replaces, `axum/src/current_user.rs` and the two settings' first values
-in `core/src/device_settings.rs`. To try a second user over HTTP:
+A device signs up or in through the same transport it syncs over, keeps
+who signed in and their token as the `signed_in` device setting, and
+drops its copy of the data at a sign-out, so the next person starts from
+nothing. A sign-out syncs first; while a change still has not reached
+the server, or was not kept by it, the app answers with the counts
+instead of signing out, and the nav asks the person, who views the
+changes on `/conflicts` or signs out anyway, losing them. Nobody acts
+until someone signs in: there is no default user anywhere. To try a second user over HTTP:
 
 ```sh
-cargo run -p app_web -- users create alice@example.com   # prints her token
+curl -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"correct horse battery"}' \
+  localhost:4000/api/accounts/sign-up   # answers her token
 curl -H "Authorization: Bearer <token>" localhost:4000/api/posts
 ```
+
+What was left out, magic links and the rest of the Phoenix flow, is
+`docs/suggestions/accounts.md`.
 
 ## Communities
 
@@ -233,18 +251,23 @@ shows the page at the path, swapped in place:
 | Path | Shows |
 | --- | --- |
 | `/` | `HomePage.svelte` |
+| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte` |
+| `/accounts/sign-in` | `accounts/AccountsSignInPage.svelte`, where a signed-out visitor is sent |
 | `/posts` | `posts/PostsIndexPage.svelte` |
 | `/posts/new` | `posts/PostsNewPage.svelte` |
 | `/posts/:id` | `posts/PostsShowPage.svelte`, with Edit and Delete |
 | `/posts/:id/edit` | `posts/PostsEditPage.svelte` |
 | `/communities` | `communities/CommunitiesIndexPage.svelte`, to create, join and leave |
-| `/conflicts` | `conflicts/ConflictsIndexPage.svelte`, inside the apps |
+| `/conflicts` | `conflicts/ConflictsIndexPage.svelte`, inside the apps: the changes waiting to reach the server and those it did not keep |
 
 The New and Edit pages share `posts/PostsForm.svelte`, the body and a
 checkbox per community the person is in. A write that worked navigates
 to the post, or the list after a delete, through `navigateToUrl` in
 `router.js`. The post page shows Edit and Delete to the owner, which it
-tells by `usersMe()`.
+tells by `usersMe()`, asked once per visit and kept in
+`svelte/src/lib/current_user.js`; the nav shows who is signed in with
+Sign out, or Sign in and Sign up, and asks before a sign-out that would
+lose changes (`accounts/AccountsSignOutDialog.svelte`).
 
 The paths are real paths, named once in `svelte/src/lib/routes.js`, which
 pages link through. Every path is reloadable: the dev server, the web

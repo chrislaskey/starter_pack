@@ -53,19 +53,34 @@ pub async fn get(connection: &mut PgConnection, id: Uuid) -> Result<Option<User>
     Ok(row.map(User::from))
 }
 
-/// The live user the token stands for.
-pub async fn get_by_token(
+/// The live user the token with the hash stands for, if the token was
+/// made after `made_after`, which is when it would have expired.
+pub async fn get_by_token_hash(
     connection: &mut PgConnection,
-    token: &str,
+    token_hash: &str,
+    made_after: DateTime<Utc>,
 ) -> Result<Option<User>, sqlx::Error> {
     let row: Option<UserRow> = sqlx::query_as(
         "SELECT u.id, u.email, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id
          FROM app_users u JOIN users_tokens t ON t.user_id = u.id
-         WHERE t.token = $1 AND u.deleted_at IS NULL",
+         WHERE t.token_hash = $1 AND t.inserted_at > $2 AND u.deleted_at IS NULL",
     )
-    .bind(token)
+    .bind(token_hash)
+    .bind(made_after)
     .fetch_optional(connection)
     .await?;
+    Ok(row.map(User::from))
+}
+
+/// The live user with the email.
+pub async fn get_by_email(
+    connection: &mut PgConnection,
+    email: &str,
+) -> Result<Option<User>, sqlx::Error> {
+    let row: Option<UserRow> = sqlx::query_as(select!("WHERE email = $1 AND deleted_at IS NULL"))
+        .bind(email)
+        .fetch_optional(connection)
+        .await?;
     Ok(row.map(User::from))
 }
 
