@@ -31,3 +31,29 @@ pub async fn save_cursor(
     .await?;
     Ok(())
 }
+
+/// Drops every synced row, the cursor and the backfills to do, for a
+/// resync from nothing. The events stay, and so do the rows they are
+/// about while they are pending, and the user's own row, which their
+/// posts point at.
+pub async fn reset(connection: &mut PgConnection, user_id: Uuid) -> Result<(), sqlx::Error> {
+    for statement in [
+        "DELETE FROM app_posts_communities WHERE id NOT IN
+           (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_posts_communities')",
+        "DELETE FROM app_posts WHERE id NOT IN
+           (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_posts')",
+        "DELETE FROM app_users_communities WHERE id NOT IN
+           (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_users_communities')",
+        "DELETE FROM app_communities WHERE id NOT IN
+           (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_communities')",
+        "DELETE FROM sync_state",
+        "DELETE FROM sync_backfills",
+    ] {
+        sqlx::query(statement).execute(&mut *connection).await?;
+    }
+    sqlx::query("DELETE FROM app_users WHERE id != $1")
+        .bind(user_id)
+        .execute(connection)
+        .await?;
+    Ok(())
+}

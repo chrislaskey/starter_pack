@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::deployment::{Deployment, now};
 use crate::events::{self, AnswerStatus, Event, EventStatus, Fields, StoredEvent};
 use crate::posts::{self, Post, PostError};
+use crate::users::User;
 
 /// A conflicted change as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,9 +60,9 @@ pub async fn list(deployment: &Deployment) -> Result<Vec<Conflict>, ConflictErro
     Ok(conflicts)
 }
 
-/// Queues the person's values again as a new change from the row as it
-/// stands now, and drops the conflict.
-pub async fn reapply(deployment: &Deployment, id: Uuid) -> Result<(), ConflictError> {
+/// Queues the person's values again as a new change of the user's from
+/// the row as it stands now, and drops the conflict.
+pub async fn reapply(deployment: &Deployment, user: &User, id: Uuid) -> Result<(), ConflictError> {
     let mut tx = deployment.begin().await?;
     let stored = get(&mut tx, id).await?;
     let Some(post) = posts::get_in(&mut tx, stored.event.row_id).await? else {
@@ -82,7 +83,7 @@ pub async fn reapply(deployment: &Deployment, id: Uuid) -> Result<(), ConflictEr
         changes,
         now(),
     );
-    let applied = posts::apply_in(&mut tx, deployment.role, &event).await?;
+    let applied = posts::apply_in(&mut tx, deployment.role, user, &event).await?;
     if applied.answer.status == AnswerStatus::Rejected {
         return Err(PostError::Rejected(applied.answer.reason.unwrap_or_default()).into());
     }

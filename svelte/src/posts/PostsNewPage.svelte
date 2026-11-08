@@ -7,13 +7,14 @@
   import PostsForm from "./PostsForm.svelte";
 
   let text = $state("");
+  let communityIds = $state([]);
   let error = $state("");
   let busy = $state(false);
 
   async function save() {
     busy = true;
     try {
-      const post = await postsCreate(text);
+      const post = await postsCreate(text, communityIds);
       await navigateToUrl(postsShowUrl(post.id));
     } catch (problem) {
       error = String(problem);
@@ -26,6 +27,6 @@
 <main class="page">
   <AppNav />
   <h1>New post</h1>
-  <PostsForm bind:text submitText="Post" {error} {busy} onsubmit={save} />
+  <PostsForm bind:text bind:communityIds submitText="Post" {error} {busy} onsubmit={save} />
   <a href={postsIndexUrl()}>Back to posts</a>
 </main>

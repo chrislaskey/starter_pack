@@ -1,10 +1,15 @@
-//! Posts: the first resource. A post is some text, written, edited and
-//! deleted from any deployment. Called through the module, `posts::list`,
-//! as the standard library's `fs::read` is.
+//! Posts: the first resource. A post is some text with an owner, written,
+//! edited and deleted by its owner from any deployment, in the
+//! communities the owner chose, see `posts_communities`, and seen by its
+//! owner and the members of those communities. Called through the
+//! module, `posts::list`, as the standard library's `fs::read` is.
 //!
 //! Every write is an event applied by `apply_event`, on the server at
 //! once and on a device at once too, where it is queued and the server
-//! answers it on the next push with the same function, see `events`.
+//! answers it on the next push with the same function, see `events`. The
+//! user acting owns what they create, may change only what they own,
+//! and is recorded as `deleted_by_id` on what they delete, which takes
+//! the post's community rows with it.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,10 +17,13 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::{self, Community};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::events::{self, Answer, AnswerStatus, Conflicts, Event, EventKind, Fields};
+use crate::posts_communities::{self, PostCommunityError};
 use crate::sync::{Cursor, TableRow};
+use crate::users::{self, User};
 
 pub const TABLE: &str = "app_posts";
 /// The fields an event may set when it creates a post.
@@ -28,6 +36,7 @@ const UPDATE_FIELDS: &[&str] = &["body", "deleted_at"];
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Post {
     pub id: Uuid,
+    pub owner_id: Uuid,
     pub body: String,
     pub inserted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -36,6 +45,15 @@ pub struct Post {
     /// When the server last wrote it; none on a device's post not yet pushed.
     pub last_synced_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by_id: Option<Uuid>,
+}
+
+/// A post as the pages show it: with who wrote it and where it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostWithOwnerAndCommunities {
+    pub post: Post,
+    pub owner: User,
+    pub communities: Vec<Community>,
 }
 
 #[derive(Debug, Error)]
@@ -44,10 +62,14 @@ pub enum PostError {
     NotFound { id: Uuid },
     #[error("a post needs some text")]
     BlankBody,
+    #[error("only the owner can change a post")]
+    NotOwner,
     #[error("{0}")]
     Invalid(String),
     #[error("the change was refused: {0}")]
     Rejected(String),
+    #[error(transparent)]
+    Community(#[from] PostCommunityError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -58,24 +80,41 @@ impl From<serde_json::Error> for PostError {
     }
 }
 
-/// Every post not deleted, newest first.
-pub async fn list(deployment: &Deployment) -> Result<Vec<Post>, PostError> {
+/// Every post the user sees, not deleted, newest first, each with its
+/// owner and communities.
+pub async fn list(
+    deployment: &Deployment,
+    user: &User,
+) -> Result<Vec<PostWithOwnerAndCommunities>, PostError> {
     let mut tx = deployment.begin().await?;
-    let posts = sql!(&mut tx, posts::list())?;
+    let posts = sql!(&mut tx, posts::list_visible(user.id))?;
+    let listed = with_owners_and_communities(&mut tx, posts).await?;
     tx.commit().await?;
-    Ok(posts)
+    Ok(listed)
 }
 
-/// One post by its id, unless deleted.
-pub async fn get(deployment: &Deployment, id: Uuid) -> Result<Post, PostError> {
+/// One post the user sees, by its id, unless deleted, with its owner and
+/// communities.
+pub async fn get(
+    deployment: &Deployment,
+    user: &User,
+    id: Uuid,
+) -> Result<PostWithOwnerAndCommunities, PostError> {
     let mut tx = deployment.begin().await?;
-    let post = get_live(&mut tx, id).await?;
+    let post = get_live(&mut tx, user, id).await?;
+    let mut listed = with_owners_and_communities(&mut tx, vec![post]).await?;
     tx.commit().await?;
-    Ok(post)
+    listed.pop().ok_or(PostError::NotFound { id })
 }
 
-/// Writes a new post, with an id and the time from this deployment.
-pub async fn create(deployment: &Deployment, body: &str) -> Result<Post, PostError> {
+/// Writes a new post of the user's, with an id and the time from this
+/// deployment, in the communities, which the user must be in.
+pub async fn create(
+    deployment: &Deployment,
+    user: &User,
+    body: &str,
+    community_ids: &[Uuid],
+) -> Result<Post, PostError> {
     let body = checked_body(body)?;
     let event = Event::create(
         TABLE,
@@ -84,37 +123,50 @@ pub async fn create(deployment: &Deployment, body: &str) -> Result<Post, PostErr
         now(),
     );
     let mut tx = deployment.begin().await?;
-    let applied = apply_in(&mut tx, deployment.role, &event).await?;
+    let post = apply_in(&mut tx, deployment.role, user, &event)
+        .await?
+        .post()?;
+    posts_communities::set_in(&mut tx, deployment.role, user, post.id, community_ids).await?;
     tx.commit().await?;
-    applied.post()
+    Ok(post)
 }
 
-/// Writes a new body over the post, with the time from this deployment.
-pub async fn update(deployment: &Deployment, id: Uuid, body: &str) -> Result<Post, PostError> {
+/// Writes a new body over the user's post, with the time from this
+/// deployment, and makes its communities exactly these.
+pub async fn update(
+    deployment: &Deployment,
+    user: &User,
+    id: Uuid,
+    body: &str,
+    community_ids: &[Uuid],
+) -> Result<Post, PostError> {
     let body = checked_body(body)?;
     let mut tx = deployment.begin().await?;
-    let post = get_live(&mut tx, id).await?;
-    if post.body == body {
-        tx.commit().await?;
-        return Ok(post);
-    }
-    let event = Event::update(
-        TABLE,
-        id,
-        post.version,
-        fields(json!({ "body": post.body })),
-        fields(json!({ "body": body })),
-        now(),
-    );
-    let applied = apply_in(&mut tx, deployment.role, &event).await?;
+    let post = get_own(&mut tx, user, id).await?;
+    let post = if post.body == body {
+        post
+    } else {
+        let event = Event::update(
+            TABLE,
+            id,
+            post.version,
+            fields(json!({ "body": post.body })),
+            fields(json!({ "body": body })),
+            now(),
+        );
+        apply_in(&mut tx, deployment.role, user, &event)
+            .await?
+            .post()?
+    };
+    posts_communities::set_in(&mut tx, deployment.role, user, post.id, community_ids).await?;
     tx.commit().await?;
-    applied.post()
+    Ok(post)
 }
 
-/// Deletes the post: a soft delete, so it syncs like any edit.
-pub async fn delete(deployment: &Deployment, id: Uuid) -> Result<(), PostError> {
+/// Deletes the user's post: a soft delete, so it syncs like any edit.
+pub async fn delete(deployment: &Deployment, user: &User, id: Uuid) -> Result<(), PostError> {
     let mut tx = deployment.begin().await?;
-    let post = get_live(&mut tx, id).await?;
+    let post = get_own(&mut tx, user, id).await?;
     let event = Event::update(
         TABLE,
         id,
@@ -123,16 +175,21 @@ pub async fn delete(deployment: &Deployment, id: Uuid) -> Result<(), PostError> 
         fields(json!({ "deleted_at": now() })),
         now(),
     );
-    let applied = apply_in(&mut tx, deployment.role, &event).await?;
+    let applied = apply_in(&mut tx, deployment.role, user, &event).await?;
     tx.commit().await?;
     applied.post().map(|_| ())
 }
 
-/// Applies an event to its post and answers it: what the server does
-/// with a pushed event, and what a local write does on any deployment.
-pub async fn apply_event(deployment: &Deployment, event: &Event) -> Result<Answer, PostError> {
+/// Applies an event of the user's to its post and answers it: what the
+/// server does with a pushed event, and what a local write does on any
+/// deployment.
+pub async fn apply_event(
+    deployment: &Deployment,
+    user: &User,
+    event: &Event,
+) -> Result<Answer, PostError> {
     let mut tx = deployment.begin().await?;
-    let applied = apply_in(&mut tx, deployment.role, event).await?;
+    let applied = apply_in(&mut tx, deployment.role, user, event).await?;
     tx.commit().await?;
     Ok(applied.answer)
 }
@@ -161,25 +218,86 @@ pub(crate) async fn delete_row(tx: &mut Transaction, id: Uuid) -> Result<(), Pos
     Ok(sql!(tx, posts::delete_row(id))?)
 }
 
-/// A page of the rows the server wrote after the cursor, deleted or not.
+/// Removes every post the user no longer sees from a device, after a
+/// pull: not theirs, and in no community they are in. How many went.
+pub(crate) async fn prune(tx: &mut Transaction, user: &User) -> Result<u64, PostError> {
+    Ok(sql!(tx, posts::delete_unreachable(user.id))?)
+}
+
+/// The posts with their owners and live communities, in the order given.
+async fn with_owners_and_communities(
+    tx: &mut Transaction,
+    posts: Vec<Post>,
+) -> Result<Vec<PostWithOwnerAndCommunities>, PostError> {
+    let owner_ids: Vec<Uuid> = posts.iter().map(|post| post.owner_id).collect();
+    let owners = users::list_by_ids(tx, &owner_ids)
+        .await
+        .map_err(|error| PostError::Invalid(error.to_string()))?;
+    let post_ids: Vec<Uuid> = posts.iter().map(|post| post.id).collect();
+    let rows = posts_communities::list_live_of_posts(tx, &post_ids).await?;
+    let community_ids: Vec<Uuid> = rows.iter().map(|row| row.community_id).collect();
+    let communities = communities::list_by_ids(tx, &community_ids)
+        .await
+        .map_err(|error| PostError::Invalid(error.to_string()))?;
+    posts
+        .into_iter()
+        .map(|post| {
+            let owner = owners
+                .iter()
+                .find(|owner| owner.id == post.owner_id)
+                .cloned()
+                .ok_or(PostError::Invalid(format!("post {} has no owner", post.id)))?;
+            let communities = rows
+                .iter()
+                .filter(|row| row.post_id == post.id)
+                .filter_map(|row| {
+                    communities
+                        .iter()
+                        .find(|community| community.id == row.community_id)
+                })
+                .filter(|community| community.deleted_at.is_none())
+                .cloned()
+                .collect();
+            Ok(PostWithOwnerAndCommunities {
+                post,
+                owner,
+                communities,
+            })
+        })
+        .collect()
+}
+
+/// A page of the rows the server wrote after the cursor that the user
+/// sees, deleted or not.
 pub(crate) async fn list_synced_after(
     tx: &mut Transaction,
+    user: &User,
     after: &Cursor,
     limit: usize,
 ) -> Result<Vec<Post>, PostError> {
-    Ok(sql!(tx, posts::list_synced_after(after, limit))?)
+    Ok(sql!(tx, posts::list_synced_after(user.id, after, limit))?)
 }
 
-/// The row by its id, deleted or not.
+/// The row by its id, deleted or not, whoever sees it.
 pub(crate) async fn get_in(tx: &mut Transaction, id: Uuid) -> Result<Option<Post>, PostError> {
     Ok(sql!(tx, posts::get(id))?)
 }
 
-async fn get_live(tx: &mut Transaction, id: Uuid) -> Result<Post, PostError> {
-    match get_in(tx, id).await? {
+/// The live post, if the user sees it.
+async fn get_live(tx: &mut Transaction, user: &User, id: Uuid) -> Result<Post, PostError> {
+    match sql!(&mut *tx, posts::get_visible(user.id, id))? {
         Some(post) if post.deleted_at.is_none() => Ok(post),
         _ => Err(PostError::NotFound { id }),
     }
+}
+
+/// The live post, if the user owns it.
+async fn get_own(tx: &mut Transaction, user: &User, id: Uuid) -> Result<Post, PostError> {
+    let post = get_live(tx, user, id).await?;
+    if post.owner_id != user.id {
+        return Err(PostError::NotOwner);
+    }
+    Ok(post)
 }
 
 /// An event applied: the answer, and the post as it now stands.
@@ -200,12 +318,14 @@ impl Applied {
     }
 }
 
-/// Applies the event in the transaction: checks the fields it changes,
-/// merges it into the row, writes the row, and then the role's part, the
-/// record of the answer on the server or the queue on a device.
+/// Applies the event in the transaction: checks the fields it changes
+/// and that the user owns the post, merges it into the row, writes the
+/// row, and then the role's part, the record of the answer on the server
+/// or the queue on a device.
 pub(crate) async fn apply_in(
     tx: &mut Transaction,
     role: Role,
+    user: &User,
     event: &Event,
 ) -> Result<Applied, PostError> {
     if role == Role::Server
@@ -240,24 +360,29 @@ pub(crate) async fn apply_in(
             };
             let blank = Post {
                 id: event.row_id,
+                owner_id: user.id,
                 body: String::new(),
                 inserted_at: now,
                 updated_at: now,
                 version,
                 last_synced_at,
                 deleted_at: None,
+                deleted_by_id: None,
             };
             let post = match blank.with_fields(&event.changes) {
                 Ok(post) => post,
                 Err(error) => return rejected(event, format!("invalid: {error}"), None),
             };
             sql!(&mut *tx, posts::insert(&post))?;
-            finish(tx, role, event, Conflicts::new(), post).await?
+            finish(tx, role, user, event, Conflicts::new(), post).await?
         }
         EventKind::Update => {
             let Some(post) = get_in(tx, event.row_id).await? else {
                 return rejected(event, "unknown_post", None);
             };
+            if post.owner_id != user.id {
+                return rejected(event, "not_owner", Some(post));
+            }
             let (changes, conflicts) = events::merge(
                 &post.fields(UPDATE_FIELDS)?,
                 post.version,
@@ -273,14 +398,20 @@ pub(crate) async fn apply_in(
                     Err(error) => return rejected(event, format!("invalid: {error}"), Some(post)),
                 };
                 updated.updated_at = now;
+                if changes.contains_key("deleted_at") {
+                    updated.deleted_by_id = updated.deleted_at.map(|_| user.id);
+                }
                 if role == Role::Server {
                     updated.version += 1;
                     updated.last_synced_at = Some(now);
                 }
                 sql!(&mut *tx, posts::update(&updated))?;
+                if changes.contains_key("deleted_at") && updated.deleted_at.is_some() {
+                    posts_communities::delete_with_post(tx, role, &updated).await?;
+                }
                 updated
             };
-            finish(tx, role, event, conflicts, post).await?
+            finish(tx, role, user, event, conflicts, post).await?
         }
     };
     Ok(post)
@@ -290,14 +421,15 @@ pub(crate) async fn apply_in(
 async fn finish(
     tx: &mut Transaction,
     role: Role,
+    user: &User,
     event: &Event,
     conflicts: Conflicts,
     post: Post,
 ) -> Result<Applied, PostError> {
     let answer = Answer::applied(event.id, post.version, conflicts, table_row(&post)?);
     match role {
-        Role::Server => events::record(tx, event, &answer).await?,
-        Role::Device => events::queue(tx, event).await?,
+        Role::Server => events::record(tx, user.id, event, &answer).await?,
+        Role::Device => events::queue(tx, user.id, event).await?,
     }
     Ok(Applied {
         answer,
@@ -361,16 +493,15 @@ mod tests {
     use super::*;
     use crate::database::{Database, with_each_database};
     use crate::events::EventStatus;
+    use crate::users;
 
     fn server(database: Database) -> Deployment {
         Deployment::new(database, Role::Server)
     }
 
-    async fn device() -> Deployment {
-        let database = Database::open_sqlite_in_memory()
-            .await
-            .expect("an in-memory SQLite database");
-        Deployment::new(database, Role::Device)
+    /// A user registered on the server.
+    pub(crate) async fn user(deployment: &Deployment, email: &str) -> User {
+        users::create(deployment, email).await.expect("a user")
     }
 
     async fn events_with_status(deployment: &Deployment, status: EventStatus) -> i64 {
@@ -382,23 +513,46 @@ mod tests {
     async fn posts_list_newest_first() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let first = create(&deployment, "first").await.expect("a post");
-            let second = create(&deployment, "second").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let first = create(&deployment, &alice, "first", &[])
+                .await
+                .expect("a post");
+            let second = create(&deployment, &alice, "second", &[])
+                .await
+                .expect("a post");
 
-            let posts = list(&deployment).await.expect("the posts");
-            assert_eq!(posts, vec![second, first]);
+            let posts = list(&deployment, &alice).await.expect("the posts");
+            let listed: Vec<&Post> = posts.iter().map(|listed| &listed.post).collect();
+            assert_eq!(listed, vec![&second, &first]);
+            assert_eq!(posts[0].owner, alice);
+            assert!(posts[0].communities.is_empty());
         })
         .await;
     }
 
     #[tokio::test]
-    async fn posts_get_by_id() {
+    async fn posts_list_and_get_show_a_user_their_own_posts_only() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let written = create(&deployment, "a post").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
+            let post = create(&deployment, &alice, "alice's", &[])
+                .await
+                .expect("a post");
+            assert_eq!(post.owner_id, alice.id);
 
-            let post = get(&deployment, written.id).await.expect("the post");
-            assert_eq!(post, written);
+            assert!(list(&deployment, &bob).await.expect("the posts").is_empty());
+            let error = get(&deployment, &bob, post.id)
+                .await
+                .expect_err("not bob's");
+            assert!(matches!(error, PostError::NotFound { .. }));
+            assert_eq!(
+                get(&deployment, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post,
+                post
+            );
         })
         .await;
     }
@@ -407,9 +561,12 @@ mod tests {
     async fn posts_get_missing() {
         with_each_database(|database| async move {
             let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
             let id = Uuid::now_v7();
 
-            let error = get(&deployment, id).await.expect_err("no such post");
+            let error = get(&deployment, &alice, id)
+                .await
+                .expect_err("no such post");
             assert!(matches!(error, PostError::NotFound { id: missing } if missing == id));
         })
         .await;
@@ -419,21 +576,29 @@ mod tests {
     async fn posts_create_trims_and_refuses_blank() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let post = create(&deployment, "  spaced  ").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let post = create(&deployment, &alice, "  spaced  ", &[])
+                .await
+                .expect("a post");
             assert_eq!(post.body, "spaced");
 
-            let error = create(&deployment, " \n ").await.expect_err("blank");
+            let error = create(&deployment, &alice, " \n ", &[])
+                .await
+                .expect_err("blank");
             assert!(matches!(error, PostError::BlankBody));
-            assert_eq!(list(&deployment).await.expect("the posts").len(), 1);
+            assert_eq!(list(&deployment, &alice).await.expect("the posts").len(), 1);
         })
         .await;
     }
 
     #[tokio::test]
-    async fn posts_create_on_the_server_is_version_one_and_logged() {
+    async fn posts_create_on_the_server_is_version_one_and_logged_with_its_user() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let post = create(&deployment, "a post").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let post = create(&deployment, &alice, "a post", &[])
+                .await
+                .expect("a post");
             assert_eq!(post.version, 1);
             assert_eq!(post.last_synced_at, Some(post.updated_at));
             assert_eq!(
@@ -444,33 +609,44 @@ mod tests {
                 events_with_status(&deployment, EventStatus::Pending).await,
                 0
             );
+            let mut tx = deployment.begin().await.expect("a transaction");
+            let logged = events::conflicts(&mut tx).await.expect("none");
+            assert!(logged.is_empty());
         })
         .await;
     }
 
     #[tokio::test]
     async fn posts_create_on_a_device_is_version_zero_and_queued() {
-        let deployment = device().await;
-        let post = create(&deployment, "a post").await.expect("a post");
+        let deployment = users::tests::device().await;
+        let dev = users::create_if_missing(&deployment, &users::dev_user())
+            .await
+            .expect("the dev user");
+        let post = create(&deployment, &dev, "a post", &[])
+            .await
+            .expect("a post");
         assert_eq!(post.version, 0);
         assert_eq!(post.last_synced_at, None);
+        assert_eq!(post.owner_id, dev.id);
         assert_eq!(
             events_with_status(&deployment, EventStatus::Pending).await,
             1
         );
-        assert_eq!(
-            events_with_status(&deployment, EventStatus::Applied).await,
-            0
-        );
+        let mut tx = deployment.begin().await.expect("a transaction");
+        let pending = events::pending(&mut tx).await.expect("the queue");
+        assert_eq!(pending[0].user_id, dev.id);
     }
 
     #[tokio::test]
     async fn posts_update() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let written = create(&deployment, "before").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let written = create(&deployment, &alice, "before", &[])
+                .await
+                .expect("a post");
 
-            let updated = update(&deployment, written.id, "after")
+            let updated = update(&deployment, &alice, written.id, "after", &[])
                 .await
                 .expect("updated");
             assert_eq!(updated.body, "after");
@@ -478,20 +654,23 @@ mod tests {
             assert!(updated.updated_at >= written.updated_at);
             assert_eq!(updated.version, 2);
             assert_eq!(
-                get(&deployment, written.id).await.expect("the post"),
+                get(&deployment, &alice, written.id)
+                    .await
+                    .expect("the post")
+                    .post,
                 updated
             );
 
-            let same = update(&deployment, written.id, "after")
+            let same = update(&deployment, &alice, written.id, "after", &[])
                 .await
                 .expect("unchanged");
             assert_eq!(same.version, 2);
 
-            let error = update(&deployment, written.id, "")
+            let error = update(&deployment, &alice, written.id, "", &[])
                 .await
                 .expect_err("blank");
             assert!(matches!(error, PostError::BlankBody));
-            let error = update(&deployment, Uuid::now_v7(), "x")
+            let error = update(&deployment, &alice, Uuid::now_v7(), "x", &[])
                 .await
                 .expect_err("missing");
             assert!(matches!(error, PostError::NotFound { .. }));
@@ -500,16 +679,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn posts_delete_hides_the_post() {
+    async fn posts_delete_hides_the_post_and_records_who() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let written = create(&deployment, "going").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let written = create(&deployment, &alice, "going", &[])
+                .await
+                .expect("a post");
 
-            delete(&deployment, written.id).await.expect("deleted");
-            let error = get(&deployment, written.id).await.expect_err("gone");
+            delete(&deployment, &alice, written.id)
+                .await
+                .expect("deleted");
+            let error = get(&deployment, &alice, written.id)
+                .await
+                .expect_err("gone");
             assert!(matches!(error, PostError::NotFound { .. }));
-            assert!(list(&deployment).await.expect("the posts").is_empty());
-            let error = delete(&deployment, written.id)
+            assert!(
+                list(&deployment, &alice)
+                    .await
+                    .expect("the posts")
+                    .is_empty()
+            );
+            let error = delete(&deployment, &alice, written.id)
                 .await
                 .expect_err("already gone");
             assert!(matches!(error, PostError::NotFound { .. }));
@@ -520,6 +711,7 @@ mod tests {
                 .expect("the row")
                 .expect("kept");
             assert!(row.deleted_at.is_some());
+            assert_eq!(row.deleted_by_id, Some(alice.id));
             assert_eq!(row.version, 2);
         })
         .await;
@@ -529,7 +721,10 @@ mod tests {
     async fn posts_apply_event_answers_a_retry_the_same_without_applying_twice() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let post = create(&deployment, "before").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let post = create(&deployment, &alice, "before", &[])
+                .await
+                .expect("a post");
             let event = Event::update(
                 TABLE,
                 post.id,
@@ -539,14 +734,20 @@ mod tests {
                 now(),
             );
 
-            let first = apply_event(&deployment, &event).await.expect("applied");
-            let again = apply_event(&deployment, &event)
+            let first = apply_event(&deployment, &alice, &event)
+                .await
+                .expect("applied");
+            let again = apply_event(&deployment, &alice, &event)
                 .await
                 .expect("answered again");
             assert_eq!(first.status, AnswerStatus::Applied);
             assert_eq!(again.version, first.version);
             assert_eq!(
-                get(&deployment, post.id).await.expect("the post").version,
+                get(&deployment, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .version,
                 2
             );
         })
@@ -557,23 +758,67 @@ mod tests {
     async fn posts_apply_event_refuses_a_field_it_may_not_change() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let post = create(&deployment, "a post").await.expect("a post");
+            let alice = user(&deployment, "alice@example.com").await;
+            let post = create(&deployment, &alice, "a post", &[])
+                .await
+                .expect("a post");
             let event = Event::update(
                 TABLE,
                 post.id,
                 1,
                 fields(json!({})),
-                fields(json!({ "version": 9, "body": "x" })),
+                fields(json!({ "owner_id": Uuid::now_v7(), "body": "x" })),
                 now(),
             );
 
-            let answer = apply_event(&deployment, &event).await.expect("answered");
+            let answer = apply_event(&deployment, &alice, &event)
+                .await
+                .expect("answered");
             assert_eq!(answer.status, AnswerStatus::Rejected);
-            assert_eq!(answer.reason.as_deref(), Some("not_editable: version"));
+            assert_eq!(answer.reason.as_deref(), Some("not_editable: owner_id"));
             assert_eq!(
-                get(&deployment, post.id).await.expect("the post").body,
+                get(&deployment, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .body,
                 "a post"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn posts_apply_event_refuses_another_users_change_with_the_servers_row() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
+            let post = create(&deployment, &alice, "alice's", &[])
+                .await
+                .expect("a post");
+            let event = Event::update(
+                TABLE,
+                post.id,
+                1,
+                fields(json!({ "body": "alice's" })),
+                fields(json!({ "body": "bob's" })),
+                now(),
+            );
+
+            let answer = apply_event(&deployment, &bob, &event)
+                .await
+                .expect("answered");
+            assert_eq!(answer.status, AnswerStatus::Rejected);
+            assert_eq!(answer.reason.as_deref(), Some("not_owner"));
+            assert_eq!(
+                answer.server.expect("the row").row["body"],
+                json!("alice's")
+            );
+            let error = update(&deployment, &bob, post.id, "bob's", &[])
+                .await
+                .expect_err("not bob's");
+            assert!(matches!(error, PostError::NotFound { .. }));
         })
         .await;
     }
@@ -582,6 +827,7 @@ mod tests {
     async fn posts_apply_event_refuses_an_invalid_create() {
         with_each_database(|database| async move {
             let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
             let event = Event::create(
                 TABLE,
                 Uuid::now_v7(),
@@ -589,13 +835,20 @@ mod tests {
                 now(),
             );
 
-            let answer = apply_event(&deployment, &event).await.expect("answered");
+            let answer = apply_event(&deployment, &alice, &event)
+                .await
+                .expect("answered");
             assert_eq!(answer.status, AnswerStatus::Rejected);
             assert_eq!(
                 answer.reason.as_deref(),
                 Some("invalid: a post needs some text")
             );
-            assert!(list(&deployment).await.expect("the posts").is_empty());
+            assert!(
+                list(&deployment, &alice)
+                    .await
+                    .expect("the posts")
+                    .is_empty()
+            );
         })
         .await;
     }

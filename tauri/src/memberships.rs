@@ -1,0 +1,40 @@
+//! The memberships commands: joining and leaving a community, for the
+//! user signed in on this device. Both start a sync, which backfills a
+//! community just joined and prunes one just left.
+
+use tauri::{AppHandle, State};
+use uuid::Uuid;
+
+use app_core::deployment::Deployment;
+use app_core::memberships::{self, Membership};
+
+use crate::sync;
+use crate::users::signed_in;
+
+#[tauri::command]
+pub async fn memberships_join(
+    app: AppHandle,
+    deployment: State<'_, Deployment>,
+    community_id: Uuid,
+) -> Result<Membership, String> {
+    let user = signed_in(&deployment).await?;
+    let membership = memberships::join(&deployment, &user, community_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    Ok(membership)
+}
+
+#[tauri::command]
+pub async fn memberships_leave(
+    app: AppHandle,
+    deployment: State<'_, Deployment>,
+    community_id: Uuid,
+) -> Result<(), String> {
+    let user = signed_in(&deployment).await?;
+    memberships::leave(&deployment, &user, community_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    Ok(())
+}

@@ -1,0 +1,179 @@
+//! The purge: hard-deletes what was soft-deleted more than the retention
+//! window ago, on the server, see "Purge and resync" in
+//! `docs/design/offline-sync.md`. A row goes once both its delete and
+//! its last write are older than the horizon, so every device that
+//! pulled within the window has seen it go; children first, so a
+//! deleted post's community rows, deleted at the same moment, go with
+//! it; and the events of rows that are gone go too. Each run records
+//! its horizon, and a device whose cursor is older than the latest one
+//! may have missed a deletion, so the pull tells it to start over.
+//!
+//! Run it on a schedule, `app_web purge` from a daily cron job.
+
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::database::sql;
+use crate::deployment::{Deployment, Role};
+use crate::{communities, memberships, posts, posts_communities, users};
+
+/// How long a deleted row is kept, and how long a device may stay away.
+pub const RETENTION_DAYS: i64 = 90;
+
+/// The tables purged, children first.
+const TABLES: &[&str] = &[
+    posts_communities::TABLE,
+    posts::TABLE,
+    memberships::TABLE,
+    communities::TABLE,
+    users::TABLE,
+];
+
+/// One run as `app_purges` keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Purge {
+    pub id: Uuid,
+    pub horizon: DateTime<Utc>,
+    pub inserted_at: DateTime<Utc>,
+}
+
+/// What a run removed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeReport {
+    pub horizon: DateTime<Utc>,
+    /// Rows removed, by table, with the events of rows gone under
+    /// `app_events`.
+    pub removed: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Error)]
+pub enum PurgeError {
+    #[error("only the server purges")]
+    ServerOnly,
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+/// Purges every table as of `now` and records the horizon, in one
+/// transaction.
+pub async fn run(deployment: &Deployment, now: DateTime<Utc>) -> Result<PurgeReport, PurgeError> {
+    if deployment.role != Role::Server {
+        return Err(PurgeError::ServerOnly);
+    }
+    let horizon = now - Duration::days(RETENTION_DAYS);
+    let mut tx = deployment.begin().await?;
+    let mut removed = BTreeMap::new();
+    for table in TABLES {
+        let count = sql!(&mut tx, purges::delete_deleted_before(table, horizon))?;
+        removed.insert(table.to_string(), count);
+    }
+    let events = sql!(&mut tx, events::delete_of_missing_rows())?;
+    removed.insert("app_events".to_string(), events);
+    let purge = Purge {
+        id: Uuid::now_v7(),
+        horizon,
+        inserted_at: now,
+    };
+    sql!(&mut tx, purges::insert(&purge))?;
+    tx.commit().await?;
+    Ok(PurgeReport { horizon, removed })
+}
+
+/// The latest run's horizon: the oldest deletion a device may still
+/// learn of, or none before the first run.
+pub async fn horizon(deployment: &Deployment) -> Result<Option<DateTime<Utc>>, PurgeError> {
+    let mut tx = deployment.begin().await?;
+    let horizon = sql!(&mut tx, purges::latest_horizon())?;
+    tx.commit().await?;
+    Ok(horizon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{Database, with_each_database};
+    use crate::deployment::now;
+    use crate::events::{self, EventStatus};
+
+    #[tokio::test]
+    async fn purge_removes_what_was_deleted_before_the_horizon_with_its_rows_and_events() {
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let alice = users::create(&deployment, "alice@example.com")
+                .await
+                .expect("a user");
+            let gardening = communities::create(&deployment, &alice, "Gardening")
+                .await
+                .expect("a community");
+            let gone = posts::create(&deployment, &alice, "gone", &[gardening.id])
+                .await
+                .expect("a post");
+            let kept = posts::create(&deployment, &alice, "kept", &[gardening.id])
+                .await
+                .expect("a post");
+            posts::delete(&deployment, &alice, gone.id)
+                .await
+                .expect("deleted");
+            assert_eq!(horizon(&deployment).await.expect("none"), None);
+
+            let report = run(&deployment, now()).await.expect("purged");
+            assert_eq!(
+                report.removed.values().sum::<u64>(),
+                0,
+                "nothing is old yet"
+            );
+            assert_eq!(
+                horizon(&deployment).await.expect("one"),
+                Some(report.horizon)
+            );
+
+            let later = now() + Duration::days(RETENTION_DAYS + 1);
+            let report = run(&deployment, later).await.expect("purged");
+            assert_eq!(report.removed[posts::TABLE], 1);
+            assert_eq!(report.removed[posts_communities::TABLE], 1);
+            assert_eq!(report.removed[communities::TABLE], 0);
+            assert_eq!(
+                report.removed["app_events"], 3,
+                "the post's create, delete and its row's"
+            );
+            let mut tx = deployment.begin().await.expect("a transaction");
+            assert!(
+                posts::get_in(&mut tx, gone.id)
+                    .await
+                    .expect("looked")
+                    .is_none()
+            );
+            assert!(
+                posts::get_in(&mut tx, kept.id)
+                    .await
+                    .expect("looked")
+                    .is_some()
+            );
+            assert_eq!(
+                events::count(&mut tx, EventStatus::Applied)
+                    .await
+                    .expect("counted"),
+                4,
+                "alice's community, her membership, the kept post and its row"
+            );
+            tx.commit().await.expect("committed");
+            assert_eq!(
+                horizon(&deployment).await.expect("the latest"),
+                Some(report.horizon)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn purge_is_the_servers_alone() {
+        let device = users::tests::device().await;
+        let error = run(&device, now()).await.expect_err("a device");
+        assert!(matches!(error, PurgeError::ServerOnly));
+        let _ = Database::open_sqlite_in_memory;
+    }
+}

@@ -2,16 +2,18 @@
 //! `docs/design/offline-sync.md`: `app_core::sync::run` over HTTP to the
 //! server at `SYNC_SERVER_URL`, read when the app starts, else the value
 //! compiled in, which is how a phone build learns it, else the dev
-//! server's. One sync runs at a time: when the app starts, after every
-//! write, from the Sync now button, and every half minute. Each one ends
-//! with a `synced` event to the pages, carrying the report or the error.
+//! server's. One sync runs at a time: when the app starts, when it comes
+//! to the foreground, after every write, from the Sync now button, and
+//! every half minute. Each one ends with a `synced` event to the pages,
+//! carrying the report or the error.
 //! A device working offline, `sync_set_offline`, makes no request until
 //! it goes online again.
 //! A sync is a spawned task, not a queued job, and the only queue is the
 //! pending events: see "How a sync is started and run" in the design.
 
 use std::env;
-use std::time::Duration;
+use std::sync::{Mutex as SyncMutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{App, AppHandle, Emitter, Manager, State};
@@ -22,11 +24,17 @@ use app_core::sync::{self, Http, Report, Status};
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:4000";
 const INTERVAL: Duration = Duration::from_secs(30);
+/// A foreground sync is skipped this soon after the last sync started: a
+/// resume and a focus arrive together, and a click back into a desktop
+/// window is not news.
+const FOREGROUND_GAP: Duration = Duration::from_secs(5);
 
-/// The server, and the lock one sync at a time holds.
+/// The server, the lock one sync at a time holds, and when the last
+/// sync started.
 pub struct SyncServer {
     transport: Http,
     one_at_a_time: Mutex<()>,
+    last_started: SyncMutex<Option<Instant>>,
 }
 
 pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +43,7 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(SyncServer {
         transport: Http::new(&url)?,
         one_at_a_time: Mutex::new(()),
+        last_started: SyncMutex::new(None),
     });
     spawn(app.handle().clone());
     let handle = app.handle().clone();
@@ -62,11 +71,30 @@ pub fn spawn(app: AppHandle) {
     });
 }
 
+/// Starts a sync because the app came to the foreground: the window
+/// gained focus, or the app resumed on a phone. Skipped when a sync
+/// started within `FOREGROUND_GAP`.
+pub fn spawn_on_foreground(app: &AppHandle) {
+    let recent = app
+        .state::<SyncServer>()
+        .last_started
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some_and(|started| started.elapsed() < FOREGROUND_GAP);
+    if !recent {
+        spawn(app.clone());
+    }
+}
+
 /// One sync, reported to the pages as a `synced` event.
 async fn run(app: &AppHandle) -> Result<Report, String> {
     let server = app.state::<SyncServer>();
     let deployment = app.state::<Deployment>();
     let _one_at_a_time = server.one_at_a_time.lock().await;
+    *server
+        .last_started
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     let result = sync::run(&deployment, &server.transport)
         .await
         .map_err(|error| error.to_string());

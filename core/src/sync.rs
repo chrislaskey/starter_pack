@@ -1,14 +1,18 @@
 //! Sync: how a device's database and the web server's converge, see
-//! `docs/design/offline-sync.md`. The server answers a push of events and
-//! a pull of rows since a cursor, `push` and `pull`, which the web server
-//! serves under `/api/sync`. A device does one sync with `run`: it pushes
-//! its pending events through a `Transport`, applies the answers, then
-//! pulls pages from its cursor. The transport is HTTP in the apps, behind
-//! the `sync-http` feature, and the server's own functions in this
-//! process in tests. A device that chose to work offline, `set_offline`, a
-//! device setting, makes no request at all until it chooses otherwise.
+//! `docs/design/offline-sync.md`. The server answers a push of events, a
+//! pull of the rows a user sees since a cursor, and a backfill of
+//! everything in one community, `push`, `pull` and `backfill`, which the
+//! web server serves under `/api/sync` for the user its bearer token
+//! stands for. A device does one sync with `run`: it pushes its pending
+//! events through a `Transport` with its token, applies the answers,
+//! pulls pages from its cursor, backfills each community it has just
+//! joined, and prunes the posts it can no longer see. The transport is
+//! HTTP in the apps, behind the `sync-http` feature, and the server's
+//! own functions in this process in tests. A device that chose to work
+//! offline, `set_offline`, a device setting, makes no request at all
+//! until it chooses otherwise.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use chrono::{DateTime, Duration, Utc};
@@ -17,11 +21,16 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::{self, Community, CommunityError};
 use crate::database::{Transaction, sql};
-use crate::deployment::Deployment;
-use crate::device_settings::{self, DeviceSettingsError, WORK_OFFLINE};
+use crate::deployment::{Deployment, now};
+use crate::device_settings::{self, API_TOKEN, DeviceSettingsError, WORK_OFFLINE};
 use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus};
-use crate::posts::{self, PostError};
+use crate::memberships::{self, Membership, MembershipError};
+use crate::posts::{self, Post, PostError};
+use crate::posts_communities::{self, PostCommunity, PostCommunityError};
+use crate::purge::{self, PurgeError};
+use crate::users::{self, User, UserError};
 
 /// How far back from its cursor's time a pull starts, so a row written
 /// in a transaction that committed after a later one is not missed.
@@ -66,6 +75,12 @@ pub struct TableRow {
     pub row: Value,
 }
 
+impl TableRow {
+    fn id(&self) -> Option<Uuid> {
+        Uuid::parse_str(self.row.get("id")?.as_str()?).ok()
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PushRequest {
     pub events: Vec<Event>,
@@ -88,13 +103,39 @@ pub struct PullRequest {
     pub limit: Option<usize>,
 }
 
-/// One page of a pull.
+/// Everything in one community, for a device that just joined it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackfillRequest {
+    pub community_id: Uuid,
+    /// The `next` of the page before.
+    #[serde(default)]
+    pub after: Option<Cursor>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One page of a pull or a backfill.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Page {
+    /// In cursor order, each row after the rows it points at.
     pub rows: Vec<TableRow>,
     /// Where the next page starts, when this one was full.
     #[serde(default)]
     pub next: Option<Cursor>,
+    /// The place to store once the page is applied: the last row's in
+    /// cursor order, not counting the rows brought along for it, or on
+    /// the last page the server's time, which the device has everything
+    /// up to.
+    #[serde(default)]
+    pub cursor: Option<Cursor>,
+    /// The oldest deletion the server still has, after its last purge.
+    #[serde(default)]
+    pub purge_horizon: Option<DateTime<Utc>>,
+    /// The device's cursor is older than the horizon, so it may have
+    /// missed a deletion: drop everything and pull from nothing. The
+    /// page is empty.
+    #[serde(default)]
+    pub resync: bool,
 }
 
 #[derive(Debug, Error)]
@@ -104,7 +145,23 @@ pub enum SyncError {
     #[error(transparent)]
     Post(#[from] PostError),
     #[error(transparent)]
+    PostCommunity(#[from] PostCommunityError),
+    #[error(transparent)]
+    Community(#[from] CommunityError),
+    #[error(transparent)]
+    Membership(#[from] MembershipError),
+    #[error(transparent)]
+    User(#[from] UserError),
+    #[error(transparent)]
+    Purge(#[from] PurgeError),
+    #[error(transparent)]
     DeviceSettings(#[from] DeviceSettingsError),
+    /// The device sent no token, or one the server does not know.
+    #[error("The server did not accept this device's token")]
+    Unauthorized,
+    /// A backfill of a community the user is not in.
+    #[error("not a member of community {community_id}")]
+    NotAMember { community_id: Uuid },
     /// The server could not be reached, or refused the request: the
     /// message is for the person, the detail inside for the log.
     #[error("Could not sync data")]
@@ -113,16 +170,22 @@ pub enum SyncError {
     Malformed(String),
 }
 
-/// Answers a push: applies the events in the order given, each in its own
-/// transaction, through the resource of its table.
+/// Answers a push from the user: applies the events in the order given,
+/// each in its own transaction, through the resource of its table.
 pub async fn push(
     deployment: &Deployment,
+    user: &User,
     request: PushRequest,
 ) -> Result<PushResponse, SyncError> {
     let mut answers = Vec::with_capacity(request.events.len());
     for event in &request.events {
         let answer = match event.table.as_str() {
-            posts::TABLE => posts::apply_event(deployment, event).await?,
+            communities::TABLE => communities::apply_event(deployment, user, event).await?,
+            memberships::TABLE => memberships::apply_event(deployment, user, event).await?,
+            posts::TABLE => posts::apply_event(deployment, user, event).await?,
+            posts_communities::TABLE => {
+                posts_communities::apply_event(deployment, user, event).await?
+            }
             _ => Answer::rejected(event.id, "unknown_table", None),
         };
         answers.push(answer);
@@ -130,11 +193,26 @@ pub async fn push(
     Ok(PushResponse { events: answers })
 }
 
-/// Answers a pull: the rows the server wrote after the cursor, in cursor
-/// order, deleted or not. One table today; with more, each table's rows
-/// after the cursor are merged by their place in the order and cut at the
-/// limit.
-pub async fn pull(deployment: &Deployment, request: PullRequest) -> Result<Page, SyncError> {
+/// Answers a pull from the user: the rows they see that the server wrote
+/// after the cursor, every table merged by its place in the order and
+/// cut at the limit, deleted or not, each after the rows it points at.
+/// A cursor older than the purge horizon is answered with `resync`
+/// instead, since a deletion it never saw may be gone.
+pub async fn pull(
+    deployment: &Deployment,
+    user: &User,
+    request: PullRequest,
+) -> Result<Page, SyncError> {
+    let purge_horizon = purge::horizon(deployment).await?;
+    if let (Some(horizon), Some(cursor)) = (purge_horizon, request.cursor)
+        && cursor.last_synced_at < horizon
+    {
+        return Ok(Page {
+            purge_horizon,
+            resync: true,
+            ..Page::default()
+        });
+    }
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let after = match (request.after, request.cursor) {
         (Some(after), _) => after,
@@ -146,42 +224,316 @@ pub async fn pull(deployment: &Deployment, request: PullRequest) -> Result<Page,
     };
 
     let mut tx = deployment.begin().await?;
-    let posts = posts::list_synced_after(&mut tx, &after, limit).await?;
+    let mut rows: Vec<SyncedRow> = Vec::new();
+    rows.extend(
+        users::list_synced_after(&mut tx, user, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::User),
+    );
+    rows.extend(
+        communities::list_synced_after(&mut tx, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::Community),
+    );
+    rows.extend(
+        memberships::list_synced_after(&mut tx, user, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::Membership),
+    );
+    rows.extend(
+        posts::list_synced_after(&mut tx, user, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::Post),
+    );
+    rows.extend(
+        posts_communities::list_synced_after(&mut tx, user, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::PostCommunity),
+    );
+    let mut page = page_of(&mut tx, rows, limit).await?;
     tx.commit().await?;
-
-    let rows = posts
-        .iter()
-        .map(posts::table_row)
-        .collect::<Result<Vec<TableRow>, PostError>>()?;
-    let next = if rows.len() == limit {
-        rows.last().and_then(Cursor::of_row)
-    } else {
-        None
-    };
-    Ok(Page { rows, next })
+    page.purge_horizon = purge_horizon;
+    if page.next.is_none() {
+        // The device now has everything up to this moment, whatever the
+        // last row's time, so a quiet stretch never makes it look stale
+        page.cursor = Some(Cursor {
+            last_synced_at: now(),
+            id: Uuid::nil(),
+        });
+    }
+    Ok(page)
 }
 
-/// The server, as a device reaches it.
+/// Answers a backfill from the user: every post in the community, as
+/// its live rows there after the cursor, each with the rows it points
+/// at. The user must be in the community.
+pub async fn backfill(
+    deployment: &Deployment,
+    user: &User,
+    request: BackfillRequest,
+) -> Result<Page, SyncError> {
+    let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let after = request.after.unwrap_or_else(Cursor::start);
+    let mut tx = deployment.begin().await?;
+    if memberships::get_live_in(&mut tx, user.id, request.community_id)
+        .await?
+        .is_none()
+    {
+        return Err(SyncError::NotAMember {
+            community_id: request.community_id,
+        });
+    }
+    let rows: Vec<SyncedRow> = posts_communities::list_live_of_community_after(
+        &mut tx,
+        request.community_id,
+        &after,
+        limit,
+    )
+    .await?
+    .into_iter()
+    .map(SyncedRow::PostCommunity)
+    .collect();
+    let page = page_of(&mut tx, rows, limit).await?;
+    tx.commit().await?;
+    Ok(page)
+}
+
+/// A row of a synced table before it goes on the wire.
+enum SyncedRow {
+    User(User),
+    Community(Community),
+    Membership(Membership),
+    Post(Post),
+    PostCommunity(PostCommunity),
+}
+
+impl SyncedRow {
+    fn key(&self) -> Cursor {
+        let (last_synced_at, id) = match self {
+            SyncedRow::User(row) => (row.last_synced_at, row.id),
+            SyncedRow::Community(row) => (row.last_synced_at, row.id),
+            SyncedRow::Membership(row) => (row.last_synced_at, row.id),
+            SyncedRow::Post(row) => (row.last_synced_at, row.id),
+            SyncedRow::PostCommunity(row) => (row.last_synced_at, row.id),
+        };
+        Cursor {
+            last_synced_at: last_synced_at.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            id,
+        }
+    }
+
+    fn table_row(&self) -> Result<TableRow, SyncError> {
+        Ok(match self {
+            SyncedRow::User(row) => users::table_row(row)?,
+            SyncedRow::Community(row) => communities::table_row(row)?,
+            SyncedRow::Membership(row) => memberships::table_row(row)?,
+            SyncedRow::Post(row) => posts::table_row(row)?,
+            SyncedRow::PostCommunity(row) => posts_communities::table_row(row)?,
+        })
+    }
+}
+
+/// The first `limit` rows in cursor order, each after the rows it points
+/// at, with where the next page starts when there are more.
+async fn page_of(
+    tx: &mut Transaction,
+    mut rows: Vec<SyncedRow>,
+    limit: usize,
+) -> Result<Page, SyncError> {
+    rows.sort_by_key(SyncedRow::key);
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let cursor = rows.last().map(SyncedRow::key);
+    Ok(Page {
+        rows: with_parents(tx, rows).await?,
+        next: if more { cursor } else { None },
+        cursor,
+        purge_horizon: None,
+        resync: false,
+    })
+}
+
+/// The rows on the wire, each after the rows it points at, so a device
+/// with foreign keys can write them in order: a membership after its
+/// user and community, a post after its owner, a post's community row
+/// after the post, the community and the membership it was added under.
+/// A row brought along for another is sent once.
+async fn with_parents(
+    tx: &mut Transaction,
+    rows: Vec<SyncedRow>,
+) -> Result<Vec<TableRow>, SyncError> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut sent: BTreeSet<(&'static str, Uuid)> = BTreeSet::new();
+    for row in rows {
+        match &row {
+            SyncedRow::Membership(membership) => {
+                send_user(tx, &mut out, &mut sent, membership.user_id).await?;
+                send_community(tx, &mut out, &mut sent, membership.community_id).await?;
+            }
+            SyncedRow::Post(post) => {
+                send_user(tx, &mut out, &mut sent, post.owner_id).await?;
+            }
+            SyncedRow::PostCommunity(row) => {
+                if let Some(post) = posts::get_in(tx, row.post_id).await? {
+                    send_user(tx, &mut out, &mut sent, post.owner_id).await?;
+                    send(
+                        &mut out,
+                        &mut sent,
+                        posts::TABLE,
+                        post.id,
+                        SyncedRow::Post(post),
+                    )?;
+                }
+                send_community(tx, &mut out, &mut sent, row.community_id).await?;
+                if let Some(membership) = memberships::get_in(tx, row.users_communities_id).await? {
+                    send_user(tx, &mut out, &mut sent, membership.user_id).await?;
+                    send(
+                        &mut out,
+                        &mut sent,
+                        memberships::TABLE,
+                        membership.id,
+                        SyncedRow::Membership(membership),
+                    )?;
+                }
+            }
+            SyncedRow::User(_) | SyncedRow::Community(_) => {}
+        }
+        let (table, id) = match &row {
+            SyncedRow::User(user) => (users::TABLE, user.id),
+            SyncedRow::Community(community) => (communities::TABLE, community.id),
+            SyncedRow::Membership(membership) => (memberships::TABLE, membership.id),
+            SyncedRow::Post(post) => (posts::TABLE, post.id),
+            SyncedRow::PostCommunity(row) => (posts_communities::TABLE, row.id),
+        };
+        send(&mut out, &mut sent, table, id, row)?;
+    }
+    Ok(out)
+}
+
+async fn send_user(
+    tx: &mut Transaction,
+    out: &mut Vec<TableRow>,
+    sent: &mut BTreeSet<(&'static str, Uuid)>,
+    id: Uuid,
+) -> Result<(), SyncError> {
+    if sent.contains(&(users::TABLE, id)) {
+        return Ok(());
+    }
+    if let Some(user) = users::get_in(tx, id).await? {
+        send(out, sent, users::TABLE, id, SyncedRow::User(user))?;
+    }
+    Ok(())
+}
+
+async fn send_community(
+    tx: &mut Transaction,
+    out: &mut Vec<TableRow>,
+    sent: &mut BTreeSet<(&'static str, Uuid)>,
+    id: Uuid,
+) -> Result<(), SyncError> {
+    if sent.contains(&(communities::TABLE, id)) {
+        return Ok(());
+    }
+    if let Some(community) = communities::get_in(tx, id).await? {
+        send(
+            out,
+            sent,
+            communities::TABLE,
+            id,
+            SyncedRow::Community(community),
+        )?;
+    }
+    Ok(())
+}
+
+fn send(
+    out: &mut Vec<TableRow>,
+    sent: &mut BTreeSet<(&'static str, Uuid)>,
+    table: &'static str,
+    id: Uuid,
+    row: SyncedRow,
+) -> Result<(), SyncError> {
+    if sent.insert((table, id)) {
+        out.push(row.table_row()?);
+    }
+    Ok(())
+}
+
+/// The order rows are written in on a device, parents first.
+fn table_rank(table: &str) -> usize {
+    match table {
+        users::TABLE => 0,
+        communities::TABLE => 1,
+        memberships::TABLE => 2,
+        posts::TABLE => 3,
+        posts_communities::TABLE => 4,
+        _ => 5,
+    }
+}
+
+/// The server, as a device reaches it, with the device's token.
 pub trait Transport {
     fn push(
         &self,
+        token: Option<&str>,
         request: PushRequest,
     ) -> impl Future<Output = Result<PushResponse, SyncError>> + Send;
-    fn pull(&self, request: PullRequest) -> impl Future<Output = Result<Page, SyncError>> + Send;
+    fn pull(
+        &self,
+        token: Option<&str>,
+        request: PullRequest,
+    ) -> impl Future<Output = Result<Page, SyncError>> + Send;
+    fn backfill(
+        &self,
+        token: Option<&str>,
+        request: BackfillRequest,
+    ) -> impl Future<Output = Result<Page, SyncError>> + Send;
 }
 
-/// The server in this process: its functions called directly, for tests.
+/// The server in this process: its functions called directly, for tests,
+/// resolving the token as the web server does.
 pub struct InProcess<'a> {
     pub server: &'a Deployment,
 }
 
+impl InProcess<'_> {
+    async fn user(&self, token: Option<&str>) -> Result<User, SyncError> {
+        let token = token.ok_or(SyncError::Unauthorized)?;
+        match users::get_by_token(self.server, token).await {
+            Ok(user) => Ok(user),
+            Err(UserError::UnknownToken) => Err(SyncError::Unauthorized),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
 impl Transport for InProcess<'_> {
-    async fn push(&self, request: PushRequest) -> Result<PushResponse, SyncError> {
-        push(self.server, request).await
+    async fn push(
+        &self,
+        token: Option<&str>,
+        request: PushRequest,
+    ) -> Result<PushResponse, SyncError> {
+        let user = self.user(token).await?;
+        push(self.server, &user, request).await
     }
 
-    async fn pull(&self, request: PullRequest) -> Result<Page, SyncError> {
-        pull(self.server, request).await
+    async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+        let user = self.user(token).await?;
+        pull(self.server, &user, request).await
+    }
+
+    async fn backfill(
+        &self,
+        token: Option<&str>,
+        request: BackfillRequest,
+    ) -> Result<Page, SyncError> {
+        let user = self.user(token).await?;
+        backfill(self.server, &user, request).await
     }
 }
 
@@ -207,17 +559,23 @@ impl Http {
 
     async fn post<Request: Serialize, Response: serde::de::DeserializeOwned>(
         &self,
+        token: Option<&str>,
         path: &str,
         request: &Request,
     ) -> Result<Response, SyncError> {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.base_url))
+        let mut builder = self.client.post(format!("{}{path}", self.base_url));
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        let response = builder
             .json(request)
             .send()
             .await
             .map_err(|error| SyncError::Transport(error.to_string()))?;
         let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(SyncError::Unauthorized);
+        }
         if !status.is_success() {
             return Err(SyncError::Transport(format!(
                 "the server refused {path} with {status}"
@@ -232,12 +590,24 @@ impl Http {
 
 #[cfg(feature = "sync-http")]
 impl Transport for Http {
-    async fn push(&self, request: PushRequest) -> Result<PushResponse, SyncError> {
-        self.post("/api/sync/push", &request).await
+    async fn push(
+        &self,
+        token: Option<&str>,
+        request: PushRequest,
+    ) -> Result<PushResponse, SyncError> {
+        self.post(token, "/api/sync/push", &request).await
     }
 
-    async fn pull(&self, request: PullRequest) -> Result<Page, SyncError> {
-        self.post("/api/sync/pull", &request).await
+    async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+        self.post(token, "/api/sync/pull", &request).await
+    }
+
+    async fn backfill(
+        &self,
+        token: Option<&str>,
+        request: BackfillRequest,
+    ) -> Result<Page, SyncError> {
+        self.post(token, "/api/sync/backfill", &request).await
     }
 }
 
@@ -254,6 +624,13 @@ pub struct Report {
     pub rejected: usize,
     /// Rows received by the pull.
     pub pulled: usize,
+    /// Rows received by the backfills of communities just joined.
+    pub backfilled: usize,
+    /// Posts removed from the device because its user no longer sees them.
+    pub pruned: u64,
+    /// The device was away longer than the server keeps deletions, so it
+    /// dropped its rows and pulled from nothing; its events were kept.
+    pub resynced: bool,
     /// Events still waiting after this sync.
     pub pending: i64,
     /// Why the push failed as a whole, when it did; the pull still ran.
@@ -270,10 +647,13 @@ pub struct Status {
     pub cursor: Option<Cursor>,
 }
 
-/// One sync on a device: push the pending events and apply the answers,
-/// then pull from the cursor. A push that fails as a whole changes
-/// nothing on the device and the pull still runs. Working offline, it
-/// makes no request and only reports what waits.
+/// One sync on a device, as the user signed in and with the device's
+/// token: push the pending events and apply the answers, pull from the
+/// cursor, starting over from nothing if the server says so, backfill
+/// each community just joined, prune what the user no longer sees. A
+/// push that fails as a whole changes nothing on the device and the pull
+/// still runs. Working offline, it makes no request and only reports
+/// what waits.
 pub async fn run<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -285,10 +665,15 @@ pub async fn run<T: Transport>(
         report.pending = before.pending;
         return Ok(report);
     }
-    if let Err(error) = push_pending(deployment, transport, &mut report).await {
+    let token = api_token(deployment).await?;
+    let token = token.as_deref();
+    let user = users::signed_in(deployment).await?;
+    if let Err(error) = push_pending(deployment, transport, token, &user, &mut report).await {
         report.push_error = Some(error.to_string());
     }
-    pull_pages(deployment, transport, &mut report).await?;
+    pull_pages(deployment, transport, token, &user, &mut report).await?;
+    backfill_pending(deployment, transport, token, &user, &mut report).await?;
+    prune(deployment, &user, &mut report).await?;
     report.pending = status(deployment).await?.pending;
     Ok(report)
 }
@@ -314,9 +699,19 @@ pub async fn set_offline(deployment: &Deployment, offline: bool) -> Result<(), S
     Ok(())
 }
 
+/// The token the device sends, a device setting; none until a login.
+async fn api_token(deployment: &Deployment) -> Result<Option<String>, SyncError> {
+    let mut tx = deployment.begin().await?;
+    let token = device_settings::get(&mut tx, API_TOKEN).await?;
+    tx.commit().await?;
+    Ok(token)
+}
+
 async fn push_pending<T: Transport>(
     deployment: &Deployment,
     transport: &T,
+    token: Option<&str>,
+    user: &User,
     report: &mut Report,
 ) -> Result<(), SyncError> {
     let mut tx = deployment.begin().await?;
@@ -329,55 +724,84 @@ async fn push_pending<T: Transport>(
     let request = PushRequest {
         events: pending.iter().map(|stored| stored.event.clone()).collect(),
     };
-    let response = transport.push(request).await?;
+    let response = transport.push(token, request).await?;
 
     let mut tx = deployment.begin().await?;
-    let mut answered: BTreeMap<(String, Uuid), Option<TableRow>> = BTreeMap::new();
+    // The server's row of each answered row, by the row's place in the
+    // write order, applied once every answer is in
+    let mut answered: BTreeMap<(usize, Uuid), TableRow> = BTreeMap::new();
     for answer in response.events {
         let Some(stored) = pending.iter().find(|stored| stored.event.id == answer.id) else {
             continue;
         };
         let event = &stored.event;
-        let key = (event.table.clone(), event.row_id);
+        let server = answer.server;
         match answer.status {
             AnswerStatus::Applied => {
                 events::delete(&mut tx, event.id).await?;
                 report.pushed += 1;
-                answered.insert(key, answer.server);
             }
             AnswerStatus::Conflict => {
                 events::mark_conflict(&mut tx, event.id, &answer.conflicts).await?;
                 report.conflicts += 1;
-                answered.insert(key, answer.server);
             }
             AnswerStatus::Rejected => {
                 report.rejected += 1;
                 let reason = answer.reason.unwrap_or_else(|| "rejected".to_string());
-                match (event.kind, answer.server) {
+                match (event.kind, server.is_some()) {
                     // The server's row wins
-                    (_, Some(server)) => {
-                        events::delete(&mut tx, event.id).await?;
-                        answered.insert(key, Some(server));
-                    }
+                    (_, true) => events::delete(&mut tx, event.id).await?,
                     // The server will never have this row: drop it
-                    (EventKind::Create, None) => {
+                    (EventKind::Create, false) => {
                         events::delete(&mut tx, event.id).await?;
                         events::delete_pending_of_row(&mut tx, &event.table, event.row_id).await?;
                         delete_row(&mut tx, &event.table, event.row_id).await?;
-                        answered.remove(&key);
+                        continue;
+                    }
+                    // The row is gone from the server, purged or never
+                    // there, so the device's copy goes too, and the change
+                    // is kept for the person as a conflict with nothing on
+                    // the other side, to let go
+                    (EventKind::Update, false) if reason.starts_with("unknown_") => {
+                        delete_row(&mut tx, &event.table, event.row_id).await?;
+                        let conflicts = event
+                            .changes
+                            .iter()
+                            .map(|(field, yours)| {
+                                (
+                                    field.clone(),
+                                    events::FieldConflict {
+                                        yours: yours.clone(),
+                                        server: Value::Null,
+                                    },
+                                )
+                            })
+                            .collect();
+                        events::mark_conflict(&mut tx, event.id, &conflicts).await?;
+                        report.conflicts += 1;
+                        continue;
                     }
                     // Kept pending with the reason, for a debugging screen
-                    (EventKind::Update, None) => {
+                    (EventKind::Update, false) => {
                         events::mark_error(&mut tx, event.id, &reason).await?;
+                        continue;
                     }
                 }
             }
         }
-    }
-    for (_, server) in answered {
-        if let Some(row) = server {
-            apply_row(&mut tx, &row).await?;
+        if let Some(server) = server {
+            // The server holds the row under another id, such as a
+            // membership revived rather than made again: the device's goes
+            let server_id = server.id().unwrap_or(event.row_id);
+            if server_id != event.row_id {
+                events::delete_pending_of_row(&mut tx, &event.table, event.row_id).await?;
+                delete_row(&mut tx, &event.table, event.row_id).await?;
+            }
+            answered.insert((table_rank(&server.table), server_id), server);
         }
+    }
+    for row in answered.into_values() {
+        apply_row(&mut tx, user, &row).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -386,6 +810,8 @@ async fn push_pending<T: Transport>(
 async fn pull_pages<T: Transport>(
     deployment: &Deployment,
     transport: &T,
+    token: Option<&str>,
+    user: &User,
     report: &mut Report,
 ) -> Result<(), SyncError> {
     let mut request = PullRequest {
@@ -394,13 +820,23 @@ async fn pull_pages<T: Transport>(
         limit: Some(DEFAULT_LIMIT),
     };
     loop {
-        let page = transport.pull(request.clone()).await?;
+        let page = transport.pull(token, request.clone()).await?;
+        if page.resync {
+            reset(deployment, user).await?;
+            report.resynced = true;
+            request = PullRequest {
+                cursor: None,
+                after: None,
+                limit: Some(DEFAULT_LIMIT),
+            };
+            continue;
+        }
         let mut tx = deployment.begin().await?;
         for row in &page.rows {
-            apply_row(&mut tx, row).await?;
+            apply_row(&mut tx, user, row).await?;
         }
         report.pulled += page.rows.len();
-        if let Some(cursor) = page.rows.last().and_then(Cursor::of_row) {
+        if let Some(cursor) = page.cursor {
             sql!(&mut tx, sync_state::save_cursor(&cursor))?;
         }
         tx.commit().await?;
@@ -417,11 +853,100 @@ async fn pull_pages<T: Transport>(
     }
 }
 
+/// Drops every synced row, the cursor and the backfills to do, to pull
+/// from nothing: what a device does when it was away longer than the
+/// server keeps deletions. The events stay, with the rows of the pending
+/// ones, which the server's answers replace on the next push; a conflict
+/// belongs to the person. The user's own row stays too, since their
+/// posts point at it.
+async fn reset(deployment: &Deployment, user: &User) -> Result<(), SyncError> {
+    let mut tx = deployment.begin().await?;
+    sql!(&mut tx, sync_state::reset(user.id))?;
+    tx.commit().await?;
+    users::create_if_missing(deployment, user).await?;
+    Ok(())
+}
+
+/// Asks for everything in each community the user has just joined,
+/// since the cursor cannot see rows that became visible without
+/// changing, and forgets the community once every page is in.
+async fn backfill_pending<T: Transport>(
+    deployment: &Deployment,
+    transport: &T,
+    token: Option<&str>,
+    user: &User,
+    report: &mut Report,
+) -> Result<(), SyncError> {
+    let mut tx = deployment.begin().await?;
+    let communities = sql!(&mut tx, sync_backfills::list())?;
+    tx.commit().await?;
+    for community_id in communities {
+        let mut after = None;
+        loop {
+            let page = transport
+                .backfill(
+                    token,
+                    BackfillRequest {
+                        community_id,
+                        after,
+                        limit: Some(DEFAULT_LIMIT),
+                    },
+                )
+                .await?;
+            let mut tx = deployment.begin().await?;
+            for row in &page.rows {
+                apply_row(&mut tx, user, row).await?;
+            }
+            report.backfilled += page.rows.len();
+            if page.next.is_none() {
+                sql!(&mut tx, sync_backfills::delete(community_id))?;
+            }
+            tx.commit().await?;
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Removes the posts the user no longer sees: a community left, a post
+/// taken out of one, the rows brought along for a removal.
+async fn prune(deployment: &Deployment, user: &User, report: &mut Report) -> Result<(), SyncError> {
+    let mut tx = deployment.begin().await?;
+    report.pruned = posts::prune(&mut tx, user).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Writes a server row over the device's, unless the device has an
-/// event for it still pending; true when it was written.
-async fn apply_row(tx: &mut Transaction, row: &TableRow) -> Result<bool, SyncError> {
+/// event for it still pending; true when it was written. A live
+/// membership of the device's user that the device did not have, or
+/// had left, records the community to backfill.
+async fn apply_row(tx: &mut Transaction, user: &User, row: &TableRow) -> Result<bool, SyncError> {
     match row.table.as_str() {
+        users::TABLE => Ok(users::apply_server_row(tx, &row.row).await?),
+        communities::TABLE => Ok(communities::apply_server_row(tx, &row.row).await?),
+        memberships::TABLE => {
+            let incoming: Membership = serde_json::from_value(row.row.clone())
+                .map_err(|error| SyncError::Malformed(error.to_string()))?;
+            let joined = incoming.user_id == user.id
+                && incoming.deleted_at.is_none()
+                && memberships::get_in(tx, incoming.id)
+                    .await?
+                    .is_none_or(|had| had.deleted_at.is_some() || had.last_synced_at.is_none());
+            let written = memberships::apply_server_row(tx, &row.row).await?;
+            if written && joined {
+                sql!(
+                    &mut *tx,
+                    sync_backfills::insert_if_missing(incoming.community_id)
+                )?;
+            }
+            Ok(written)
+        }
         posts::TABLE => Ok(posts::apply_server_row(tx, &row.row).await?),
+        posts_communities::TABLE => Ok(posts_communities::apply_server_row(tx, &row.row).await?),
         other => Err(SyncError::Malformed(format!(
             "a row of an unknown table '{other}'"
         ))),
@@ -430,7 +955,10 @@ async fn apply_row(tx: &mut Transaction, row: &TableRow) -> Result<bool, SyncErr
 
 async fn delete_row(tx: &mut Transaction, table: &str, id: Uuid) -> Result<(), SyncError> {
     match table {
+        communities::TABLE => Ok(communities::delete_row(tx, id).await?),
+        memberships::TABLE => Ok(memberships::delete_row(tx, id).await?),
         posts::TABLE => Ok(posts::delete_row(tx, id).await?),
+        posts_communities::TABLE => Ok(posts_communities::delete_row(tx, id).await?),
         other => Err(SyncError::Malformed(format!(
             "a row of an unknown table '{other}'"
         ))),
@@ -438,16 +966,25 @@ async fn delete_row(tx: &mut Transaction, table: &str, id: Uuid) -> Result<(), S
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
     use crate::database::{Database, with_each_database};
-    use crate::deployment::Role;
-    use crate::{conflicts, posts};
+    use crate::deployment::{Role, now};
+    use crate::device_settings::SIGNED_IN_USER;
+    use crate::{communities, conflicts, memberships, posts, posts_communities, purge, tokens};
 
-    /// A device as the app opens it: its settings set up.
-    async fn device() -> Deployment {
+    /// A user registered on the server, with a token for their devices.
+    pub(crate) async fn user_with_token(server: &Deployment, email: &str) -> (User, String) {
+        let user = users::create(server, email).await.expect("a user");
+        let token = tokens::create(server, user.id).await.expect("a token");
+        (user, token)
+    }
+
+    /// A device as the app opens it, signed in as the user with their
+    /// token.
+    pub(crate) async fn device_of(user: &User, token: &str) -> Deployment {
         let database = Database::open_sqlite_in_memory()
             .await
             .expect("an in-memory SQLite database");
@@ -455,6 +992,17 @@ mod tests {
         device_settings::upgrade(&deployment)
             .await
             .expect("the settings set up");
+        let mut tx = deployment.begin().await.expect("a transaction");
+        device_settings::set(&mut tx, SIGNED_IN_USER, user)
+            .await
+            .expect("signed in");
+        device_settings::set(&mut tx, API_TOKEN, &Some(token.to_string()))
+            .await
+            .expect("the token");
+        tx.commit().await.expect("committed");
+        users::create_if_missing(&deployment, user)
+            .await
+            .expect("the user's row");
         deployment
     }
 
@@ -462,12 +1010,12 @@ mod tests {
         run(device, &InProcess { server }).await.expect("a sync")
     }
 
-    async fn bodies(deployment: &Deployment) -> Vec<String> {
-        posts::list(deployment)
+    async fn bodies(deployment: &Deployment, user: &User) -> Vec<String> {
+        posts::list(deployment, user)
             .await
             .expect("the posts")
             .into_iter()
-            .map(|post| post.body)
+            .map(|listed| listed.post.body)
             .collect()
     }
 
@@ -479,23 +1027,85 @@ mod tests {
     async fn sync_a_post_written_offline_reaches_the_server_and_the_other_device() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "from a").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "from a", &[])
+                .await
+                .expect("a post");
             assert_eq!(pending(&a).await, 1);
 
             let report = sync(&a, &server).await;
             assert_eq!(report.pushed, 1);
             assert_eq!(report.pending, 0);
-            let on_a = posts::get(&a, post.id).await.expect("the post on a");
+            let on_a = posts::get(&a, &alice, post.id)
+                .await
+                .expect("the post on a")
+                .post;
             assert_eq!(on_a.version, 1);
             assert!(on_a.last_synced_at.is_some());
-            assert_eq!(bodies(&server).await, vec!["from a"]);
+            assert_eq!(bodies(&server, &alice).await, vec!["from a"]);
 
             let report = sync(&b, &server).await;
-            assert_eq!(report.pulled, 1);
-            assert_eq!(posts::get(&b, post.id).await.expect("the post on b"), on_a);
+            assert_eq!(report.pulled, 2, "alice's row and the post");
+            assert_eq!(
+                posts::get(&b, &alice, post.id)
+                    .await
+                    .expect("the post on b")
+                    .post,
+                on_a
+            );
+            assert_eq!(users::get(&b, alice.id).await.expect("alice on b"), alice);
             assert!(status(&b).await.expect("the status").cursor.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_pulls_only_what_the_devices_user_sees() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, alice_token) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            posts::create(&server, &alice, "alice's", &[])
+                .await
+                .expect("a post");
+            let bobs = posts::create(&server, &bob, "bob's", &[])
+                .await
+                .expect("a post");
+
+            let b = device_of(&bob, &bob_token).await;
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pulled, 2, "bob's row and bob's post");
+            assert_eq!(bodies(&b, &bob).await, vec!["bob's"]);
+            let error = users::get(&b, alice.id).await.expect_err("not on b");
+            assert!(matches!(error, UserError::NotFound { .. }));
+
+            let a = device_of(&alice, &alice_token).await;
+            sync(&a, &server).await;
+            assert_eq!(bodies(&a, &alice).await, vec!["alice's"]);
+            let error = posts::get(&a, &alice, bobs.id).await.expect_err("not on a");
+            assert!(matches!(error, PostError::NotFound { .. }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_without_a_token_the_server_knows_is_refused() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, "not-a-token").await;
+            posts::create(&a, &alice, "mine", &[])
+                .await
+                .expect("a post");
+
+            let error = run(&a, &InProcess { server: &server })
+                .await
+                .expect_err("refused");
+            assert!(matches!(error, SyncError::Unauthorized));
+            assert!(bodies(&server, &alice).await.is_empty());
+            assert_eq!(pending(&a).await, 1);
         })
         .await;
     }
@@ -504,22 +1114,28 @@ mod tests {
     async fn sync_an_edit_from_the_servers_version_applies_everywhere() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "first").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "first", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
             sync(&b, &server).await;
 
-            posts::update(&b, post.id, "edited on b")
+            posts::update(&b, &alice, post.id, "edited on b", &[])
                 .await
                 .expect("edited");
             sync(&b, &server).await;
             sync(&a, &server).await;
 
-            let on_a = posts::get(&a, post.id).await.expect("the post on a");
+            let on_a = posts::get(&a, &alice, post.id)
+                .await
+                .expect("the post on a")
+                .post;
             assert_eq!(on_a.body, "edited on b");
             assert_eq!(on_a.version, 2);
-            assert_eq!(bodies(&server).await, vec!["edited on b"]);
+            assert_eq!(bodies(&server, &alice).await, vec!["edited on b"]);
         })
         .await;
     }
@@ -528,24 +1144,30 @@ mod tests {
     async fn sync_the_same_field_edited_on_two_devices_keeps_the_first_and_returns_a_conflict() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
             sync(&b, &server).await;
 
-            posts::update(&a, post.id, "a's edit")
+            posts::update(&a, &alice, post.id, "a's edit", &[])
                 .await
                 .expect("edited on a");
-            posts::update(&b, post.id, "b's edit")
+            posts::update(&b, &alice, post.id, "b's edit", &[])
                 .await
                 .expect("edited on b");
             sync(&a, &server).await;
             let report = sync(&b, &server).await;
             assert_eq!(report.conflicts, 1);
 
-            assert_eq!(bodies(&server).await, vec!["a's edit"]);
-            let on_b = posts::get(&b, post.id).await.expect("the post on b");
+            assert_eq!(bodies(&server, &alice).await, vec!["a's edit"]);
+            let on_b = posts::get(&b, &alice, post.id)
+                .await
+                .expect("the post on b")
+                .post;
             assert_eq!(on_b.body, "a's edit");
             assert_eq!(on_b.version, 2);
             let conflicts = conflicts::list(&b).await.expect("the conflicts");
@@ -563,22 +1185,27 @@ mod tests {
     async fn sync_different_fields_edited_on_two_devices_both_apply() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
             sync(&b, &server).await;
 
-            posts::update(&a, post.id, "a's edit")
+            posts::update(&a, &alice, post.id, "a's edit", &[])
                 .await
                 .expect("edited on a");
-            posts::delete(&b, post.id).await.expect("deleted on b");
+            posts::delete(&b, &alice, post.id)
+                .await
+                .expect("deleted on b");
             sync(&a, &server).await;
             let report = sync(&b, &server).await;
             assert_eq!(report.conflicts, 0);
             assert_eq!(report.pushed, 1);
 
-            assert!(bodies(&server).await.is_empty());
+            assert!(bodies(&server, &alice).await.is_empty());
             let mut tx = server.begin().await.expect("a transaction");
             let row = posts::get_in(&mut tx, post.id)
                 .await
@@ -586,6 +1213,7 @@ mod tests {
                 .expect("kept");
             assert_eq!(row.body, "a's edit");
             assert!(row.deleted_at.is_some());
+            assert_eq!(row.deleted_by_id, Some(alice.id));
             assert_eq!(row.version, 3);
         })
         .await;
@@ -595,10 +1223,13 @@ mod tests {
     async fn sync_two_edits_made_offline_on_one_device_do_not_conflict_with_each_other() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let post = posts::create(&a, "one").await.expect("a post");
-            posts::update(&a, post.id, "two").await.expect("edited");
-            posts::update(&a, post.id, "three")
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "one", &[]).await.expect("a post");
+            posts::update(&a, &alice, post.id, "two", &[])
+                .await
+                .expect("edited");
+            posts::update(&a, &alice, post.id, "three", &[])
                 .await
                 .expect("edited again");
             assert_eq!(pending(&a).await, 3);
@@ -606,21 +1237,32 @@ mod tests {
             let report = sync(&a, &server).await;
             assert_eq!(report.pushed, 3);
             assert_eq!(report.conflicts, 0);
-            assert_eq!(bodies(&server).await, vec!["three"]);
-            assert_eq!(posts::get(&a, post.id).await.expect("the post").version, 3);
+            assert_eq!(bodies(&server, &alice).await, vec!["three"]);
+            assert_eq!(
+                posts::get(&a, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .version,
+                3
+            );
         })
         .await;
     }
 
     /// A server whose push answers never reach the device the first time.
     struct PushLost<'a> {
-        server: &'a Deployment,
+        server: InProcess<'a>,
         lost: std::sync::Mutex<bool>,
     }
 
     impl Transport for PushLost<'_> {
-        async fn push(&self, request: PushRequest) -> Result<PushResponse, SyncError> {
-            let response = push(self.server, request).await?;
+        async fn push(
+            &self,
+            token: Option<&str>,
+            request: PushRequest,
+        ) -> Result<PushResponse, SyncError> {
+            let response = self.server.push(token, request).await?;
             let mut lost = self.lost.lock().expect("the lock");
             if *lost {
                 *lost = false;
@@ -629,8 +1271,16 @@ mod tests {
             Ok(response)
         }
 
-        async fn pull(&self, request: PullRequest) -> Result<Page, SyncError> {
-            pull(self.server, request).await
+        async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+            self.server.pull(token, request).await
+        }
+
+        async fn backfill(
+            &self,
+            token: Option<&str>,
+            request: BackfillRequest,
+        ) -> Result<Page, SyncError> {
+            self.server.backfill(token, request).await
         }
     }
 
@@ -638,12 +1288,17 @@ mod tests {
     async fn sync_a_retried_event_gets_the_same_answer_and_is_not_applied_twice() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
-            posts::update(&a, post.id, "edited").await.expect("edited");
+            posts::update(&a, &alice, post.id, "edited", &[])
+                .await
+                .expect("edited");
             let transport = PushLost {
-                server: &server,
+                server: InProcess { server: &server },
                 lost: std::sync::Mutex::new(true),
             };
 
@@ -651,16 +1306,29 @@ mod tests {
             assert!(report.push_error.is_some());
             assert_eq!(report.pending, 1);
             assert_eq!(
-                posts::get(&a, post.id).await.expect("the post").body,
+                posts::get(&a, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .body,
                 "edited"
             );
 
             let report = run(&a, &transport).await.expect("a sync");
             assert_eq!(report.pushed, 1);
             assert_eq!(report.pending, 0);
-            let on_server = posts::get(&server, post.id).await.expect("the post");
+            let on_server = posts::get(&server, &alice, post.id)
+                .await
+                .expect("the post")
+                .post;
             assert_eq!(on_server.version, 2);
-            assert_eq!(posts::get(&a, post.id).await.expect("the post"), on_server);
+            assert_eq!(
+                posts::get(&a, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post,
+                on_server
+            );
         })
         .await;
     }
@@ -669,28 +1337,35 @@ mod tests {
     async fn sync_a_pulled_row_never_replaces_a_row_with_a_pending_event() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
             sync(&b, &server).await;
-            posts::update(&a, post.id, "a's edit")
+            posts::update(&a, &alice, post.id, "a's edit", &[])
                 .await
                 .expect("edited on a");
             sync(&a, &server).await;
 
-            posts::update(&b, post.id, "b's edit, offline")
+            posts::update(&b, &alice, post.id, "b's edit, offline", &[])
                 .await
                 .expect("edited on b");
             let transport = PushLost {
-                server: &server,
+                server: InProcess { server: &server },
                 lost: std::sync::Mutex::new(true),
             };
             let report = run(&b, &transport).await.expect("a sync");
             assert!(report.push_error.is_some());
-            assert_eq!(report.pulled, 1);
+            assert_eq!(report.pulled, 2, "a's edit, and alice's row in the overlap");
             assert_eq!(
-                posts::get(&b, post.id).await.expect("the post").body,
+                posts::get(&b, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .body,
                 "b's edit, offline"
             );
         })
@@ -700,20 +1375,40 @@ mod tests {
     /// A server on which the device makes another edit while its push is
     /// in flight.
     struct EditDuringPush<'a> {
-        server: &'a Deployment,
+        server: InProcess<'a>,
         device: &'a Deployment,
+        user: &'a User,
         post_id: Uuid,
     }
 
     impl Transport for EditDuringPush<'_> {
-        async fn push(&self, request: PushRequest) -> Result<PushResponse, SyncError> {
-            let response = push(self.server, request).await?;
-            posts::update(self.device, self.post_id, "edited during the push").await?;
+        async fn push(
+            &self,
+            token: Option<&str>,
+            request: PushRequest,
+        ) -> Result<PushResponse, SyncError> {
+            let response = self.server.push(token, request).await?;
+            posts::update(
+                self.device,
+                self.user,
+                self.post_id,
+                "edited during the push",
+                &[],
+            )
+            .await?;
             Ok(response)
         }
 
-        async fn pull(&self, request: PullRequest) -> Result<Page, SyncError> {
-            pull(self.server, request).await
+        async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+            self.server.pull(token, request).await
+        }
+
+        async fn backfill(
+            &self,
+            token: Option<&str>,
+            request: BackfillRequest,
+        ) -> Result<Page, SyncError> {
+            self.server.backfill(token, request).await
         }
     }
 
@@ -721,30 +1416,47 @@ mod tests {
     async fn sync_an_event_queued_during_a_push_stays_pending_and_keeps_its_row() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
-            posts::update(&a, post.id, "first edit")
+            posts::update(&a, &alice, post.id, "first edit", &[])
                 .await
                 .expect("edited");
             let transport = EditDuringPush {
-                server: &server,
+                server: InProcess { server: &server },
                 device: &a,
+                user: &alice,
                 post_id: post.id,
             };
 
             let report = run(&a, &transport).await.expect("a sync");
             assert_eq!(report.pushed, 1);
             assert_eq!(report.pending, 1);
-            let on_a = posts::get(&a, post.id).await.expect("the post");
+            let on_a = posts::get(&a, &alice, post.id)
+                .await
+                .expect("the post")
+                .post;
             assert_eq!(on_a.body, "edited during the push");
             assert_eq!(on_a.version, 1);
 
             let report = sync(&a, &server).await;
             assert_eq!(report.pushed, 1);
             assert_eq!(report.conflicts, 0);
-            assert_eq!(bodies(&server).await, vec!["edited during the push"]);
-            assert_eq!(posts::get(&a, post.id).await.expect("the post").version, 3);
+            assert_eq!(
+                bodies(&server, &alice).await,
+                vec!["edited during the push"]
+            );
+            assert_eq!(
+                posts::get(&a, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .version,
+                3
+            );
         })
         .await;
     }
@@ -753,39 +1465,46 @@ mod tests {
     async fn sync_a_conflict_reapplied_reaches_both_devices_and_one_let_go_sends_nothing() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let b = device().await;
-            let post = posts::create(&a, "start").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let b = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "start", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
             sync(&b, &server).await;
-            posts::update(&a, post.id, "a's edit")
+            posts::update(&a, &alice, post.id, "a's edit", &[])
                 .await
                 .expect("edited on a");
-            posts::update(&b, post.id, "b's edit")
+            posts::update(&b, &alice, post.id, "b's edit", &[])
                 .await
                 .expect("edited on b");
             sync(&a, &server).await;
             sync(&b, &server).await;
             let conflict = conflicts::list(&b).await.expect("the conflicts").remove(0);
 
-            conflicts::reapply(&b, conflict.id)
+            conflicts::reapply(&b, &alice, conflict.id)
                 .await
                 .expect("reapplied");
             assert!(conflicts::list(&b).await.expect("the conflicts").is_empty());
             assert_eq!(
-                posts::get(&b, post.id).await.expect("the post").body,
+                posts::get(&b, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .body,
                 "b's edit"
             );
             let report = sync(&b, &server).await;
             assert_eq!(report.pushed, 1);
             sync(&a, &server).await;
-            assert_eq!(bodies(&server).await, vec!["b's edit"]);
-            assert_eq!(bodies(&a).await, vec!["b's edit"]);
+            assert_eq!(bodies(&server, &alice).await, vec!["b's edit"]);
+            assert_eq!(bodies(&a, &alice).await, vec!["b's edit"]);
 
-            posts::update(&a, post.id, "a again")
+            posts::update(&a, &alice, post.id, "a again", &[])
                 .await
                 .expect("edited on a");
-            posts::update(&b, post.id, "b again")
+            posts::update(&b, &alice, post.id, "b again", &[])
                 .await
                 .expect("edited on b");
             sync(&a, &server).await;
@@ -794,8 +1513,8 @@ mod tests {
             conflicts::let_go(&b, conflict.id).await.expect("let go");
             let report = sync(&b, &server).await;
             assert_eq!(report.pushed, 0);
-            assert_eq!(bodies(&server).await, vec!["a again"]);
-            assert_eq!(bodies(&b).await, vec!["a again"]);
+            assert_eq!(bodies(&server, &alice).await, vec!["a again"]);
+            assert_eq!(bodies(&b, &alice).await, vec!["a again"]);
             let error = conflicts::let_go(&b, conflict.id).await.expect_err("gone");
             assert!(matches!(error, conflicts::ConflictError::NotFound { .. }));
         })
@@ -806,12 +1525,22 @@ mod tests {
     async fn sync_pull_pages_in_cursor_order_and_resends_the_overlap() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let first = posts::create(&server, "first").await.expect("a post");
-            let second = posts::create(&server, "second").await.expect("a post");
-            let third = posts::create(&server, "third").await.expect("a post");
+            let alice = users::create(&server, "alice@example.com")
+                .await
+                .expect("a user");
+            let first = posts::create(&server, &alice, "first", &[])
+                .await
+                .expect("a post");
+            let second = posts::create(&server, &alice, "second", &[])
+                .await
+                .expect("a post");
+            let third = posts::create(&server, &alice, "third", &[])
+                .await
+                .expect("a post");
 
             let page = pull(
                 &server,
+                &alice,
                 PullRequest {
                     cursor: None,
                     after: None,
@@ -821,13 +1550,15 @@ mod tests {
             .await
             .expect("a page");
             assert_eq!(page.rows.len(), 2);
-            assert_eq!(page.rows[0].row["id"], json!(first.id));
-            assert_eq!(page.rows[1].row["id"], json!(second.id));
+            assert_eq!(page.rows[0].row["id"], json!(alice.id));
+            assert_eq!(page.rows[1].row["id"], json!(first.id));
             let next = page.next.expect("another page");
-            assert_eq!(next.id, second.id);
+            assert_eq!(next.id, first.id);
+            assert_eq!(page.cursor, Some(next));
 
             let page = pull(
                 &server,
+                &alice,
                 PullRequest {
                     cursor: None,
                     after: Some(next),
@@ -836,13 +1567,22 @@ mod tests {
             )
             .await
             .expect("a page");
-            assert_eq!(page.rows.len(), 1);
-            assert_eq!(page.rows[0].row["id"], json!(third.id));
+            assert_eq!(page.rows.len(), 3, "alice again, for the posts");
+            assert_eq!(page.rows[0].row["id"], json!(alice.id));
+            assert_eq!(page.rows[1].row["id"], json!(second.id));
+            assert_eq!(page.rows[2].row["id"], json!(third.id));
             assert!(page.next.is_none());
+            let cursor = page.cursor.expect("a cursor");
+            assert_eq!(
+                cursor.id,
+                Uuid::nil(),
+                "the server's time, on the last page"
+            );
+            assert!(cursor.last_synced_at >= third.last_synced_at.expect("synced"));
 
-            let cursor = Cursor::of_row(&page.rows[0]).expect("a cursor");
             let page = pull(
                 &server,
+                &alice,
                 PullRequest {
                     cursor: Some(cursor),
                     after: None,
@@ -853,7 +1593,7 @@ mod tests {
             .expect("a page");
             assert_eq!(
                 page.rows.len(),
-                3,
+                4,
                 "the overlap sends the last minute again"
             );
         })
@@ -864,12 +1604,28 @@ mod tests {
     struct Unreachable;
 
     impl Transport for Unreachable {
-        async fn push(&self, _request: PushRequest) -> Result<PushResponse, SyncError> {
+        async fn push(
+            &self,
+            _token: Option<&str>,
+            _request: PushRequest,
+        ) -> Result<PushResponse, SyncError> {
             panic!("the device is working offline and must not push")
         }
 
-        async fn pull(&self, _request: PullRequest) -> Result<Page, SyncError> {
+        async fn pull(
+            &self,
+            _token: Option<&str>,
+            _request: PullRequest,
+        ) -> Result<Page, SyncError> {
             panic!("the device is working offline and must not pull")
+        }
+
+        async fn backfill(
+            &self,
+            _token: Option<&str>,
+            _request: BackfillRequest,
+        ) -> Result<Page, SyncError> {
+            panic!("the device is working offline and must not backfill")
         }
     }
 
@@ -877,22 +1633,25 @@ mod tests {
     async fn sync_working_offline_makes_no_request_and_holds_until_chosen_otherwise() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
             set_offline(&a, true).await.expect("offline");
             assert!(status(&a).await.expect("the status").offline);
-            posts::create(&a, "written offline").await.expect("a post");
+            posts::create(&a, &alice, "written offline", &[])
+                .await
+                .expect("a post");
 
             let report = run(&a, &Unreachable).await.expect("a sync");
             assert!(report.offline);
             assert_eq!(report.pending, 1);
             assert!(report.push_error.is_none());
-            assert!(bodies(&server).await.is_empty());
+            assert!(bodies(&server, &alice).await.is_empty());
 
             set_offline(&a, false).await.expect("online");
             let report = sync(&a, &server).await;
             assert!(!report.offline);
             assert_eq!(report.pushed, 1);
-            assert_eq!(bodies(&server).await, vec!["written offline"]);
+            assert_eq!(bodies(&server, &alice).await, vec!["written offline"]);
             let status = status(&a).await.expect("the status");
             assert!(!status.offline);
             assert!(status.cursor.is_some());
@@ -904,14 +1663,19 @@ mod tests {
     async fn sync_a_delete_on_the_server_hides_the_post_on_the_device() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let post = posts::create(&server, "on the web").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let post = posts::create(&server, &alice, "on the web", &[])
+                .await
+                .expect("a post");
             sync(&a, &server).await;
-            assert_eq!(bodies(&a).await, vec!["on the web"]);
+            assert_eq!(bodies(&a, &alice).await, vec!["on the web"]);
 
-            posts::delete(&server, post.id).await.expect("deleted");
+            posts::delete(&server, &alice, post.id)
+                .await
+                .expect("deleted");
             sync(&a, &server).await;
-            assert!(bodies(&a).await.is_empty());
+            assert!(bodies(&a, &alice).await.is_empty());
         })
         .await;
     }
@@ -920,9 +1684,13 @@ mod tests {
     async fn sync_push_rejects_an_event_of_an_unknown_table() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
+            let alice = users::create(&server, "alice@example.com")
+                .await
+                .expect("a user");
             let event = Event::create("app_nothing", Uuid::now_v7(), events::Fields::new(), now());
             let response = push(
                 &server,
+                &alice,
                 PushRequest {
                     events: vec![event],
                 },
@@ -939,8 +1707,11 @@ mod tests {
     async fn sync_a_rejected_create_drops_the_devices_row() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let a = device().await;
-            let post = posts::create(&a, "fine").await.expect("a post");
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let post = posts::create(&a, &alice, "fine", &[])
+                .await
+                .expect("a post");
             {
                 // Rewrite the queued create to one the server refuses
                 let mut tx = a.begin().await.expect("a transaction");
@@ -953,16 +1724,18 @@ mod tests {
                     .expect("deleted");
                 let mut broken = stored.event.clone();
                 broken.changes = fields(json!({ "body": "x", "version": 5 }));
-                events::queue(&mut tx, &broken).await.expect("queued");
+                events::queue(&mut tx, alice.id, &broken)
+                    .await
+                    .expect("queued");
                 tx.commit().await.expect("committed");
             }
 
             let report = sync(&a, &server).await;
             assert_eq!(report.rejected, 1);
             assert_eq!(report.pending, 0);
-            assert!(bodies(&a).await.is_empty());
-            assert!(bodies(&server).await.is_empty());
-            let error = posts::get(&a, post.id).await.expect_err("dropped");
+            assert!(bodies(&a, &alice).await.is_empty());
+            assert!(bodies(&server, &alice).await.is_empty());
+            let error = posts::get(&a, &alice, post.id).await.expect_err("dropped");
             assert!(matches!(error, PostError::NotFound { .. }));
         })
         .await;
@@ -975,9 +1748,498 @@ mod tests {
         }
     }
 
-    use crate::deployment::now;
+    async fn community_names(deployment: &Deployment, user: &User, post_id: Uuid) -> Vec<String> {
+        posts::get(deployment, user, post_id)
+            .await
+            .expect("the post")
+            .communities
+            .into_iter()
+            .map(|community| community.name)
+            .collect()
+    }
 
-    /// Two devices against a running web server, `SYNC_SERVER_URL`:
+    #[tokio::test]
+    async fn sync_joining_on_the_web_fills_the_device_and_leaving_empties_it() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            let post = posts::create(&server, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+            let b = device_of(&bob, &bob_token).await;
+            let report = sync(&b, &server).await;
+            assert_eq!(report.backfilled, 0);
+            assert!(bodies(&b, &bob).await.is_empty());
+            let listed = communities::list(&b, &bob).await.expect("the communities");
+            assert_eq!(listed[0].community.name, "Gardening");
+            assert!(listed[0].membership.is_none());
+
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let report = sync(&b, &server).await;
+            assert!(report.backfilled > 0, "{report:?}");
+            assert_eq!(bodies(&b, &bob).await, vec!["roses"]);
+            assert_eq!(community_names(&b, &bob, post.id).await, vec!["Gardening"]);
+            assert_eq!(
+                posts::get(&b, &bob, post.id)
+                    .await
+                    .expect("the post")
+                    .owner
+                    .email,
+                "alice@example.com"
+            );
+            let listed = communities::list(&b, &bob).await.expect("the communities");
+            assert!(listed[0].membership.is_some());
+
+            let report = sync(&b, &server).await;
+            assert_eq!(report.backfilled, 0, "once is enough");
+
+            memberships::leave(&server, &bob, gardening.id)
+                .await
+                .expect("left");
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pruned, 1);
+            assert!(bodies(&b, &bob).await.is_empty());
+            let error = posts::get(&b, &bob, post.id).await.expect_err("gone");
+            assert!(matches!(error, PostError::NotFound { .. }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_joining_from_the_device_pushes_the_membership_and_backfills() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            posts::create(&server, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+            let b = device_of(&bob, &bob_token).await;
+            sync(&b, &server).await;
+
+            let membership = memberships::join(&b, &bob, gardening.id)
+                .await
+                .expect("joined offline");
+            assert_eq!(membership.version, 0);
+            assert_eq!(pending(&b).await, 1);
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pushed, 1);
+            assert!(report.backfilled > 0, "{report:?}");
+            assert_eq!(bodies(&b, &bob).await, vec!["roses"]);
+            let mine = memberships::list_mine(&b, &bob).await.expect("memberships");
+            assert_eq!(mine.len(), 1);
+            assert_eq!(mine[0].id, membership.id);
+            assert_eq!(mine[0].version, 1);
+            assert_eq!(
+                memberships::list_mine(&server, &bob)
+                    .await
+                    .expect("memberships")[0]
+                    .id,
+                membership.id
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_post_taken_out_of_a_community_leaves_the_other_members_device_and_comes_back() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let post = posts::create(&server, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+            let b = device_of(&bob, &bob_token).await;
+            sync(&b, &server).await;
+            assert_eq!(bodies(&b, &bob).await, vec!["roses"]);
+
+            posts_communities::remove(&server, &alice, post.id, gardening.id)
+                .await
+                .expect("removed");
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pruned, 1);
+            assert!(bodies(&b, &bob).await.is_empty());
+
+            posts_communities::add(&server, &alice, post.id, gardening.id)
+                .await
+                .expect("added back");
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pruned, 0);
+            assert_eq!(bodies(&b, &bob).await, vec!["roses"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_device_rejoining_a_community_gets_the_servers_membership_back() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, alice_token) = user_with_token(&server, "alice@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            let first = memberships::list_mine(&server, &alice)
+                .await
+                .expect("memberships")
+                .remove(0);
+            memberships::leave(&server, &alice, gardening.id)
+                .await
+                .expect("left");
+
+            // A device that never synced joins with a membership of its own
+            let a = device_of(&alice, &alice_token).await;
+            {
+                let mut tx = a.begin().await.expect("a transaction");
+                communities::apply_server_row(
+                    &mut tx,
+                    &communities::table_row(&gardening).expect("a row").row,
+                )
+                .await
+                .expect("the community on a");
+                tx.commit().await.expect("committed");
+            }
+            let made_on_a = memberships::join(&a, &alice, gardening.id)
+                .await
+                .expect("joined offline");
+            assert_ne!(made_on_a.id, first.id);
+
+            let report = sync(&a, &server).await;
+            assert_eq!(report.pushed, 1);
+            let mine = memberships::list_mine(&a, &alice)
+                .await
+                .expect("memberships");
+            assert_eq!(mine.len(), 1);
+            assert_eq!(mine[0].id, first.id, "the server's row, revived");
+            assert_eq!(mine[0].version, 3);
+            let on_server = memberships::list_mine(&server, &alice)
+                .await
+                .expect("memberships");
+            assert_eq!(on_server.len(), 1);
+            assert_eq!(on_server[0].id, first.id);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_adding_a_post_to_a_community_left_meanwhile_is_refused_and_dropped() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &bob, "Gardening")
+                .await
+                .expect("a community");
+            let b = device_of(&bob, &bob_token).await;
+            sync(&b, &server).await;
+            memberships::leave(&server, &bob, gardening.id)
+                .await
+                .expect("left on the web");
+
+            let post = posts::create(&b, &bob, "late", &[gardening.id])
+                .await
+                .expect("a post, offline");
+            assert_eq!(community_names(&b, &bob, post.id).await, vec!["Gardening"]);
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pushed, 1, "the post");
+            assert_eq!(report.rejected, 1, "its community row");
+            assert_eq!(report.pending, 0);
+            assert_eq!(bodies(&b, &bob).await, vec!["late"]);
+            assert!(community_names(&b, &bob, post.id).await.is_empty());
+            assert!(community_names(&server, &bob, post.id).await.is_empty());
+            assert!(
+                memberships::list_mine(&b, &bob)
+                    .await
+                    .expect("memberships")
+                    .is_empty()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_pull_sends_each_row_after_the_rows_it_points_at() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let alice = users::create(&server, "alice@example.com")
+                .await
+                .expect("a user");
+            let bob = users::create(&server, "bob@example.com")
+                .await
+                .expect("a user");
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let post = posts::create(&server, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+            // The post changes last, so by the cursor alone it would come
+            // after its community row
+            posts::update(&server, &alice, post.id, "roses, pruned", &[gardening.id])
+                .await
+                .expect("edited");
+
+            let page = pull(
+                &server,
+                &bob,
+                PullRequest {
+                    cursor: None,
+                    after: None,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("a page");
+            let tables: Vec<&str> = page.rows.iter().map(|row| row.table.as_str()).collect();
+            let position = |table: &str, id: Uuid| {
+                page.rows
+                    .iter()
+                    .position(|row| row.table == table && row.row["id"] == json!(id))
+                    .unwrap_or_else(|| panic!("{table} {id} in {tables:?}"))
+            };
+            let row = posts_communities::list_live_of_posts(
+                &mut server.begin().await.expect("a transaction"),
+                &[post.id],
+            )
+            .await
+            .expect("the row")
+            .remove(0);
+            assert!(position(users::TABLE, alice.id) < position(posts::TABLE, post.id));
+            assert!(position(posts::TABLE, post.id) < position(posts_communities::TABLE, row.id));
+            assert!(
+                position(communities::TABLE, gardening.id)
+                    < position(posts_communities::TABLE, row.id)
+            );
+            assert!(
+                position(memberships::TABLE, row.users_communities_id)
+                    < position(posts_communities::TABLE, row.id)
+            );
+            assert_eq!(
+                page.rows
+                    .iter()
+                    .filter(|row| row.table == posts::TABLE)
+                    .count(),
+                1,
+                "sent once"
+            );
+            assert_eq!(page.cursor.expect("a cursor").id, Uuid::nil());
+        })
+        .await;
+    }
+
+    /// Runs an update of one row's times, for rows that must look old.
+    async fn backdate(deployment: &Deployment, statement: &'static str, id: Uuid) {
+        let at = now() - Duration::days(100);
+        let mut tx = deployment.begin().await.expect("a transaction");
+        match &mut tx {
+            Transaction::Sqlite(tx) => {
+                sqlx::query(statement)
+                    .bind(at)
+                    .bind(id.hyphenated())
+                    .execute(&mut **tx)
+                    .await
+                    .expect("backdated");
+            }
+            #[cfg(feature = "postgres")]
+            Transaction::Postgres(tx) => {
+                sqlx::query(statement)
+                    .bind(at)
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await
+                    .expect("backdated");
+            }
+        }
+        tx.commit().await.expect("committed");
+    }
+
+    /// Deletes the post on the server as if long ago, and purges it.
+    async fn delete_long_ago_and_purge(server: &Deployment, alice: &User, post_id: Uuid) {
+        posts::delete(server, alice, post_id)
+            .await
+            .expect("deleted");
+        backdate(
+            server,
+            "UPDATE app_posts SET deleted_at = $1, last_synced_at = $1 WHERE id = $2",
+            post_id,
+        )
+        .await;
+        backdate(
+            server,
+            "UPDATE app_posts_communities SET deleted_at = $1, last_synced_at = $1 WHERE post_id = $2",
+            post_id,
+        )
+        .await;
+        let report = purge::run(server, now()).await.expect("purged");
+        assert_eq!(report.removed[posts::TABLE], 1);
+    }
+
+    /// Makes the device's last pull look older than the purge window.
+    async fn backdate_cursor(device: &Deployment) {
+        backdate(
+            device,
+            "UPDATE sync_state SET cursor_last_synced_at = $1 WHERE cursor_id != $2",
+            Uuid::max(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_device_away_longer_than_the_purge_window_starts_over_and_matches() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            let kept = posts::create(&server, &alice, "kept", &[gardening.id])
+                .await
+                .expect("a post");
+            let gone = posts::create(&server, &alice, "gone", &[gardening.id])
+                .await
+                .expect("a post");
+            let a = device_of(&alice, &token).await;
+            sync(&a, &server).await;
+            assert_eq!(bodies(&a, &alice).await, vec!["gone", "kept"]);
+
+            delete_long_ago_and_purge(&server, &alice, gone.id).await;
+            backdate_cursor(&a).await;
+            let report = sync(&a, &server).await;
+            assert!(report.resynced, "{report:?}");
+            assert!(
+                report.backfilled > 0,
+                "joined again, as far as the device knows"
+            );
+            assert_eq!(bodies(&a, &alice).await, vec!["kept"]);
+            let error = posts::get(&a, &alice, gone.id).await.expect_err("gone");
+            assert!(matches!(error, PostError::NotFound { .. }));
+            assert_eq!(
+                community_names(&a, &alice, kept.id).await,
+                vec!["Gardening"]
+            );
+            assert_eq!(
+                memberships::list_mine(&a, &alice)
+                    .await
+                    .expect("memberships")
+                    .len(),
+                1
+            );
+
+            let report = sync(&a, &server).await;
+            assert!(!report.resynced, "once is enough: {report:?}");
+            assert_eq!(report.backfilled, 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_pending_change_survives_a_resync_and_the_server_answers_it_next() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let post = posts::create(&server, &alice, "start", &[])
+                .await
+                .expect("a post");
+            let old = posts::create(&server, &alice, "old", &[])
+                .await
+                .expect("a post");
+            let a = device_of(&alice, &token).await;
+            sync(&a, &server).await;
+            posts::update(&a, &alice, post.id, "edited offline", &[])
+                .await
+                .expect("edited");
+            delete_long_ago_and_purge(&server, &alice, old.id).await;
+            backdate_cursor(&a).await;
+
+            let transport = PushLost {
+                server: InProcess { server: &server },
+                lost: std::sync::Mutex::new(true),
+            };
+            let report = run(&a, &transport).await.expect("a sync");
+            assert!(report.push_error.is_some());
+            assert!(report.resynced);
+            assert_eq!(report.pending, 1, "the change is kept");
+            assert_eq!(
+                bodies(&a, &alice).await,
+                vec!["edited offline"],
+                "and so is its row, as the person left it"
+            );
+
+            let report = run(&a, &transport).await.expect("a sync");
+            assert_eq!(report.pushed, 1);
+            assert!(!report.resynced);
+            assert_eq!(bodies(&server, &alice).await, vec!["edited offline"]);
+            assert_eq!(
+                posts::get(&a, &alice, post.id)
+                    .await
+                    .expect("the post")
+                    .post
+                    .version,
+                2
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_change_to_a_row_the_server_purged_is_kept_as_a_conflict_to_let_go() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let post = posts::create(&server, &alice, "start", &[])
+                .await
+                .expect("a post");
+            let a = device_of(&alice, &token).await;
+            sync(&a, &server).await;
+            posts::update(&a, &alice, post.id, "edited offline", &[])
+                .await
+                .expect("edited");
+            delete_long_ago_and_purge(&server, &alice, post.id).await;
+
+            let report = sync(&a, &server).await;
+            assert_eq!(report.rejected, 1);
+            assert_eq!(report.conflicts, 1);
+            assert_eq!(report.pending, 0);
+            assert!(
+                bodies(&a, &alice).await.is_empty(),
+                "the copy of a purged row goes"
+            );
+            let conflicts = conflicts::list(&a).await.expect("the conflicts");
+            assert_eq!(conflicts.len(), 1);
+            assert_eq!(conflicts[0].about, None, "a post that is gone");
+            assert_eq!(conflicts[0].fields[0].yours, json!("edited offline"));
+            assert_eq!(conflicts[0].fields[0].now, Value::Null);
+            let error = conflicts::reapply(&a, &alice, conflicts[0].id)
+                .await
+                .expect_err("nothing to reapply to");
+            assert!(matches!(error, conflicts::ConflictError::Gone));
+            conflicts::let_go(&a, conflicts[0].id)
+                .await
+                .expect("let go");
+            assert_eq!(status(&a).await.expect("the status").conflicts, 0);
+        })
+        .await;
+    }
+
+    /// Two devices against a running web server, `SYNC_SERVER_URL`, as
+    /// the dev user, which the server answers a request with no token as:
     ///
     /// ```sh
     /// SYNC_SERVER_URL=http://localhost:4010 cargo test -p app_core --features sync-http two_devices -- --ignored
@@ -988,27 +2250,44 @@ mod tests {
     async fn sync_two_devices_over_http() {
         let url = std::env::var("SYNC_SERVER_URL").expect("SYNC_SERVER_URL");
         let server = Http::new(&url).expect("a transport");
-        let a = device().await;
-        let b = device().await;
-        let post = posts::create(&a, "over http from a").await.expect("a post");
+        let dev = users::dev_user();
+        let a = users::tests::device().await;
+        let b = users::tests::device().await;
+        users::create_if_missing(&a, &dev)
+            .await
+            .expect("the dev user");
+        users::create_if_missing(&b, &dev)
+            .await
+            .expect("the dev user");
+        let post = posts::create(&a, &dev, "over http from a", &[])
+            .await
+            .expect("a post");
         run(&a, &server).await.expect("a sync");
         run(&b, &server).await.expect("a sync");
         assert_eq!(
-            posts::get(&b, post.id).await.expect("the post on b").body,
+            posts::get(&b, &dev, post.id)
+                .await
+                .expect("the post on b")
+                .post
+                .body,
             "over http from a"
         );
 
-        posts::update(&a, post.id, "a's edit")
+        posts::update(&a, &dev, post.id, "a's edit", &[])
             .await
             .expect("edited on a");
-        posts::update(&b, post.id, "b's edit")
+        posts::update(&b, &dev, post.id, "b's edit", &[])
             .await
             .expect("edited on b");
         run(&a, &server).await.expect("a sync");
         let report = run(&b, &server).await.expect("a sync");
         assert_eq!(report.conflicts, 1);
         assert_eq!(
-            posts::get(&b, post.id).await.expect("the post on b").body,
+            posts::get(&b, &dev, post.id)
+                .await
+                .expect("the post on b")
+                .post
+                .body,
             "a's edit"
         );
     }

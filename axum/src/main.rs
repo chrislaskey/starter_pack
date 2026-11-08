@@ -1,13 +1,24 @@
 //! The web server: `app_core` over a JSON API under `/api`, the sync
 //! endpoints the apps converge with under `/api/sync`, and the Svelte
-//! pages (`../svelte/dist`) at every other path. Listens on `PORT`, 4000
-//! when unset, and opens the database `DATABASE_URL` names: a SQLite file,
-//! under `data/` beside this crate when unset, or a PostgreSQL database.
+//! pages (`../svelte/dist`) at every other path. Every request is from a
+//! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
+//! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
+//! beside this crate when unset, or a PostgreSQL database.
+//!
+//! With arguments it runs a command on that database instead and exits:
+//! `users create <email>` registers a user and prints a token for them;
+//! `purge` removes what was deleted longer ago than the retention
+//! window, for a daily cron job, and prints what went.
 
+mod api_error;
+mod communities;
+mod current_user;
 mod database;
+mod memberships;
 mod posts;
 mod router;
 mod sync;
+mod users;
 
 use std::env;
 use std::net::SocketAddr;
@@ -41,6 +52,13 @@ async fn main() -> Result<(), String> {
         .init();
 
     let deployment = database::open().await?;
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if !arguments.is_empty() {
+        return command(&deployment, &arguments).await;
+    }
+    app_core::users::create_if_missing(&deployment, &app_core::users::dev_user())
+        .await
+        .map_err(|error| format!("could not write the dev user: {error}"))?;
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
     let listener = tokio::net::TcpListener::bind(address)
@@ -51,4 +69,35 @@ async fn main() -> Result<(), String> {
     axum::serve(listener, router::router(&svelte_dist(), deployment))
         .await
         .map_err(|error| format!("server stopped: {error}"))
+}
+
+/// A command on the database, run instead of the server.
+async fn command(
+    deployment: &app_core::deployment::Deployment,
+    arguments: &[String],
+) -> Result<(), String> {
+    let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["users", "create", email] => {
+            let user = app_core::users::create(deployment, email)
+                .await
+                .map_err(|error| error.to_string())?;
+            let token = app_core::tokens::create(deployment, user.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            println!("{} {}\ntoken {token}", user.id, user.email);
+            Ok(())
+        }
+        ["purge"] => {
+            let report = app_core::purge::run(deployment, app_core::deployment::now())
+                .await
+                .map_err(|error| error.to_string())?;
+            println!("purged up to {}", report.horizon);
+            for (table, count) in &report.removed {
+                println!("{table} {count}");
+            }
+            Ok(())
+        }
+        _ => Err("commands: users create <email>, purge".to_string()),
+    }
 }

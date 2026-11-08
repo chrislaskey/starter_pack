@@ -9,6 +9,7 @@ export const POSTS_INDEX_PATH = "/posts";
 export const POSTS_NEW_PATH = "/posts/new";
 export const POSTS_SHOW_PATH = "/posts/:id";
 export const POSTS_EDIT_PATH = "/posts/:id/edit";
+export const COMMUNITIES_INDEX_PATH = "/communities";
 export const CONFLICTS_INDEX_PATH = "/conflicts";
 
 export function homeUrl() {
@@ -31,6 +32,10 @@ export function postsShowUrl(id) {
 /** @param {string} id */
 export function postsEditUrl(id) {
   return POSTS_EDIT_PATH.replace(":id", encodeURIComponent(id));
+}
+
+export function communitiesIndexUrl() {
+  return COMMUNITIES_INDEX_PATH;
 }
 
 export function conflictsIndexUrl() {

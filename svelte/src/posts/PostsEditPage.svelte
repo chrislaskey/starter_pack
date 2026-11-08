@@ -9,13 +9,15 @@
   const id = pathParams().id;
   let loaded = $state(false);
   let text = $state("");
+  let communityIds = $state([]);
   let error = $state("");
   let busy = $state(false);
 
   async function load() {
     try {
-      const post = await postsGet(id);
+      const { post, communities } = await postsGet(id);
       text = post.body;
+      communityIds = communities.map((community) => community.id);
       loaded = true;
     } catch (problem) {
       error = String(problem);
@@ -25,7 +27,7 @@
   async function save() {
     busy = true;
     try {
-      await postsUpdate(id, text);
+      await postsUpdate(id, text, communityIds);
       await navigateToUrl(postsShowUrl(id));
     } catch (problem) {
       error = String(problem);
@@ -41,7 +43,7 @@
   <AppNav />
   <h1>Edit post</h1>
   {#if loaded}
-    <PostsForm bind:text submitText="Save" {error} {busy} onsubmit={save} />
+    <PostsForm bind:text bind:communityIds submitText="Save" {error} {busy} onsubmit={save} />
   {:else if error}
     <p class="error">{error}</p>
   {/if}

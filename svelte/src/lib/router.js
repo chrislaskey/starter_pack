@@ -5,6 +5,7 @@
 import { createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
 import {
+  COMMUNITIES_INDEX_PATH,
   CONFLICTS_INDEX_PATH,
   HOME_PATH,
   POSTS_EDIT_PATH,
@@ -20,6 +21,7 @@ const { navigate, route } = createRouter({
   [POSTS_NEW_PATH]: () => import("../posts/PostsNewPage.svelte"),
   [POSTS_SHOW_PATH]: () => import("../posts/PostsShowPage.svelte"),
   [POSTS_EDIT_PATH]: () => import("../posts/PostsEditPage.svelte"),
+  [COMMUNITIES_INDEX_PATH]: () => import("../communities/CommunitiesIndexPage.svelte"),
   [CONFLICTS_INDEX_PATH]: () => import("../conflicts/ConflictsIndexPage.svelte"),
 });
 

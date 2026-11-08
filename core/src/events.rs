@@ -200,6 +200,9 @@ impl EventStatus {
 pub struct StoredEvent {
     #[serde(flatten)]
     pub event: Event,
+    /// Who made it: on the server the user the token stood for, on a
+    /// device the user signed in.
+    pub user_id: Uuid,
     pub status: EventStatus,
     #[serde(default)]
     pub conflicts: Conflicts,
@@ -286,6 +289,7 @@ pub fn not_editable(changes: &Fields, allowed: &[&str]) -> Option<String> {
 /// row, so a retry gets the same answer.
 pub async fn record(
     tx: &mut Transaction,
+    user_id: Uuid,
     event: &Event,
     answer: &Answer,
 ) -> Result<(), sqlx::Error> {
@@ -296,6 +300,7 @@ pub async fn record(
     };
     let stored = StoredEvent {
         event: event.clone(),
+        user_id,
         status,
         conflicts: answer.conflicts.clone(),
         version: answer.version,
@@ -305,9 +310,10 @@ pub async fn record(
 }
 
 /// Queues an event a device applied, for the next push.
-pub async fn queue(tx: &mut Transaction, event: &Event) -> Result<(), sqlx::Error> {
+pub async fn queue(tx: &mut Transaction, user_id: Uuid, event: &Event) -> Result<(), sqlx::Error> {
     let stored = StoredEvent {
         event: event.clone(),
+        user_id,
         status: EventStatus::Pending,
         conflicts: Conflicts::new(),
         version: None,

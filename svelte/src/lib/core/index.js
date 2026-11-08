@@ -9,11 +9,16 @@ import * as tauriCommands from "./tauri-commands.js";
 
 const core = isTauri() ? tauriCommands : httpApi;
 
+export const usersMe = core.usersMe;
 export const postsList = core.postsList;
 export const postsGet = core.postsGet;
 export const postsCreate = core.postsCreate;
 export const postsUpdate = core.postsUpdate;
 export const postsDelete = core.postsDelete;
+export const communitiesList = core.communitiesList;
+export const communitiesCreate = core.communitiesCreate;
+export const membershipsJoin = core.membershipsJoin;
+export const membershipsLeave = core.membershipsLeave;
 export const syncRun = core.syncRun;
 export const syncStatus = core.syncStatus;
 export const syncSetOffline = core.syncSetOffline;

@@ -31,6 +31,11 @@ async function errorMessage(response) {
 /** @param {string} id */
 const postPath = (id) => `/api/posts/${encodeURIComponent(id)}`;
 
+/** The user the server takes the request to be from. */
+export function usersMe() {
+  return send("GET", "/api/users/me");
+}
+
 export function postsList() {
   return send("GET", "/api/posts");
 }
@@ -40,22 +45,46 @@ export function postsGet(id) {
   return send("GET", postPath(id));
 }
 
-/** @param {string} body */
-export function postsCreate(body) {
-  return send("POST", "/api/posts", { body });
+/**
+ * @param {string} body
+ * @param {string[]} communityIds the communities the post is in
+ */
+export function postsCreate(body, communityIds) {
+  return send("POST", "/api/posts", { body, community_ids: communityIds });
 }
 
 /**
  * @param {string} id
  * @param {string} body
+ * @param {string[]} communityIds the communities the post is in, exactly
  */
-export function postsUpdate(id, body) {
-  return send("PUT", postPath(id), { body });
+export function postsUpdate(id, body, communityIds) {
+  return send("PUT", postPath(id), { body, community_ids: communityIds });
 }
 
 /** @param {string} id */
 export function postsDelete(id) {
   return send("DELETE", postPath(id));
+}
+
+/** Every community, each with the user's membership when they are in it. */
+export function communitiesList() {
+  return send("GET", "/api/communities");
+}
+
+/** @param {string} name */
+export function communitiesCreate(name) {
+  return send("POST", "/api/communities", { name });
+}
+
+/** @param {string} communityId */
+export function membershipsJoin(communityId) {
+  return send("PUT", `/api/memberships/${encodeURIComponent(communityId)}`);
+}
+
+/** @param {string} communityId */
+export function membershipsLeave(communityId) {
+  return send("DELETE", `/api/memberships/${encodeURIComponent(communityId)}`);
 }
 
 // The web has nothing to sync: it is the server. The nav shows no sync

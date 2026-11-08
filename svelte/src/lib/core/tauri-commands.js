@@ -2,6 +2,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+/** The user signed in on this device. */
+export function usersMe() {
+  return invoke("users_me");
+}
+
 export function postsList() {
   return invoke("posts_list");
 }
@@ -11,17 +16,41 @@ export function postsGet(id) {
   return invoke("posts_get", { id });
 }
 
-/** @param {string} body */
-export function postsCreate(body) {
-  return invoke("posts_create", { body });
+/**
+ * @param {string} body
+ * @param {string[]} communityIds the communities the post is in
+ */
+export function postsCreate(body, communityIds) {
+  return invoke("posts_create", { body, communityIds });
 }
 
 /**
  * @param {string} id
  * @param {string} body
+ * @param {string[]} communityIds the communities the post is in, exactly
  */
-export function postsUpdate(id, body) {
-  return invoke("posts_update", { id, body });
+export function postsUpdate(id, body, communityIds) {
+  return invoke("posts_update", { id, body, communityIds });
+}
+
+/** Every community, each with the user's membership when they are in it. */
+export function communitiesList() {
+  return invoke("communities_list");
+}
+
+/** @param {string} name */
+export function communitiesCreate(name) {
+  return invoke("communities_create", { name });
+}
+
+/** @param {string} communityId */
+export function membershipsJoin(communityId) {
+  return invoke("memberships_join", { communityId });
+}
+
+/** @param {string} communityId */
+export function membershipsLeave(communityId) {
+  return invoke("memberships_leave", { communityId });
 }
 
 /** @param {string} id */

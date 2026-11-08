@@ -12,6 +12,7 @@ use crate::events::{Conflicts, Event, EventKind, EventStatus, Fields, StoredEven
 #[derive(FromRow)]
 struct EventRow {
     id: Hyphenated,
+    user_id: Hyphenated,
     table_name: String,
     row_id: Hyphenated,
     #[sqlx(rename = "type")]
@@ -47,6 +48,7 @@ impl TryFrom<EventRow> for StoredEvent {
                 changes: row.changes.0,
                 made_at: row.made_at,
             },
+            user_id: row.user_id.into_uuid(),
             status,
             conflicts: row.conflicts.map(|json| json.0).unwrap_or_default(),
             version: row.version,
@@ -58,7 +60,7 @@ impl TryFrom<EventRow> for StoredEvent {
 macro_rules! select {
     ($rest:literal) => {
         concat!(
-            "SELECT id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error FROM app_events ",
+            "SELECT id, user_id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error FROM app_events ",
             $rest
         )
     };
@@ -70,10 +72,11 @@ pub async fn insert(
 ) -> Result<(), sqlx::Error> {
     let event = &stored.event;
     sqlx::query(
-        "INSERT INTO app_events (id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "INSERT INTO app_events (id, user_id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(event.id.hyphenated())
+    .bind(stored.user_id.hyphenated())
     .bind(&event.table)
     .bind(event.row_id.hyphenated())
     .bind(event.kind.as_str())
@@ -185,4 +188,19 @@ pub async fn mark_error(
         .execute(connection)
         .await?;
     Ok(())
+}
+
+/// Removes the events of rows that are gone, after a purge.
+pub async fn delete_of_missing_rows(connection: &mut SqliteConnection) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM app_events WHERE
+           (table_name = 'app_posts' AND row_id NOT IN (SELECT id FROM app_posts))
+           OR (table_name = 'app_posts_communities' AND row_id NOT IN (SELECT id FROM app_posts_communities))
+           OR (table_name = 'app_users_communities' AND row_id NOT IN (SELECT id FROM app_users_communities))
+           OR (table_name = 'app_communities' AND row_id NOT IN (SELECT id FROM app_communities))
+           OR (table_name = 'app_users' AND row_id NOT IN (SELECT id FROM app_users))",
+    )
+    .execute(connection)
+    .await?;
+    Ok(result.rows_affected())
 }

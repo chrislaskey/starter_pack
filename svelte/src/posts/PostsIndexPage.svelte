@@ -1,4 +1,5 @@
-<!-- Every post, newest first, at /posts -->
+<!-- Every post the person sees, newest first, at /posts: their own, and
+     those in their communities -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import { onSynced, postsList } from "../lib/core/index.js";
@@ -35,9 +36,14 @@
   {/if}
 
   <ul class="posts">
-    {#each posts as post (post.id)}
+    {#each posts as { post, owner, communities } (post.id)}
       <li class="post">
-        <p class="muted">{post.inserted_at}</p>
+        <p class="muted">
+          {owner.email} · {post.inserted_at}
+          {#if communities.length > 0}
+            · in {communities.map((community) => community.name).join(", ")}
+          {/if}
+        </p>
         <p class="whitespace-pre-wrap">{post.body}</p>
         <a href={postsShowUrl(post.id)}>Show</a>
       </li>

@@ -8,6 +8,7 @@ use app_core::conflicts::{self, Conflict};
 use app_core::deployment::Deployment;
 
 use crate::sync;
+use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn conflicts_list(deployment: State<'_, Deployment>) -> Result<Vec<Conflict>, String> {
@@ -22,7 +23,8 @@ pub async fn conflicts_reapply(
     deployment: State<'_, Deployment>,
     id: Uuid,
 ) -> Result<(), String> {
-    conflicts::reapply(&deployment, id)
+    let user = signed_in(&deployment).await?;
+    conflicts::reapply(&deployment, &user, id)
         .await
         .map_err(|error| error.to_string())?;
     sync::spawn(app);
