@@ -75,7 +75,8 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn server_url() -> String {
+/// The web server, for the sync and for where the sign-in page is.
+pub(crate) fn server_url() -> String {
     env::var("SYNC_SERVER_URL")
         .ok()
         .or_else(|| option_env!("SYNC_SERVER_URL").map(String::from))

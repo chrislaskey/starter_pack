@@ -5,13 +5,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-app_core = { workspace = true, features = ["postgres"] }
+app_core = { workspace = true, features = ["postgres", "mail-resend"] }
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
+governor = "0.10"
+secrecy = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }

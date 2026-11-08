@@ -189,3 +189,27 @@ where
             .expect("the schema dropped");
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// The database an environment variable names, `sqlite:<path>` or,
+    /// with the feature, `postgres://...`, for a test against a running
+    /// server's own database.
+    pub(crate) async fn open_from_env(variable: &str) -> Database {
+        let url = std::env::var(variable).unwrap_or_else(|_| panic!("{variable} is needed"));
+        if let Some(path) = url.strip_prefix("sqlite:") {
+            return Database::open_sqlite_file(Path::new(path))
+                .await
+                .expect("the server's SQLite file");
+        }
+        #[cfg(feature = "postgres")]
+        if url.starts_with("postgres") {
+            return Database::open_postgres(&url)
+                .await
+                .expect("the server's PostgreSQL database");
+        }
+        panic!("{variable} must be sqlite:<path> or, with the postgres feature, postgres://...");
+    }
+}

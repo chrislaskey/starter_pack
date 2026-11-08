@@ -27,13 +27,30 @@ export function accountsIndexUrl() {
   return ACCOUNTS_INDEX_PATH;
 }
 
-export function accountsSignUpUrl() {
-  return ACCOUNTS_SIGN_UP_PATH;
+/** @param {string} [challenge] a device's, carried through from the sign-in page it opened */
+export function accountsSignUpUrl(challenge) {
+  return withQuery(ACCOUNTS_SIGN_UP_PATH, { challenge });
 }
 
-/** @param {string} [email] filled in on the page, for an account signed out on this device */
-export function accountsSignInUrl(email) {
-  return email ? `${ACCOUNTS_SIGN_IN_PATH}?email=${encodeURIComponent(email)}` : ACCOUNTS_SIGN_IN_PATH;
+/**
+ * @param {string} [email] filled in on the page, for an account signed out on this device
+ * @param {string} [challenge] a device's, when it opened the page in the browser to sign in
+ */
+export function accountsSignInUrl(email, challenge) {
+  return withQuery(ACCOUNTS_SIGN_IN_PATH, { email, challenge });
+}
+
+/**
+ * @param {string} path
+ * @param {Record<string, string | undefined>} values the query, without the empty ones
+ */
+function withQuery(path, values) {
+  const query = new URLSearchParams();
+  for (const [name, value] of Object.entries(values)) {
+    if (value) query.set(name, value);
+  }
+  const string = query.toString();
+  return string ? `${path}?${string}` : path;
 }
 
 export function postsIndexUrl() {

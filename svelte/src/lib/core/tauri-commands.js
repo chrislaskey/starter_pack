@@ -7,20 +7,55 @@ export function usersMe() {
   return invoke("users_me");
 }
 
-/**
- * @param {string} email
- * @param {string} password
- */
-export function accountsSignUp(email, password) {
-  return invoke("accounts_sign_up", { email, password });
+// The app never asks for a password: a sign-in happens in the system
+// browser, on the web's sign-in page, which ends by showing a code the
+// person pastes into the app, see accountsSignInStart.
+
+/** @param {string} _email @param {string} _password */
+export function accountsSignUp(_email, _password) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _email @param {string} _password */
+export function accountsSignIn(_email, _password) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _pending @param {string} _code @param {string} [_challenge] */
+export function accountsCode(_pending, _code, _challenge) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _pending */
+export function accountsCodeResend(_pending) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
 }
 
 /**
- * @param {string} email
- * @param {string} password
+ * Opens the browser on the web's sign-in page, with the email filled in
+ * for an account signed out on this device, and waits for its code.
+ * @param {string} [email]
  */
-export function accountsSignIn(email, password) {
-  return invoke("accounts_sign_in", { email, password });
+export function accountsSignInStart(email) {
+  return invoke("accounts_sign_in_start", { email: email || null });
+}
+
+/** The sign-in waiting on the browser, `{email, started_at}`, or null. */
+export function accountsSignInPending() {
+  return invoke("accounts_sign_in_pending");
+}
+
+/**
+ * Exchanges the code the browser showed for the session, which becomes
+ * the active account; answers the user.
+ * @param {string} code
+ */
+export function accountsSignInFinish(code) {
+  return invoke("accounts_sign_in_finish", { code });
+}
+
+export function accountsSignInCancel() {
+  return invoke("accounts_sign_in_cancel");
 }
 
 /**

@@ -4,7 +4,8 @@
 // first time it is visited, so each page's code stays a chunk of its own.
 // Before a page that needs someone signed in, the router asks who is,
 // and sends a visitor to the sign-in page instead when nobody is, or in
-// the app to the accounts on the device, where sign-in is reached from.
+// the app to the accounts on the device, where sign-in is reached from;
+// the app never shows the sign-in pages themselves.
 import { createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
 import { hasDeviceAccounts } from "./core/index.js";
@@ -29,6 +30,10 @@ const { navigate, route } = createRouter({
   layout: RemountPageOnNavigation,
   hooks: {
     async beforeLoad({ pathname }) {
+      // In the app a sign-in happens in the browser, from the accounts page
+      if (hasDeviceAccounts && (pathname === ACCOUNTS_SIGN_IN_PATH || pathname === ACCOUNTS_SIGN_UP_PATH)) {
+        throw navigateToUrl(accountsIndexUrl());
+      }
       if (OPEN_PATHS.includes(pathname)) return;
       try {
         await currentUser();

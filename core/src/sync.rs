@@ -499,15 +499,14 @@ pub trait Transport {
         token: Option<&str>,
         request: BackfillRequest,
     ) -> impl Future<Output = Result<Page, SyncError>> + Send;
-    fn sign_up(
+    /// Exchanges the device code a browser sign-in left, with the
+    /// verifier the device kept, for the device's session, see
+    /// `accounts::sign_in_with_device_code`. A device never sends a
+    /// password.
+    fn sign_in_with_device_code(
         &self,
-        email: &str,
-        password: &str,
-    ) -> impl Future<Output = Result<Session, SyncError>> + Send;
-    fn sign_in(
-        &self,
-        email: &str,
-        password: &str,
+        code: &str,
+        verifier: &str,
     ) -> impl Future<Output = Result<Session, SyncError>> + Send;
     fn sign_out(&self, token: &str) -> impl Future<Output = Result<(), SyncError>> + Send;
 }
@@ -553,14 +552,12 @@ impl Transport for InProcess<'_> {
         backfill(self.server, &user, request).await
     }
 
-    async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-        accounts::sign_up(self.server, email, password)
-            .await
-            .map_err(refused)
-    }
-
-    async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-        accounts::sign_in(self.server, email, password)
+    async fn sign_in_with_device_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<Session, SyncError> {
+        accounts::sign_in_with_device_code(self.server, code, verifier)
             .await
             .map_err(refused)
     }
@@ -572,11 +569,13 @@ impl Transport for InProcess<'_> {
     }
 }
 
-/// The server's answer as the web server would send it: 401 for a wrong
-/// password, the message for anything else it refused.
+/// The server's answer as the web server would send it: 401 for a code
+/// it does not know, the message for anything else it refused.
 fn refused(error: AccountError) -> SyncError {
     match error {
-        AccountError::InvalidEmailOrPassword => SyncError::Unauthorized,
+        AccountError::InvalidEmailOrPassword
+        | AccountError::CodeDoesNotMatch
+        | AccountError::UnknownDeviceCode => SyncError::Unauthorized,
         AccountError::Database(error) => SyncError::Database(error),
         error => SyncError::Refused(error.to_string()),
     }
@@ -688,20 +687,15 @@ impl Transport for Http {
         self.post(token, "/api/sync/backfill", &request).await
     }
 
-    async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
+    async fn sign_in_with_device_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<Session, SyncError> {
         self.post(
             None,
-            "/api/accounts/sign-up",
-            &Credentials { email, password },
-        )
-        .await
-    }
-
-    async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-        self.post(
-            None,
-            "/api/accounts/sign-in",
-            &Credentials { email, password },
+            "/api/accounts/device-token",
+            &DeviceCodeExchange { code, verifier },
         )
         .await
     }
@@ -711,12 +705,12 @@ impl Transport for Http {
     }
 }
 
-/// What a sign-up or a sign-in sends.
+/// What the exchange of a device code sends.
 #[cfg(feature = "sync-http")]
 #[derive(Serialize)]
-struct Credentials<'a> {
-    email: &'a str,
-    password: &'a str,
+struct DeviceCodeExchange<'a> {
+    code: &'a str,
+    verifier: &'a str,
 }
 
 /// What one sync did.
@@ -1085,9 +1079,7 @@ pub(crate) mod tests {
 
     /// A user signed up on the server, with a token for their devices.
     pub(crate) async fn user_with_token(server: &Deployment, email: &str) -> (User, String) {
-        let session = accounts::sign_up(server, email, "correct horse battery")
-            .await
-            .expect("signed up");
+        let session = accounts::tests::signed_up_for_a_device(server, email).await;
         (session.user, session.token)
     }
 
@@ -1368,12 +1360,12 @@ pub(crate) mod tests {
             self.server.backfill(token, request).await
         }
 
-        async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-            self.server.sign_up(email, password).await
-        }
-
-        async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-            self.server.sign_in(email, password).await
+        async fn sign_in_with_device_code(
+            &self,
+            code: &str,
+            verifier: &str,
+        ) -> Result<Session, SyncError> {
+            self.server.sign_in_with_device_code(code, verifier).await
         }
 
         async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
@@ -1508,12 +1500,12 @@ pub(crate) mod tests {
             self.server.backfill(token, request).await
         }
 
-        async fn sign_up(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-            self.server.sign_up(email, password).await
-        }
-
-        async fn sign_in(&self, email: &str, password: &str) -> Result<Session, SyncError> {
-            self.server.sign_in(email, password).await
+        async fn sign_in_with_device_code(
+            &self,
+            code: &str,
+            verifier: &str,
+        ) -> Result<Session, SyncError> {
+            self.server.sign_in_with_device_code(code, verifier).await
         }
 
         async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
@@ -1737,11 +1729,11 @@ pub(crate) mod tests {
             panic!("the device is working offline and must not backfill")
         }
 
-        async fn sign_up(&self, _email: &str, _password: &str) -> Result<Session, SyncError> {
-            panic!("the device is working offline and must not sign up")
-        }
-
-        async fn sign_in(&self, _email: &str, _password: &str) -> Result<Session, SyncError> {
+        async fn sign_in_with_device_code(
+            &self,
+            _code: &str,
+            _verifier: &str,
+        ) -> Result<Session, SyncError> {
             panic!("the device is working offline and must not sign in")
         }
 
@@ -2359,11 +2351,49 @@ pub(crate) mod tests {
         .await;
     }
 
-    /// Two devices against a running web server, `SYNC_SERVER_URL`, as
-    /// the dev user, which the server answers a request with no token as:
+    /// A sign-up, or a sign-in once the email has an account, finished
+    /// on the server's own database with the code the memory mailer
+    /// caught, as a device: its code exchanged over HTTP.
+    #[cfg(feature = "sync-http")]
+    async fn device_session_over(
+        server: &Http,
+        servers_database: &Deployment,
+        email: &str,
+    ) -> Session {
+        let mailer = crate::mailer::Mailer::memory();
+        let password = "correct horse battery";
+        let sent = accounts::sign_up(servers_database, &mailer, email, password)
+            .await
+            .expect("signed up");
+        let sent = match crate::mails::code_in(&mailer.last_sent_to(email).expect("mailed")) {
+            Some(_) => sent,
+            None => accounts::sign_in(servers_database, &mailer, email, password)
+                .await
+                .expect("signed in instead"),
+        };
+        let code = crate::accounts::tests::code_sent_to(&mailer, email);
+        let (verifier, challenge) = accounts::verifier_and_challenge();
+        let device_code = accounts::sign_in_with_code_for_device(
+            servers_database,
+            &sent.pending,
+            &code,
+            &challenge,
+        )
+        .await
+        .expect("the code matched");
+        accounts::sign_in_with_device_code_through(server, &device_code.code, &verifier)
+            .await
+            .expect("exchanged over HTTP")
+    }
+
+    /// Two devices against a running web server, `SYNC_SERVER_URL`,
+    /// whose database, `TEST_SERVER_DATABASE_URL`, the test opens itself
+    /// to sign a user up and read nothing from the server's log, then
+    /// exchanges the device codes over HTTP as the apps do:
     ///
     /// ```sh
-    /// SYNC_SERVER_URL=http://localhost:4010 cargo test -p app_core --features sync-http two_devices -- --ignored
+    /// SYNC_SERVER_URL=http://localhost:4010 TEST_SERVER_DATABASE_URL=sqlite:../axum/data/app.db \
+    ///   cargo test -p app_core --features sync-http two_devices -- --ignored
     /// ```
     #[cfg(feature = "sync-http")]
     #[tokio::test]
@@ -2371,13 +2401,20 @@ pub(crate) mod tests {
     async fn sync_two_devices_over_http() {
         let url = std::env::var("SYNC_SERVER_URL").expect("SYNC_SERVER_URL");
         let server = Http::new(&url).expect("a transport");
+        let servers_database =
+            crate::database::tests::open_from_env("TEST_SERVER_DATABASE_URL").await;
+        let servers_database = Deployment::new(servers_database, Role::Server);
         let email = format!("{}@example.com", Uuid::now_v7().simple());
         let a = users::tests::device().await;
         let b = users::tests::device().await;
-        let alice = accounts::sign_up_on_device(&a, &server, &email, "correct horse battery")
-            .await
-            .expect("signed up on a");
-        accounts::sign_in_on_device(&b, &server, &email, "correct horse battery")
+        let alice = {
+            let session = device_session_over(&server, &servers_database, &email).await;
+            accounts::keep_signed_in(&a, session)
+                .await
+                .expect("signed in on a")
+        };
+        let session = device_session_over(&server, &servers_database, &email).await;
+        accounts::keep_signed_in(&b, session)
             .await
             .expect("signed in on b");
         let post = posts::create(&a, &alice, "over http from a", &[])

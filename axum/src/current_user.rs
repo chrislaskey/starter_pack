@@ -4,7 +4,7 @@
 //! set, see `accounts`. A request with no token, or one the server does
 //! not know, is answered 401, whatever it asks for.
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -24,26 +24,28 @@ pub struct CurrentUser(pub User);
 /// The token the request carried, for the sign-out to delete.
 pub struct CurrentToken(pub String);
 
-impl FromRequestParts<Deployment> for CurrentUser {
+impl<S> FromRequestParts<S> for CurrentUser
+where
+    S: Send + Sync,
+    Deployment: FromRef<S>,
+{
     type Rejection = ApiError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        deployment: &Deployment,
-    ) -> Result<CurrentUser, ApiError> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<CurrentUser, ApiError> {
+        let deployment = Deployment::from_ref(state);
         let token = token_of(parts)?;
-        let user = users::get_by_token(deployment, &token).await?;
+        let user = users::get_by_token(&deployment, &token).await?;
         Ok(CurrentUser(user))
     }
 }
 
-impl FromRequestParts<Deployment> for CurrentToken {
+impl<S> FromRequestParts<S> for CurrentToken
+where
+    S: Send + Sync,
+{
     type Rejection = ApiError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _deployment: &Deployment,
-    ) -> Result<CurrentToken, ApiError> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<CurrentToken, ApiError> {
         token_of(parts).map(CurrentToken)
     }
 }

@@ -18,6 +18,7 @@ struct UserRow {
     last_synced_at: Option<DateTime<Utc>>,
     deleted_at: Option<DateTime<Utc>>,
     deleted_by_id: Option<Uuid>,
+    confirmed_at: Option<DateTime<Utc>>,
 }
 
 impl From<UserRow> for User {
@@ -31,6 +32,7 @@ impl From<UserRow> for User {
             last_synced_at: row.last_synced_at,
             deleted_at: row.deleted_at,
             deleted_by_id: row.deleted_by_id,
+            confirmed_at: row.confirmed_at,
         }
     }
 }
@@ -38,7 +40,7 @@ impl From<UserRow> for User {
 macro_rules! select {
     ($($rest:expr),+ $(,)?) => {
         concat!(
-            "SELECT id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_users ",
+            "SELECT id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at FROM app_users ",
             $($rest),+
         )
     };
@@ -53,23 +55,59 @@ pub async fn get(connection: &mut PgConnection, id: Uuid) -> Result<Option<User>
     Ok(row.map(User::from))
 }
 
-/// The live user the token with the hash stands for, if the token was
-/// made after `made_after`, which is when it would have expired.
+/// The live user the token with the hash stands for: an app's token
+/// made after `api_made_after`, or the browser's made after
+/// `session_made_after`, which is when each would have expired.
 pub async fn get_by_token_hash(
     connection: &mut PgConnection,
     token_hash: &str,
-    made_after: DateTime<Utc>,
+    api_made_after: DateTime<Utc>,
+    session_made_after: DateTime<Utc>,
 ) -> Result<Option<User>, sqlx::Error> {
     let row: Option<UserRow> = sqlx::query_as(
-        "SELECT u.id, u.email, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id
+        "SELECT u.id, u.email, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id, u.confirmed_at
          FROM app_users u JOIN users_tokens t ON t.user_id = u.id
-         WHERE t.token_hash = $1 AND t.inserted_at > $2 AND u.deleted_at IS NULL",
+         WHERE t.token_hash = $1 AND u.deleted_at IS NULL
+           AND ((t.context = 'api' AND t.inserted_at > $2) OR (t.context = 'session' AND t.inserted_at > $3))",
     )
     .bind(token_hash)
-    .bind(made_after)
+    .bind(api_made_after)
+    .bind(session_made_after)
     .fetch_optional(connection)
     .await?;
     Ok(row.map(User::from))
+}
+
+/// Marks the user's email as proved, as a write of the server's that
+/// the devices pull like any other.
+pub async fn set_confirmed_at(
+    connection: &mut PgConnection,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_users SET confirmed_at = $2, updated_at = $2, last_synced_at = $2, version = version + 1
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(now)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Deletes the users who never proved their email and were made before
+/// the time, with their credentials and tokens; how many.
+pub async fn delete_unconfirmed_before(
+    connection: &mut PgConnection,
+    time: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    let result =
+        sqlx::query("DELETE FROM app_users WHERE confirmed_at IS NULL AND inserted_at < $1")
+            .bind(time)
+            .execute(connection)
+            .await?;
+    Ok(result.rows_affected())
 }
 
 /// The live user with the email.
@@ -130,8 +168,8 @@ pub async fn list_synced_after(
 
 pub async fn insert(connection: &mut PgConnection, user: &User) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(user.id)
     .bind(&user.email)
@@ -141,6 +179,7 @@ pub async fn insert(connection: &mut PgConnection, user: &User) -> Result<(), sq
     .bind(user.last_synced_at)
     .bind(user.deleted_at)
     .bind(user.deleted_by_id)
+    .bind(user.confirmed_at)
     .execute(connection)
     .await?;
     Ok(())
@@ -149,12 +188,13 @@ pub async fn insert(connection: &mut PgConnection, user: &User) -> Result<(), sq
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(connection: &mut PgConnection, user: &User) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (id) DO UPDATE SET
            email = excluded.email, inserted_at = excluded.inserted_at, updated_at = excluded.updated_at,
            version = excluded.version, last_synced_at = excluded.last_synced_at,
-           deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id",
+           deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id,
+           confirmed_at = excluded.confirmed_at",
     )
     .bind(user.id)
     .bind(&user.email)
@@ -164,6 +204,7 @@ pub async fn upsert(connection: &mut PgConnection, user: &User) -> Result<(), sq
     .bind(user.last_synced_at)
     .bind(user.deleted_at)
     .bind(user.deleted_by_id)
+    .bind(user.confirmed_at)
     .execute(connection)
     .await?;
     Ok(())

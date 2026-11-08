@@ -1,14 +1,16 @@
 # Accounts: what was left out
 
-The sign-up, sign-in and sign-out with an email and a password
-(`core/src/accounts.rs`) are the smallest flow that puts a real user on
-every deployment. The Phoenix app has the rest, and each is a layer on
-top of this one:
+The sign-up and sign-in with an email and a password and the emailed
+code (`core/src/accounts.rs`, the design in
+`docs/design/accounts-sign-in.md`), and the apps signing in through the
+browser, are the smallest flow that puts a real, confirmed user on every
+deployment. The Phoenix app has the rest, and each is a layer on top of
+this one:
 
-- **Magic links and email confirmation.** Phoenix logs a new user in by
-  a link sent to the email, and confirms the address that way. Here a
-  sign-up signs in at once and the email is never confirmed. Needs a
-  mailer and a `login` token context.
+- **Magic links.** Phoenix logs a user in by a link sent to the email;
+  here the email carries a code. A link is the same pending sign-in
+  with the pending token and the code in the URL, and on a phone it
+  can open the app directly once the universal links exist.
 - **Changing the password, and resetting a forgotten one** by a link
   sent to the email.
 - **Changing the email**, with a confirmation link, which also has to
@@ -30,8 +32,17 @@ top of this one:
   account has; SQLCipher would close it for every file.
 - **Returning to the page an account was last on** after a switch,
   instead of the landing page.
-- **Rate limiting sign-in attempts**, which belongs in front of the web
-  server.
-- **Tokens with a context**, `session` and `api` as Phoenix keeps them,
-  if the browser's cookie and the apps' tokens should ever differ in
-  validity.
+- **Remembering a browser** for thirty days, so the code is not asked
+  on every new browser session: Phoenix's remember-me, a longer cookie
+  on the `session` token.
+- **The automatic returns to the app** after a browser sign-in, in place
+  of pasting the code: a loopback redirect on desktop, and universal
+  links on iOS and Android, see "To decide" 6 in the design.
+- **A dev mailbox page** showing the emails the `Memory` mailer holds,
+  as Phoenix's `/dev/mailbox` does, instead of reading the log.
+- **HTML emails and a sender name**; the emails are text only.
+- **Continue as the person signed in here** on the sign-in page a device
+  opened, when the browser already has a session.
+- **Rate limits shared between several servers**: `governor`'s buckets
+  are this process's; several copies of the server need a shared store
+  or a limit at the proxy.

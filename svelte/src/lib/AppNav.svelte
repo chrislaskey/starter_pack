@@ -1,6 +1,6 @@
 <!-- The links between the pages, who is signed in with Sign out, or Sign
-     in and Sign up, the theme menu, and inside the app the sync status
-     and the accounts on the device. -->
+     in and Sign up on the web and Accounts in the app, the theme menu,
+     and inside the app the sync status. -->
 <script>
   import SyncStatus from "./SyncStatus.svelte";
   import ThemeMenu from "./ThemeMenu.svelte";
@@ -48,10 +48,9 @@
       <span class="muted text-sm">{me.email}</span>
     {/if}
     <button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={busy}>Sign out</button>
+  {:else if hasDeviceAccounts}
+    <a href={accountsIndexUrl()} class="link">Accounts</a>
   {:else}
-    {#if hasDeviceAccounts}
-      <a href={accountsIndexUrl()} class="link">Accounts</a>
-    {/if}
     <a href={accountsSignInUrl()} class="link">Sign in</a>
     <a href={accountsSignUpUrl()} class="link">Sign up</a>
   {/if}

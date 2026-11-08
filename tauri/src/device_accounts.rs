@@ -547,8 +547,9 @@ pub async fn device_accounts_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_core::posts;
+    use app_core::mailer::Mailer;
     use app_core::sync::InProcess;
+    use app_core::{mails, posts};
 
     const PASSWORD: &str = "correct horse battery";
 
@@ -559,10 +560,30 @@ mod tests {
         Deployment::new(database, Role::Server)
     }
 
+    /// A user signed up on the server and finished with the code the
+    /// memory mailer caught, as a device: the session its exchange
+    /// answered. Once the email has an account, a sign-in instead.
     async fn signed_up(server: &Deployment, email: &str) -> Session {
-        accounts::sign_up(server, email, PASSWORD)
+        let mailer = Mailer::memory();
+        let sent = accounts::sign_up(server, &mailer, email, PASSWORD)
             .await
-            .expect("signed up")
+            .expect("signed up");
+        let mail = mailer.last_sent_to(email).expect("mailed");
+        let sent = match mails::code_in(&mail) {
+            Some(_) => sent,
+            None => accounts::sign_in(server, &mailer, email, PASSWORD)
+                .await
+                .expect("signed in"),
+        };
+        let code = mails::code_in(&mailer.last_sent_to(email).expect("mailed")).expect("a code");
+        let (verifier, challenge) = accounts::verifier_and_challenge();
+        let device_code =
+            accounts::sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
+                .await
+                .expect("the code matched");
+        accounts::sign_in_with_device_code(server, &device_code.code, &verifier)
+            .await
+            .expect("exchanged")
     }
 
     fn file_exists(device: &DeviceAccounts, user_id: Uuid) -> bool {
@@ -778,11 +799,7 @@ mod tests {
         assert!(!listed[0].signed_in);
 
         let again = device
-            .keep_signed_in(
-                accounts::sign_in(&server, "alice@example.com", PASSWORD)
-                    .await
-                    .expect("signed in on the server"),
-            )
+            .keep_signed_in(signed_up(&server, "alice@example.com").await)
             .await
             .expect("alice kept again");
         assert_eq!(again, alice);
@@ -817,5 +834,140 @@ mod tests {
             .await
             .expect_err("full");
         assert!(matches!(error, DeviceAccountsError::TooManyAccounts));
+    }
+}
+
+/// How long a sign-in started in the browser is waited for, the pending
+/// sign-in's own validity on the server.
+pub const SIGN_IN_WAIT_MINUTES: i64 = app_core::tokens::SIGN_IN_CODE_VALIDITY_MINUTES;
+
+/// A sign-in waiting on the browser, as the accounts page shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PendingSignIn {
+    pub email: Option<String>,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SignInRow {
+    verifier: String,
+    email: Option<String>,
+    started_at: DateTime<Utc>,
+}
+
+/// The sign-in waiting on the browser, kept in `device.db` so a phone
+/// that ended the app meanwhile picks it up again, see
+/// `docs/design/accounts-sign-in.md`.
+impl DeviceAccounts {
+    /// Keeps the verifier of a sign-in about to open in the browser, in
+    /// place of any waiting one.
+    pub async fn sign_in_start(
+        &self,
+        verifier: &str,
+        email: Option<&str>,
+    ) -> Result<(), DeviceAccountsError> {
+        sqlx::query(
+            "INSERT INTO device_sign_in (id, verifier, email, started_at) VALUES (1, $1, $2, $3)
+             ON CONFLICT (id) DO UPDATE SET verifier = excluded.verifier, email = excluded.email,
+             started_at = excluded.started_at",
+        )
+        .bind(verifier)
+        .bind(email)
+        .bind(now())
+        .execute(&self.list)
+        .await?;
+        Ok(())
+    }
+
+    /// The sign-in waiting on the browser, if one started less than
+    /// `SIGN_IN_WAIT_MINUTES` ago; a stale one is forgotten.
+    pub async fn sign_in_pending(&self) -> Result<Option<PendingSignIn>, DeviceAccountsError> {
+        Ok(self.sign_in_row().await?.map(|row| PendingSignIn {
+            email: row.email,
+            started_at: row.started_at,
+        }))
+    }
+
+    /// The verifier of the sign-in waiting on the browser, for the
+    /// exchange of its code.
+    pub async fn sign_in_verifier(&self) -> Result<Option<String>, DeviceAccountsError> {
+        Ok(self.sign_in_row().await?.map(|row| row.verifier))
+    }
+
+    /// Forgets the sign-in waiting on the browser: finished or cancelled.
+    pub async fn sign_in_clear(&self) -> Result<(), DeviceAccountsError> {
+        sqlx::query("DELETE FROM device_sign_in")
+            .execute(&self.list)
+            .await?;
+        Ok(())
+    }
+
+    async fn sign_in_row(&self) -> Result<Option<SignInRow>, DeviceAccountsError> {
+        let row: Option<SignInRow> =
+            sqlx::query_as("SELECT verifier, email, started_at FROM device_sign_in WHERE id = 1")
+                .fetch_optional(&self.list)
+                .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.started_at < now() - chrono::Duration::minutes(SIGN_IN_WAIT_MINUTES) {
+            self.sign_in_clear().await?;
+            return Ok(None);
+        }
+        Ok(Some(row))
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn device_accounts_a_sign_in_waits_on_the_browser_until_finished_cancelled_or_stale() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        assert_eq!(device.sign_in_pending().await.expect("none"), None);
+        assert_eq!(device.sign_in_verifier().await.expect("none"), None);
+
+        device
+            .sign_in_start("the verifier", Some("alice@example.com"))
+            .await
+            .expect("started");
+        let pending = device
+            .sign_in_pending()
+            .await
+            .expect("one")
+            .expect("waiting");
+        assert_eq!(pending.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            device.sign_in_verifier().await.expect("one").as_deref(),
+            Some("the verifier")
+        );
+        device
+            .sign_in_start("another verifier", None)
+            .await
+            .expect("started again, replacing it");
+        assert_eq!(
+            device.sign_in_verifier().await.expect("one").as_deref(),
+            Some("another verifier")
+        );
+        device.sign_in_clear().await.expect("cancelled");
+        assert_eq!(device.sign_in_pending().await.expect("none"), None);
+
+        device.sign_in_start("stale", None).await.expect("started");
+        let long_ago = now() - chrono::Duration::minutes(SIGN_IN_WAIT_MINUTES + 1);
+        sqlx::query("UPDATE device_sign_in SET started_at = $1")
+            .bind(long_ago)
+            .execute(&device.list)
+            .await
+            .expect("aged");
+        assert_eq!(
+            device.sign_in_pending().await.expect("none"),
+            None,
+            "a stale one is forgotten"
+        );
+        assert_eq!(device.sign_in_verifier().await.expect("none"), None);
     }
 }

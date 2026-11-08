@@ -12,18 +12,22 @@ sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 # The HTTP transport to the web server's sync endpoints, for the apps; never on the server
 sync-http = ["dep:reqwest"]
+# Sending email through Resend, for the server in production
+mail-resend = ["dep:reqwest", "dep:secrecy"]
 
 [dependencies]
 argon2 = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+secrecy = { version = "0.10", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "json", "uuid"] }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]

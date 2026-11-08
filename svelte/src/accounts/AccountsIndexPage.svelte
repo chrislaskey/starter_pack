@@ -1,14 +1,25 @@
 <!-- The accounts on this device, at /accounts, inside the app: the active
      one, the others to switch to or sign in to, each to remove from the
      device, and Add account. The device section of the app: no account
-     is open while the person adds one. -->
+     is open while the person adds one, which happens in the browser,
+     with the dialog waiting for its code. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
-  import { deviceAccountsDeactivate, deviceAccountsList, deviceAccountsRemove, deviceAccountsSwitch } from "../lib/core/index.js";
+  import {
+    accountsSignInCancel,
+    accountsSignInFinish,
+    accountsSignInPending,
+    accountsSignInStart,
+    deviceAccountsDeactivate,
+    deviceAccountsList,
+    deviceAccountsRemove,
+    deviceAccountsSwitch,
+  } from "../lib/core/index.js";
   import { forgetCurrentUser } from "../lib/current_user.js";
   import { navigateToUrl } from "../lib/router.js";
-  import { accountsSignInUrl, postsIndexUrl } from "../lib/routes.js";
+  import { postsIndexUrl } from "../lib/routes.js";
   import AccountsRemoveDialog from "./AccountsRemoveDialog.svelte";
+  import AccountsSignInDialog from "./AccountsSignInDialog.svelte";
 
   /** @typedef {{user_id: string, email: string, signed_in: boolean, active: boolean, last_active_at: string}} DeviceAccount */
 
@@ -18,12 +29,16 @@
   let removing = $state(null);
   /** @type {{pending: number, conflicts: number} | null} */
   let loss = $state(null);
+  /** @type {{email: string | null} | null} */
+  let signingIn = $state(null);
+  let signInError = $state("");
   let busy = $state(false);
   let error = $state("");
 
   async function load() {
     try {
       accounts = await deviceAccountsList();
+      signingIn = await accountsSignInPending();
     } catch (problem) {
       error = String(problem);
     }
@@ -51,20 +66,43 @@
     });
   }
 
-  /** @param {DeviceAccount} account */
-  function signInTo(account) {
+  /**
+   * Closes the active account and opens the browser to sign in, then
+   * waits for the code in the dialog.
+   * @param {string | null} email
+   */
+  function openBrowser(email) {
     return doThen(async () => {
       await deviceAccountsDeactivate();
       forgetCurrentUser();
-      await navigateToUrl(accountsSignInUrl(account.email));
+      signInError = "";
+      await accountsSignInStart(email ?? undefined);
+      signingIn = { email };
+      accounts = await deviceAccountsList();
     });
   }
 
-  function addAccount() {
+  /** @param {string} code */
+  function finishSignIn(code) {
     return doThen(async () => {
-      await deviceAccountsDeactivate();
+      signInError = "";
+      try {
+        await accountsSignInFinish(code);
+      } catch (problem) {
+        signInError = String(problem);
+        return;
+      }
+      signingIn = null;
       forgetCurrentUser();
-      await navigateToUrl(accountsSignInUrl());
+      await navigateToUrl(postsIndexUrl());
+    });
+  }
+
+  function cancelSignIn() {
+    return doThen(async () => {
+      signingIn = null;
+      signInError = "";
+      await accountsSignInCancel();
     });
   }
 
@@ -110,7 +148,7 @@
           <button type="button" class="btn btn-sm" onclick={() => switchTo(account)} disabled={busy}>Switch</button>
         {:else}
           <span class="badge badge-ghost badge-sm">Signed out</span>
-          <button type="button" class="btn btn-sm" onclick={() => signInTo(account)} disabled={busy}>Sign in</button>
+          <button type="button" class="btn btn-sm" onclick={() => openBrowser(account.email)} disabled={busy}>Sign in</button>
         {/if}
         <button type="button" class="btn btn-sm btn-ghost" onclick={() => ((loss = null), (removing = account))} disabled={busy}>
           Remove from device
@@ -119,7 +157,16 @@
     {/each}
   </ul>
 
-  <button type="button" class="btn btn-sm" onclick={addAccount} disabled={busy}>Add account</button>
+  <button type="button" class="btn btn-sm" onclick={() => openBrowser(null)} disabled={busy}>Add account</button>
+
+  <AccountsSignInDialog
+    pending={signingIn}
+    error={signInError}
+    {busy}
+    onfinish={finishSignIn}
+    onopenbrowser={() => openBrowser(signingIn?.email ?? null)}
+    oncancel={cancelSignIn}
+  />
 
   <AccountsRemoveDialog
     account={removing}

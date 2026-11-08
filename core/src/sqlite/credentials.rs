@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-pub async fn insert(
+/// The user's hash, in place of any they had.
+pub async fn upsert(
     connection: &mut SqliteConnection,
     user_id: Uuid,
     password_hash: &str,
@@ -12,7 +13,8 @@ pub async fn insert(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO users_credentials (user_id, password_hash, inserted_at, updated_at)
-         VALUES ($1, $2, $3, $3)",
+         VALUES ($1, $2, $3, $3)
+         ON CONFLICT (user_id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at",
     )
     .bind(user_id.hyphenated())
     .bind(password_hash)

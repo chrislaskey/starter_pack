@@ -1,32 +1,60 @@
-//! Accounts: signing up, signing in and signing out with an email and a
-//! password. The server does the work: a sign-up writes the user's row,
-//! their password hash and a token in one transaction, a sign-in checks
-//! the password and makes a token, a sign-out deletes the token. A
-//! device asks the server through the sync transport and keeps who
-//! signed in and their token as the `signed_in` device setting. A
+//! Accounts: signing up, signing in and signing out. The server does
+//! the work, and every sign-up and sign-in ends with a code emailed to
+//! the person, see `docs/design/accounts-sign-in.md`. A sign-up writes
+//! the user's row, unconfirmed, and their password hash; a sign-in
+//! checks the password; both then make a pending sign-in, `tokens`,
+//! and mail its six-digit code, `mails`, answering the pending token the
+//! page holds. The code, `sign_in_with_code`, confirms the email the
+//! first time and ends in `finish_in`: a session token for the browser's
+//! cookie, or, for a sign-in a device started in the browser, a device
+//! code the device exchanges for its API token,
+//! `sign_in_with_device_code`, with the verifier only it holds. Every
+//! way of proving who someone is, a provider's say-so one day, ends in
+//! that same function. A sign-out deletes the token.
+//!
+//! A device never sees a password: it keeps the session the exchange
+//! answered, `keep_signed_in`, as the `signed_in` device setting, and a
 //! sign-out clears the setting and keeps the data, so signing in again
-//! resumes from the cursor; which file a device signs into, and when a
-//! file is deleted, is the app's business, see
-//! `docs/design/device-accounts.md`. The web server keeps a browser
-//! signed in with the same token in a cookie, see
-//! `axum/src/current_user.rs`.
+//! resumes from the cursor; which file a device signs into is the app's
+//! business, see `docs/design/device-accounts.md`.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::credentials::{self, CredentialError};
-use crate::deployment::{Deployment, Role};
+use crate::database::Transaction;
+use crate::deployment::{Deployment, Role, now};
 use crate::device_settings::{self, DeviceSettingsError, SIGNED_IN};
+use crate::mailer::{MailError, Mailer};
+use crate::mails;
 use crate::sync::{SyncError, Transport};
-use crate::tokens;
+use crate::tokens::{self, Context};
 use crate::users::{self, SignedIn, User, UserError};
 
-/// What a sign-up or a sign-in answers: the user, and the token that
-/// stands for them from now on.
+/// Wrong codes a pending sign-in takes before it is deleted.
+pub const MAX_CODE_ATTEMPTS: i64 = 5;
+
+/// What a finished sign-in answers: the user, and the token that stands
+/// for them from now on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub user: User,
     pub token: String,
+}
+
+/// What a sign-up or a sign-in answers: the pending token the page
+/// sends back with the code that was emailed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeSent {
+    pub pending: String,
+}
+
+/// What a sign-in a device started answers once the code matched: the
+/// code the device exchanges for its session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCode {
+    pub code: String,
 }
 
 #[derive(Debug, Error)]
@@ -37,12 +65,16 @@ pub enum AccountError {
     DeviceOnly,
     #[error("That email and password do not match")]
     InvalidEmailOrPassword,
-    #[error("Someone is signed in on this device; sign out first")]
-    AlreadySignedIn,
+    #[error("That code is wrong or has expired; sign in again to get a new one")]
+    CodeDoesNotMatch,
+    #[error("That code is wrong or has expired; sign in again")]
+    UnknownDeviceCode,
     #[error(transparent)]
     User(#[from] UserError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
+    #[error("Could not send the email; try again")]
+    Mail(#[from] MailError),
     #[error(transparent)]
     Sync(#[from] SyncError),
     #[error(transparent)]
@@ -51,31 +83,67 @@ pub enum AccountError {
     Database(#[from] sqlx::Error),
 }
 
-/// Registers the user on the server and signs them in: their row, their
-/// password and a token, in one transaction.
+/// What a code that matched ends in.
+enum Finish<'a> {
+    /// A token for the browser's cookie.
+    Session,
+    /// A code for the device whose challenge this is.
+    Device { challenge: &'a str },
+}
+
+/// Registers the user on the server, unconfirmed, with their password,
+/// and mails them a code: their row, their password and a pending
+/// sign-in, in one transaction, then the email. An email that already
+/// has a confirmed account is answered the same way, after the same
+/// work, and its owner is emailed that they have one; an unconfirmed
+/// one gets this password and a new code, so whoever reads the inbox
+/// gets the account.
 pub async fn sign_up(
     deployment: &Deployment,
+    mailer: &Mailer,
     email: &str,
     password: &str,
-) -> Result<Session, AccountError> {
+) -> Result<CodeSent, AccountError> {
     if deployment.role != Role::Server {
         return Err(AccountError::ServerOnly);
     }
     let mut tx = deployment.begin().await?;
-    let user = users::create_in(&mut tx, email).await?;
-    credentials::create(&mut tx, user.id, password).await?;
-    let token = tokens::create(&mut tx, user.id).await?;
+    let existing = users::get_by_email_in(&mut tx, email).await?;
+    let (user, mail, pending) = match existing {
+        Some(user) if user.confirmed_at.is_some() => {
+            let _hashed_to_take_as_long = credentials::checked_hash(password).await?;
+            let mail = mails::already_signed_up(&user.email);
+            (user, mail, tokens::random_hex(32))
+        }
+        Some(user) => {
+            credentials::set(&mut tx, user.id, password).await?;
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, user.id).await?;
+            let mail = mails::sign_in_code(&user.email, &code);
+            (user, mail, pending)
+        }
+        None => {
+            let user = users::create_in(&mut tx, email).await?;
+            credentials::set(&mut tx, user.id, password).await?;
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, user.id).await?;
+            let mail = mails::sign_in_code(&user.email, &code);
+            (user, mail, pending)
+        }
+    };
     tx.commit().await?;
-    Ok(Session { user, token })
+    let _ = user;
+    mailer.send(mail).await?;
+    Ok(CodeSent { pending })
 }
 
-/// Checks the password and makes a token, on the server. An unknown
-/// email is answered as a wrong password is, after the same work.
+/// Checks the password, on the server, and mails the user a code for a
+/// pending sign-in. An unknown email is answered as a wrong password is,
+/// after the same work.
 pub async fn sign_in(
     deployment: &Deployment,
+    mailer: &Mailer,
     email: &str,
     password: &str,
-) -> Result<Session, AccountError> {
+) -> Result<CodeSent, AccountError> {
     if deployment.role != Role::Server {
         return Err(AccountError::ServerOnly);
     }
@@ -86,7 +154,125 @@ pub async fn sign_in(
     let Some(user) = user.filter(|_| matches) else {
         return Err(AccountError::InvalidEmailOrPassword);
     };
-    let token = tokens::create(&mut tx, user.id).await?;
+    let (pending, code) = tokens::create_sign_in_code(&mut tx, user.id).await?;
+    tx.commit().await?;
+    mailer.send(mails::sign_in_code(&user.email, &code)).await?;
+    Ok(CodeSent { pending })
+}
+
+/// Mails the pending sign-in a new code, on the server, its ten minutes
+/// starting over and its wrong attempts forgotten; the old code is no
+/// longer good. For the "Send a new code" button; how often is the web
+/// server's limit, see `docs/design/accounts-sign-in.md`.
+pub async fn resend_code(
+    deployment: &Deployment,
+    mailer: &Mailer,
+    pending: &str,
+) -> Result<(), AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let row = tokens::get_valid(&mut tx, &tokens::hash(pending), Context::SignInCode, now())
+        .await?
+        .ok_or(AccountError::CodeDoesNotMatch)?;
+    let user = live_user_in(&mut tx, row.user_id).await?;
+    let code = tokens::reset_code(&mut tx, row.id).await?;
+    tx.commit().await?;
+    mailer.send(mails::sign_in_code(&user.email, &code)).await?;
+    Ok(())
+}
+
+/// The address `resend_code` would mail, for the server to count the
+/// email against before sending; the same refusal as `resend_code`.
+pub async fn resend_code_to(
+    deployment: &Deployment,
+    pending: &str,
+) -> Result<String, AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let row = tokens::get_valid(&mut tx, &tokens::hash(pending), Context::SignInCode, now())
+        .await?
+        .ok_or(AccountError::CodeDoesNotMatch)?;
+    let user = live_user_in(&mut tx, row.user_id).await?;
+    tx.commit().await?;
+    Ok(user.email)
+}
+
+/// Finishes the pending sign-in with the code that was emailed, on the
+/// server, and makes a token for the browser's cookie. A wrong code
+/// counts; after `MAX_CODE_ATTEMPTS` the pending sign-in is gone.
+pub async fn sign_in_with_code(
+    deployment: &Deployment,
+    pending: &str,
+    code: &str,
+) -> Result<Session, AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let user = match match_code_in(&mut tx, pending, code).await {
+        Ok(user) => user,
+        Err(error) => {
+            tx.commit().await?;
+            return Err(error);
+        }
+    };
+    let token = finish_in(&mut tx, &user, Finish::Session).await?;
+    tx.commit().await?;
+    Ok(Session { user, token })
+}
+
+/// Finishes the pending sign-in with the code, for a sign-in a device
+/// started with the challenge: the device code it collects, and no
+/// token for the browser.
+pub async fn sign_in_with_code_for_device(
+    deployment: &Deployment,
+    pending: &str,
+    code: &str,
+    challenge: &str,
+) -> Result<DeviceCode, AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let user = match match_code_in(&mut tx, pending, code).await {
+        Ok(user) => user,
+        Err(error) => {
+            tx.commit().await?;
+            return Err(error);
+        }
+    };
+    let code = finish_in(&mut tx, &user, Finish::Device { challenge }).await?;
+    tx.commit().await?;
+    Ok(DeviceCode { code })
+}
+
+/// Exchanges the device code, with the verifier the device kept, for
+/// the device's session, once: the row is found by the code and the
+/// verifier's hash together, see `tokens::create_device_code`, and
+/// deleted.
+pub async fn sign_in_with_device_code(
+    deployment: &Deployment,
+    code: &str,
+    verifier: &str,
+) -> Result<Session, AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let token_hash = tokens::device_code_hash(code, &challenge_of(verifier));
+    let row = tokens::get_valid(&mut tx, &token_hash, Context::DeviceCode, now())
+        .await?
+        .ok_or(AccountError::UnknownDeviceCode)?;
+    tokens::delete_by_id(&mut tx, row.id).await?;
+    let user = users::get_in(&mut tx, row.user_id)
+        .await?
+        .filter(|user| user.deleted_at.is_none())
+        .ok_or(AccountError::UnknownDeviceCode)?;
+    let token = tokens::create(&mut tx, user.id, Context::Api).await?;
     tx.commit().await?;
     Ok(Session { user, token })
 }
@@ -103,53 +289,29 @@ pub async fn sign_out(deployment: &Deployment, token: &str) -> Result<(), Accoun
     Ok(())
 }
 
-/// Signs up on the server through the transport, `sign_up_through`,
-/// then keeps the answer on this device, `keep_signed_in`.
-pub async fn sign_up_on_device<T: Transport>(
-    deployment: &Deployment,
-    transport: &T,
-    email: &str,
-    password: &str,
-) -> Result<User, AccountError> {
-    nobody_signed_in(deployment).await?;
-    let session = sign_up_through(transport, email, password).await?;
-    keep_signed_in(deployment, session).await
+/// What a device makes before it opens the browser: the verifier it
+/// keeps to itself, and the challenge it puts in the sign-in URL, the
+/// verifier's hash.
+pub fn verifier_and_challenge() -> (String, String) {
+    let verifier = tokens::random_hex(32);
+    let challenge = challenge_of(&verifier);
+    (verifier, challenge)
 }
 
-/// Signs in on the server through the transport, `sign_in_through`,
-/// then keeps the answer on this device, `keep_signed_in`. The two
-/// halves are callable apart, for an app that chooses the device
-/// database by the user the server answered.
-pub async fn sign_in_on_device<T: Transport>(
-    deployment: &Deployment,
-    transport: &T,
-    email: &str,
-    password: &str,
-) -> Result<User, AccountError> {
-    nobody_signed_in(deployment).await?;
-    let session = sign_in_through(transport, email, password).await?;
-    keep_signed_in(deployment, session).await
+/// The challenge a verifier proves: its SHA-256 as hex.
+pub fn challenge_of(verifier: &str) -> String {
+    tokens::hash(verifier)
 }
 
-/// Asks the server, through the transport, to register the user and
-/// sign them in: the user and a token, kept nowhere yet.
-pub async fn sign_up_through<T: Transport>(
+/// Exchanges the device code through the transport, `sign_in_with_device_code`
+/// on the server: the session, kept nowhere yet.
+pub async fn sign_in_with_device_code_through<T: Transport>(
     transport: &T,
-    email: &str,
-    password: &str,
+    code: &str,
+    verifier: &str,
 ) -> Result<Session, AccountError> {
-    Ok(transport.sign_up(email, password).await?)
-}
-
-/// Asks the server, through the transport, to sign the user in: the
-/// user and a token, kept nowhere yet.
-pub async fn sign_in_through<T: Transport>(
-    transport: &T,
-    email: &str,
-    password: &str,
-) -> Result<Session, AccountError> {
-    match transport.sign_in(email, password).await {
-        Err(SyncError::Unauthorized) => Err(AccountError::InvalidEmailOrPassword),
+    match transport.sign_in_with_device_code(code, verifier).await {
+        Err(SyncError::Unauthorized) => Err(AccountError::UnknownDeviceCode),
         answer => Ok(answer?),
     }
 }
@@ -207,42 +369,127 @@ pub async fn forget_signed_in(deployment: &Deployment) -> Result<(), AccountErro
     Ok(())
 }
 
-async fn nobody_signed_in(deployment: &Deployment) -> Result<(), AccountError> {
-    if deployment.role != Role::Device {
-        return Err(AccountError::DeviceOnly);
+/// The user of the pending sign-in, once the code matches: the pending
+/// sign-in is deleted and the email confirmed if it was not yet. A wrong
+/// code is counted, and the one that reaches `MAX_CODE_ATTEMPTS` deletes
+/// the pending sign-in; the caller commits either way.
+async fn match_code_in(
+    tx: &mut Transaction,
+    pending: &str,
+    code: &str,
+) -> Result<User, AccountError> {
+    let row = tokens::get_valid(tx, &tokens::hash(pending), Context::SignInCode, now())
+        .await?
+        .ok_or(AccountError::CodeDoesNotMatch)?;
+    if row.code_hash.as_deref() != Some(tokens::hash(code.trim()).as_str()) {
+        let attempts = tokens::count_attempt(tx, row.id).await?;
+        if attempts >= MAX_CODE_ATTEMPTS {
+            tokens::delete_by_id(tx, row.id).await?;
+        }
+        return Err(AccountError::CodeDoesNotMatch);
     }
-    match users::signed_in_with_token(deployment).await {
-        Err(UserError::NotSignedIn) => Ok(()),
-        Ok(_) => Err(AccountError::AlreadySignedIn),
-        Err(error) => Err(error.into()),
+    tokens::delete_by_id(tx, row.id).await?;
+    let user = live_user_in(tx, row.user_id).await?;
+    if user.confirmed_at.is_some() {
+        return Ok(user);
     }
+    Ok(users::confirm_in(tx, user.id).await?)
+}
+
+/// Where every proven user ends: the browser's token, or the device
+/// code for the device whose challenge was given.
+async fn finish_in(
+    tx: &mut Transaction,
+    user: &User,
+    finish: Finish<'_>,
+) -> Result<String, AccountError> {
+    Ok(match finish {
+        Finish::Session => tokens::create(tx, user.id, Context::Session).await?,
+        Finish::Device { challenge } => tokens::create_device_code(tx, user.id, challenge).await?,
+    })
+}
+
+async fn live_user_in(tx: &mut Transaction, id: Uuid) -> Result<User, AccountError> {
+    users::get_in(tx, id)
+        .await?
+        .filter(|user| user.deleted_at.is_none())
+        .ok_or(AccountError::CodeDoesNotMatch)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::database::with_each_database;
     use crate::sync::{self, InProcess};
     use crate::{posts, users};
 
-    const PASSWORD: &str = "correct horse battery";
+    pub(crate) const PASSWORD: &str = "correct horse battery";
+
+    /// The code the last email to the address carried.
+    pub(crate) fn code_sent_to(mailer: &Mailer, email: &str) -> String {
+        let mail = mailer.last_sent_to(email).expect("an email");
+        mails::code_in(&mail).expect("a code in it")
+    }
+
+    /// A user signed up on the server and finished with their code, as
+    /// a device: the session its exchange answered, with an API token.
+    pub(crate) async fn signed_up_for_a_device(server: &Deployment, email: &str) -> Session {
+        let mailer = Mailer::memory();
+        let sent = sign_up(server, &mailer, email, PASSWORD)
+            .await
+            .expect("signed up");
+        let code = code_sent_to(&mailer, email);
+        let (verifier, challenge) = verifier_and_challenge();
+        let device_code = sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
+            .await
+            .expect("the code matched");
+        sign_in_with_device_code(server, &device_code.code, &verifier)
+            .await
+            .expect("exchanged")
+    }
 
     #[tokio::test]
-    async fn accounts_sign_up_then_sign_in_and_out() {
+    async fn accounts_sign_up_mails_a_code_that_confirms_and_signs_in_then_sign_in_and_out() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let signed_up = sign_up(&server, "alice@example.com", PASSWORD)
+            let mailer = Mailer::memory();
+            let sent = sign_up(&server, &mailer, " Alice@Example.com ", PASSWORD)
                 .await
                 .expect("signed up");
+            assert_eq!(sent.pending.len(), 64);
+            let mail = mailer.last_sent_to("alice@example.com").expect("mailed");
+            let code = mails::code_in(&mail).expect("a code");
+            assert!(mail.subject.contains("code"));
+
+            let error = sign_in_with_code(&server, &sent.pending, "000000")
+                .await
+                .expect_err("wrong, unless the code is 000000");
+            assert!(matches!(error, AccountError::CodeDoesNotMatch) || code == "000000");
+
+            let signed_up = sign_in_with_code(&server, &sent.pending, &format!(" {code} "))
+                .await
+                .expect("the code matched, trimmed");
             assert_eq!(signed_up.user.email, "alice@example.com");
+            assert!(signed_up.user.confirmed_at.is_some(), "the email is proved");
             assert_eq!(
                 users::get_by_token(&server, &signed_up.token)
                     .await
                     .expect("stands for alice"),
                 signed_up.user
             );
+            assert!(
+                matches!(
+                    sign_in_with_code(&server, &sent.pending, &code).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ),
+                "a code is used once"
+            );
 
-            let signed_in = sign_in(&server, " alice@example.com ", PASSWORD)
+            let sent = sign_in(&server, &mailer, "ALICE@example.com", PASSWORD)
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let signed_in = sign_in_with_code(&server, &sent.pending, &code)
                 .await
                 .expect("signed in");
             assert_eq!(signed_in.user, signed_up.user);
@@ -267,12 +514,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_sign_up_refuses_a_bad_email_or_password_or_a_taken_email() {
+    async fn accounts_sign_up_refuses_a_bad_email_or_password_and_answers_a_taken_email_quietly() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let error = sign_up(&server, "alice", PASSWORD).await.expect_err("no @");
+            let mailer = Mailer::memory();
+            let error = sign_up(&server, &mailer, "alice", PASSWORD)
+                .await
+                .expect_err("no @");
             assert!(matches!(error, AccountError::User(UserError::InvalidEmail)));
-            let error = sign_up(&server, "alice@example.com", "short")
+            let error = sign_up(&server, &mailer, "alice@example.com", "short")
                 .await
                 .expect_err("short");
             assert!(matches!(
@@ -280,19 +530,78 @@ mod tests {
                 AccountError::Credential(CredentialError::PasswordTooShort)
             ));
             assert!(
-                sign_in(&server, "alice@example.com", PASSWORD)
+                sign_in(&server, &mailer, "alice@example.com", PASSWORD)
                     .await
                     .is_err(),
                 "a refused sign-up wrote nothing"
             );
+            assert!(mailer.sent().is_empty());
 
-            sign_up(&server, "alice@example.com", PASSWORD)
+            let first = sign_up(&server, &mailer, "alice@example.com", PASSWORD)
                 .await
                 .expect("signed up");
-            let error = sign_up(&server, "alice@example.com", PASSWORD)
+            let first_code = code_sent_to(&mailer, "alice@example.com");
+            let again = sign_up(
+                &server,
+                &mailer,
+                "alice@example.com",
+                "another horse battery",
+            )
+            .await
+            .expect("signed up again before confirming");
+            assert!(
+                matches!(
+                    sign_in_with_code(&server, &first.pending, &first_code).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ),
+                "the first pending sign-in was replaced"
+            );
+            let code = code_sent_to(&mailer, "alice@example.com");
+            sign_in_with_code(&server, &again.pending, &code)
                 .await
-                .expect_err("taken");
-            assert!(matches!(error, AccountError::User(UserError::EmailTaken)));
+                .expect("the second one works");
+            assert!(
+                sign_in(
+                    &server,
+                    &mailer,
+                    "alice@example.com",
+                    "another horse battery"
+                )
+                .await
+                .is_ok(),
+                "with the second password"
+            );
+            let error = sign_up(&server, &mailer, "alice@example.com", "short")
+                .await
+                .expect_err("a bad password is refused before anything else");
+            assert!(matches!(
+                error,
+                AccountError::Credential(CredentialError::PasswordTooShort)
+            ));
+
+            let sent_before = mailer.sent().len();
+            let taken = sign_up(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("answered as a new one");
+            assert_eq!(taken.pending.len(), 64);
+            let mail = mailer.last_sent_to("alice@example.com").expect("mailed");
+            assert_eq!(mailer.sent().len(), sent_before + 1);
+            assert_eq!(mail.subject, "You already have an account");
+            assert!(matches!(
+                sign_in_with_code(&server, &taken.pending, "123456").await,
+                Err(AccountError::CodeDoesNotMatch)
+            ));
+            assert!(
+                sign_in(
+                    &server,
+                    &mailer,
+                    "alice@example.com",
+                    "another horse battery"
+                )
+                .await
+                .is_ok(),
+                "the password was not touched"
+            );
         })
         .await;
     }
@@ -301,17 +610,139 @@ mod tests {
     async fn accounts_sign_in_refuses_a_wrong_password_and_an_unknown_email_alike() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            sign_up(&server, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed up");
-            let error = sign_in(&server, "alice@example.com", "wrong horse battery")
+            let mailer = Mailer::memory();
+            signed_up_for_a_device(&server, "alice@example.com").await;
+            let error = sign_in(&server, &mailer, "alice@example.com", "wrong horse battery")
                 .await
                 .expect_err("wrong password");
             assert!(matches!(error, AccountError::InvalidEmailOrPassword));
-            let error = sign_in(&server, "nobody@example.com", PASSWORD)
+            let error = sign_in(&server, &mailer, "nobody@example.com", PASSWORD)
                 .await
                 .expect_err("unknown email");
             assert!(matches!(error, AccountError::InvalidEmailOrPassword));
+            assert!(mailer.sent().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_a_code_takes_five_wrong_tries_then_the_sign_in_is_gone() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed up");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let wrong = if code == "999999" { "999998" } else { "999999" };
+            for _ in 0..MAX_CODE_ATTEMPTS {
+                assert!(matches!(
+                    sign_in_with_code(&server, &sent.pending, wrong).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ));
+            }
+            assert!(
+                matches!(
+                    sign_in_with_code(&server, &sent.pending, &code).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ),
+                "the right code is too late"
+            );
+            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed in again");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let session = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("a fresh code works");
+            assert!(session.user.confirmed_at.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_a_new_code_replaces_the_old_one_for_the_same_pending_sign_in() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed up");
+            let first = code_sent_to(&mailer, "alice@example.com");
+            resend_code(&server, &mailer, &sent.pending)
+                .await
+                .expect("a new code sent");
+            let second = code_sent_to(&mailer, "alice@example.com");
+            assert_eq!(mailer.sent().len(), 2);
+            assert_eq!(
+                resend_code_to(&server, &sent.pending)
+                    .await
+                    .expect("the address"),
+                "alice@example.com"
+            );
+            if first != second {
+                assert!(
+                    matches!(
+                        sign_in_with_code(&server, &sent.pending, &first).await,
+                        Err(AccountError::CodeDoesNotMatch)
+                    ),
+                    "the old code is no longer good"
+                );
+            }
+            sign_in_with_code(&server, &sent.pending, &second)
+                .await
+                .expect("the new one is");
+            assert!(
+                matches!(
+                    resend_code(&server, &mailer, &sent.pending).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ),
+                "nothing pending any more"
+            );
+            assert!(matches!(
+                resend_code(&server, &mailer, "not a pending token").await,
+                Err(AccountError::CodeDoesNotMatch)
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_a_device_code_needs_the_verifier_and_works_once() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed up");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let (verifier, challenge) = verifier_and_challenge();
+            assert_eq!(challenge, challenge_of(&verifier));
+            let device_code =
+                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                    .await
+                    .expect("the code matched");
+            assert_eq!(device_code.code.len(), 32);
+
+            let error = sign_in_with_device_code(&server, &device_code.code, "another verifier")
+                .await
+                .expect_err("not without the verifier");
+            assert!(matches!(error, AccountError::UnknownDeviceCode));
+            let session = sign_in_with_device_code(&server, &device_code.code, &verifier)
+                .await
+                .expect("exchanged");
+            assert_eq!(session.user.email, "alice@example.com");
+            assert!(session.user.confirmed_at.is_some());
+            assert_eq!(
+                users::get_by_token(&server, &session.token)
+                    .await
+                    .expect("an API token"),
+                session.user
+            );
+            let error = sign_in_with_device_code(&server, &device_code.code, &verifier)
+                .await
+                .expect_err("once");
+            assert!(matches!(error, AccountError::UnknownDeviceCode));
         })
         .await;
     }
@@ -319,12 +750,21 @@ mod tests {
     #[tokio::test]
     async fn accounts_are_the_servers_alone() {
         let device = users::tests::device().await;
+        let mailer = Mailer::memory();
         assert!(matches!(
-            sign_up(&device, "alice@example.com", PASSWORD).await,
+            sign_up(&device, &mailer, "alice@example.com", PASSWORD).await,
             Err(AccountError::ServerOnly)
         ));
         assert!(matches!(
-            sign_in(&device, "alice@example.com", PASSWORD).await,
+            sign_in(&device, &mailer, "alice@example.com", PASSWORD).await,
+            Err(AccountError::ServerOnly)
+        ));
+        assert!(matches!(
+            sign_in_with_code(&device, "pending", "123456").await,
+            Err(AccountError::ServerOnly)
+        ));
+        assert!(matches!(
+            sign_in_with_device_code(&device, "code", "verifier").await,
             Err(AccountError::ServerOnly)
         ));
         assert!(matches!(
@@ -334,24 +774,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_a_device_signs_up_syncs_signs_out_and_resumes_on_the_next_sign_in() {
+    async fn accounts_a_device_signs_in_syncs_signs_out_and_resumes_on_the_next_sign_in() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let transport = InProcess { server: &server };
             let device = users::tests::device().await;
             assert!(matches!(
-                sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD).await,
-                Err(AccountError::InvalidEmailOrPassword)
+                sign_in_with_device_code_through(&transport, "no code", "no verifier").await,
+                Err(AccountError::UnknownDeviceCode)
             ));
 
-            let alice = sign_up_on_device(&device, &transport, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed up");
+            let session = signed_up_for_a_device(&server, "alice@example.com").await;
+            let alice = keep_signed_in(&device, session).await.expect("kept");
             assert_eq!(users::signed_in(&device).await.expect("alice"), alice);
-            assert!(matches!(
-                sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD).await,
-                Err(AccountError::AlreadySignedIn)
-            ));
 
             let post = posts::create(&device, &alice, "from the device", &[])
                 .await
@@ -399,9 +834,21 @@ mod tests {
                 "and nothing syncs meanwhile"
             );
 
-            let again = sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD)
+            let mailer = Mailer::memory();
+            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
                 .await
-                .expect("signed in again");
+                .expect("signed in on the server");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let (verifier, challenge) = verifier_and_challenge();
+            let device_code =
+                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                    .await
+                    .expect("the code matched");
+            let session =
+                sign_in_with_device_code_through(&transport, &device_code.code, &verifier)
+                    .await
+                    .expect("exchanged through the transport");
+            let again = keep_signed_in(&device, session).await.expect("kept again");
             assert_eq!(again, alice);
             assert_eq!(
                 sync::status(&device).await.expect("status").cursor,
@@ -424,9 +871,8 @@ mod tests {
             let server = Deployment::new(database, Role::Server);
             let transport = InProcess { server: &server };
             let device = users::tests::device().await;
-            let alice = sign_up_on_device(&device, &transport, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed up");
+            let session = signed_up_for_a_device(&server, "alice@example.com").await;
+            let alice = keep_signed_in(&device, session).await.expect("kept");
             let post = posts::create(&device, &alice, "written, then signed out", &[])
                 .await
                 .expect("a post");
@@ -439,7 +885,21 @@ mod tests {
             );
             assert_eq!(sync::status(&device).await.expect("status").pending, 1);
 
-            sign_in_on_device(&device, &transport, "alice@example.com", PASSWORD)
+            let mailer = Mailer::memory();
+            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
+                .await
+                .expect("signed in on the server");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let (verifier, challenge) = verifier_and_challenge();
+            let device_code =
+                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                    .await
+                    .expect("the code matched");
+            let session =
+                sign_in_with_device_code_through(&transport, &device_code.code, &verifier)
+                    .await
+                    .expect("exchanged");
+            keep_signed_in(&device, session)
                 .await
                 .expect("signed in again");
             let report = sync::run(&device, &transport).await.expect("synced");
@@ -450,13 +910,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_the_two_halves_of_a_sign_in_and_a_401_forgotten() {
+    async fn accounts_a_401_is_a_sign_out_done_elsewhere_and_the_data_stays() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let transport = InProcess { server: &server };
-            let session = sign_up_through(&transport, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed up on the server");
+            let session = signed_up_for_a_device(&server, "alice@example.com").await;
             let device = users::tests::device().await;
             assert!(matches!(
                 users::signed_in(&device).await,
@@ -466,6 +924,9 @@ mod tests {
                 .await
                 .expect("kept");
             assert_eq!(users::signed_in(&device).await.expect("alice"), alice);
+            posts::create(&device, &alice, "kept through it", &[])
+                .await
+                .expect("a post");
 
             sign_out(&server, &session.token)
                 .await
@@ -479,14 +940,7 @@ mod tests {
                 users::signed_in(&device).await,
                 Err(UserError::NotSignedIn)
             ));
-            let session = sign_in_through(&transport, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed in on the server");
-            assert_eq!(session.user, alice);
-            let error = sign_in_through(&transport, "alice@example.com", "wrong horse battery")
-                .await
-                .expect_err("wrong");
-            assert!(matches!(error, AccountError::InvalidEmailOrPassword));
+            assert_eq!(sync::status(&device).await.expect("status").pending, 1);
         })
         .await;
     }

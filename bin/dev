@@ -120,6 +120,10 @@ echo "bin/dev: the pages on http://localhost:$vite_port"
 (cd "$ROOT/svelte" && WEB_SERVER_URL="http://localhost:$web_port" exec pnpm dev --port "$vite_port" --host) &
 pids+=($!)
 
+# Where an app sends the browser to sign in: the pages on the dev server,
+# which send /api to the web server, so `bin/dev web desktop` is the pair.
+sign_in_url="http://localhost:$vite_port/accounts/sign-in"
+
 # The Tauri CLI's config override: the pages from the dev server above, and
 # no dev server of the CLI's own.
 tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"}}"
@@ -133,7 +137,7 @@ for target in "${targets[@]}"; do
       ;;
     desktop)
       echo "bin/dev: the desktop app"
-      (cd "$ROOT/tauri" && SYNC_SERVER_URL="http://localhost:$web_port" exec cargo tauri dev --config "$tauri_config") &
+      (cd "$ROOT/tauri" && SYNC_SERVER_URL="http://localhost:$web_port" BROWSER_SIGN_IN_URL="$sign_in_url" exec cargo tauri dev --config "$tauri_config") &
       pids+=($!)
       ;;
     ios|android)
@@ -144,7 +148,7 @@ for target in "${targets[@]}"; do
           ios) [ -d gen/apple ] || cargo tauri ios init ;;
           android) [ -d gen/android ] || cargo tauri android init ;;
         esac
-        SYNC_SERVER_URL="http://localhost:$web_port" exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
+        SYNC_SERVER_URL="http://localhost:$web_port" BROWSER_SIGN_IN_URL="$sign_in_url" exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
       ) &
       pids+=($!)
       ;;

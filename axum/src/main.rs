@@ -3,7 +3,9 @@
 //! pages (`../svelte/dist`) at every other path. Every request is from a
 //! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
 //! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
-//! beside this crate when unset, or a PostgreSQL database.
+//! beside this crate when unset, or a PostgreSQL database. The email it
+//! sends goes where `MAILER` says, see `mailer`, and its accounts routes
+//! are rate limited, see `rate_limits`.
 //!
 //! With arguments it runs a command on that database instead and exits:
 //! `purge` removes what was deleted longer ago than the retention
@@ -14,8 +16,10 @@ mod api_error;
 mod communities;
 mod current_user;
 mod database;
+mod mailer;
 mod memberships;
 mod posts;
+mod rate_limits;
 mod router;
 mod sync;
 mod users;
@@ -23,6 +27,10 @@ mod users;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::rate_limits::RateLimits;
+use crate::router::AppState;
 
 const DEFAULT_PORT: u16 = 4000;
 
@@ -31,6 +39,16 @@ fn svelte_dist() -> PathBuf {
     env::var_os("SVELTE_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../svelte/dist"))
+}
+
+/// Whether the client IP is the reverse proxy's `X-Forwarded-For`
+/// header, `TRUST_PROXY_HEADERS=1`; off unless the proxy is the only way
+/// in, see `rate_limits`.
+fn trust_proxy_headers() -> bool {
+    matches!(
+        env::var("TRUST_PROXY_HEADERS").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 fn port() -> Result<u16, String> {
@@ -47,15 +65,31 @@ async fn main() -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "app_web=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "app_web=info,app_core=info,tower_http=info".into()),
         )
         .init();
 
     let deployment = database::open().await?;
+    let mailer = mailer::open()?;
     let arguments: Vec<String> = env::args().skip(1).collect();
     if !arguments.is_empty() {
         return command(&deployment, &arguments).await;
     }
+
+    let rate_limits = RateLimits::new();
+    let forgetting = rate_limits.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+            forgetting.forget_old();
+        }
+    });
+    let state = AppState {
+        deployment,
+        mailer,
+        rate_limits,
+        trust_proxy_headers: trust_proxy_headers(),
+    };
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
     let listener = tokio::net::TcpListener::bind(address)
@@ -63,9 +97,13 @@ async fn main() -> Result<(), String> {
         .map_err(|error| format!("could not listen on {address}: {error}"))?;
     tracing::info!("listening on http://{address}");
 
-    axum::serve(listener, router::router(&svelte_dist(), deployment))
-        .await
-        .map_err(|error| format!("server stopped: {error}"))
+    let app = router::router(&svelte_dist(), state);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|error| format!("server stopped: {error}"))
 }
 
 /// A command on the database, run instead of the server.

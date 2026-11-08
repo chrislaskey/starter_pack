@@ -36,6 +36,10 @@ pub struct User {
     pub last_synced_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_id: Option<Uuid>,
+    /// When the user first proved their email with a code sent to it;
+    /// none until then, and such a user has no token, see `accounts`.
+    #[serde(default)]
+    pub confirmed_at: Option<DateTime<Utc>>,
 }
 
 /// Who is signed in on a device, and the token the device sends the
@@ -83,20 +87,27 @@ pub async fn get(deployment: &Deployment, id: Uuid) -> Result<User, UserError> {
     Ok(user)
 }
 
-/// Registers a user on the server: a plain server write, never an event,
-/// since a device never creates one. `accounts::sign_up` is what calls
-/// it, with the password and the token in the same transaction.
+/// Makes a user on the server with their email taken as proved, a plain
+/// server write, never an event, since a device never creates one: for
+/// a seed or a test. A sign-up goes through `accounts::sign_up`, which
+/// makes the user unconfirmed with `create_in` until their code matches.
 pub async fn create(deployment: &Deployment, email: &str) -> Result<User, UserError> {
     if deployment.role != Role::Server {
         return Err(UserError::ServerOnly);
     }
     let mut tx = deployment.begin().await?;
-    let user = create_in(&mut tx, email).await?;
+    let user = insert_in(&mut tx, email, true).await?;
     tx.commit().await?;
     Ok(user)
 }
 
+/// The user's row, unconfirmed, with their email as `checked_email`
+/// keeps it.
 pub(crate) async fn create_in(tx: &mut Transaction, email: &str) -> Result<User, UserError> {
+    insert_in(tx, email, false).await
+}
+
+async fn insert_in(tx: &mut Transaction, email: &str, confirmed: bool) -> Result<User, UserError> {
     let email = checked_email(email)?;
     let now = now();
     let user = User {
@@ -108,29 +119,51 @@ pub(crate) async fn create_in(tx: &mut Transaction, email: &str) -> Result<User,
         last_synced_at: Some(now),
         deleted_at: None,
         deleted_by_id: None,
+        confirmed_at: confirmed.then_some(now),
     };
     sql!(&mut *tx, users::insert(&user)).map_err(email_taken)?;
     Ok(user)
 }
 
+/// Marks the user's email as proved, now, and answers them as they are
+/// then; a server write the devices pull like any other.
+pub(crate) async fn confirm_in(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
+    sql!(&mut *tx, users::set_confirmed_at(id, now()))?;
+    get_live(tx, id).await
+}
+
+/// Deletes the users who never proved their email and were made before
+/// the time, with their credentials and tokens, for the purge; how many.
+pub(crate) async fn delete_unconfirmed_before(
+    tx: &mut Transaction,
+    time: DateTime<Utc>,
+) -> Result<u64, UserError> {
+    Ok(sql!(&mut *tx, users::delete_unconfirmed_before(time))?)
+}
+
 /// The live user the token stands for, on the server; a token the
 /// server does not know, or one that has expired, stands for nobody.
 pub async fn get_by_token(deployment: &Deployment, token: &str) -> Result<User, UserError> {
+    let (api_made_after, session_made_after) = tokens::made_after_to_be_valid(now());
     let mut tx = deployment.begin().await?;
     let user = sql!(
         &mut tx,
-        users::get_by_token_hash(&tokens::hash(token), tokens::made_after_to_be_valid(now()))
+        users::get_by_token_hash(&tokens::hash(token), api_made_after, session_made_after)
     )?;
     tx.commit().await?;
     user.ok_or(UserError::UnknownToken)
 }
 
-/// The live user with the email, on the server, for a sign-in.
+/// The live user with the email as `checked_email` would keep it, on
+/// the server, for a sign-in.
 pub(crate) async fn get_by_email_in(
     tx: &mut Transaction,
     email: &str,
 ) -> Result<Option<User>, UserError> {
-    Ok(sql!(&mut *tx, users::get_by_email(email.trim()))?)
+    Ok(sql!(
+        &mut *tx,
+        users::get_by_email(&normalized_email(email))
+    )?)
 }
 
 /// The user signed in on this device, a device setting.
@@ -203,10 +236,10 @@ async fn get_live(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
     }
 }
 
-/// The email as it is kept: trimmed, with an @ and no spaces, and not
-/// too long.
+/// The email as it is kept: `normalized_email`, with an @ and no
+/// spaces, and not too long.
 fn checked_email(email: &str) -> Result<String, UserError> {
-    let email = email.trim();
+    let email = normalized_email(email);
     let (before, after) = email.split_once('@').ok_or(UserError::InvalidEmail)?;
     if before.is_empty()
         || after.is_empty()
@@ -215,7 +248,13 @@ fn checked_email(email: &str) -> Result<String, UserError> {
     {
         return Err(UserError::InvalidEmail);
     }
-    Ok(email.to_string())
+    Ok(email)
+}
+
+/// Trimmed and lowercased, so two spellings of one address are one
+/// account, one inbox the code goes to, and one key the server limits.
+fn normalized_email(email: &str) -> String {
+    email.trim().to_lowercase()
 }
 
 fn email_taken(error: sqlx::Error) -> UserError {
@@ -276,6 +315,7 @@ pub(crate) mod tests {
             last_synced_at: Some(now),
             deleted_at: None,
             deleted_by_id: None,
+            confirmed_at: Some(now),
         }
     }
 
@@ -283,11 +323,12 @@ pub(crate) mod tests {
     async fn users_create_on_the_server_is_version_one_and_found_by_id() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let user = create(&deployment, "  alice@example.com ")
+            let user = create(&deployment, "  Alice@Example.com ")
                 .await
                 .expect("a user");
-            assert_eq!(user.email, "alice@example.com");
+            assert_eq!(user.email, "alice@example.com", "trimmed and lowercased");
             assert_eq!(user.version, 1);
+            assert_eq!(user.confirmed_at, Some(user.inserted_at));
             assert_eq!(user.last_synced_at, Some(user.updated_at));
             assert_eq!(get(&deployment, user.id).await.expect("the user"), user);
 

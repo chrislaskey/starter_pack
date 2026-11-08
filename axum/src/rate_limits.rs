@@ -1,0 +1,219 @@
+//! Rate limits on the accounts routes, with `governor`, each a bucket per
+//! key in this process's memory, see "Rate limits" in
+//! `docs/design/accounts-sign-in.md`: the emails sent per address, so
+//! nobody has the server mail an address over and over; the new codes
+//! per pending sign-in; and, as a layer on the routes, the requests per
+//! client IP. The buckets are forgotten on a restart, which is fine for
+//! these; `forget_old` keeps the maps from growing with every address
+//! ever tried. Behind a reverse proxy the client IP is the
+//! `X-Forwarded-For` header's, trusted only when `TRUST_PROXY_HEADERS`
+//! says the proxy is the only way in, since anyone can send the header.
+
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Json;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use governor::clock::QuantaInstant;
+use governor::middleware::NoOpMiddleware;
+use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use serde_json::json;
+use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::KeyExtractor;
+
+use crate::api_error::ApiError;
+
+/// Emails an address is sent in an hour, codes and the rest.
+pub const EMAILS_PER_HOUR_PER_ADDRESS: u32 = 5;
+/// New codes a pending sign-in gets in a minute.
+pub const RESENDS_PER_MINUTE_PER_SIGN_IN: u32 = 1;
+/// Requests to the accounts routes a client IP makes in a minute.
+pub const ACCOUNT_REQUESTS_PER_MINUTE_PER_IP: u32 = 30;
+
+const TOO_MANY: &str = "Too many attempts; try again in a few minutes";
+
+/// The limits the accounts handlers check before calling core.
+#[derive(Clone)]
+pub struct RateLimits {
+    limiters: Arc<Limiters>,
+}
+
+struct Limiters {
+    emails: DefaultKeyedRateLimiter<String>,
+    resends: DefaultKeyedRateLimiter<String>,
+}
+
+impl RateLimits {
+    pub fn new() -> RateLimits {
+        RateLimits {
+            limiters: Arc::new(Limiters {
+                emails: RateLimiter::keyed(Quota::per_hour(nonzero(EMAILS_PER_HOUR_PER_ADDRESS))),
+                resends: RateLimiter::keyed(Quota::per_minute(nonzero(
+                    RESENDS_PER_MINUTE_PER_SIGN_IN,
+                ))),
+            }),
+        }
+    }
+
+    /// One more email to the address, or 429.
+    pub fn check_email(&self, email: &str) -> Result<(), ApiError> {
+        let key = email.trim().to_lowercase();
+        self.limiters
+            .emails
+            .check_key(&key)
+            .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, TOO_MANY))
+    }
+
+    /// One more code for the pending sign-in, or 429.
+    pub fn check_resend(&self, pending: &str) -> Result<(), ApiError> {
+        self.limiters
+            .resends
+            .check_key(&pending.to_string())
+            .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, TOO_MANY))
+    }
+
+    /// Drops the buckets that are full again, for a task once an hour.
+    pub fn forget_old(&self) {
+        self.limiters.emails.retain_recent();
+        self.limiters.resends.retain_recent();
+    }
+}
+
+impl Default for RateLimits {
+    fn default() -> RateLimits {
+        RateLimits::new()
+    }
+}
+
+/// The layer on the accounts routes: `ACCOUNT_REQUESTS_PER_MINUTE_PER_IP`
+/// per client IP, answered 429 as the API answers any error.
+pub fn per_ip_layer(
+    trust_proxy_headers: bool,
+) -> GovernorLayer<ClientIp, NoOpMiddleware<QuantaInstant>, Body> {
+    let mut builder = GovernorConfigBuilder::default().key_extractor(ClientIp {
+        trust_proxy_headers,
+    });
+    builder
+        .period(Duration::from_secs(60) / ACCOUNT_REQUESTS_PER_MINUTE_PER_IP)
+        .burst_size(ACCOUNT_REQUESTS_PER_MINUTE_PER_IP);
+    let config = builder
+        .finish()
+        .unwrap_or_else(|| unreachable!("a period and a burst size were given"));
+    GovernorLayer::new(config).error_handler(too_many_requests)
+}
+
+fn too_many_requests(error: GovernorError) -> Response {
+    match error {
+        GovernorError::TooManyRequests { wait_time, .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, wait_time.to_string())],
+            Json(json!({ "error": TOO_MANY })),
+        )
+            .into_response(),
+        other => {
+            tracing::error!("rate limit: {other}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": other.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The client's IP as the key: the proxy's header when trusted, else the
+/// peer address the server was started with, else, with neither, one
+/// shared key, so a server missing its connect info limits everyone
+/// together rather than nobody.
+#[derive(Clone, Debug)]
+pub struct ClientIp {
+    trust_proxy_headers: bool,
+}
+
+impl KeyExtractor for ClientIp {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, request: &Request<T>) -> Result<IpAddr, GovernorError> {
+        if self.trust_proxy_headers
+            && let Some(forwarded) = request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .and_then(|first| first.trim().parse::<IpAddr>().ok())
+        {
+            return Ok(forwarded);
+        }
+        Ok(request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map_or(IpAddr::from([0, 0, 0, 0]), |info| info.0.ip()))
+    }
+}
+
+fn nonzero(count: u32) -> NonZeroU32 {
+    NonZeroU32::new(count).unwrap_or(NonZeroU32::MIN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limits_count_emails_per_address_and_resends_per_sign_in() {
+        let limits = RateLimits::new();
+        for _ in 0..EMAILS_PER_HOUR_PER_ADDRESS {
+            limits
+                .check_email(" Alice@Example.com ")
+                .expect("within the hour's five");
+        }
+        assert!(
+            limits.check_email("alice@example.com").is_err(),
+            "the same address"
+        );
+        limits
+            .check_email("bob@example.com")
+            .expect("another address");
+        limits.check_resend("pending-1").expect("the first");
+        assert!(
+            limits.check_resend("pending-1").is_err(),
+            "within the minute"
+        );
+        limits.check_resend("pending-2").expect("another sign-in");
+        limits.forget_old();
+    }
+
+    #[test]
+    fn rate_limits_key_by_the_peer_or_the_trusted_header() {
+        let peer: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let request = Request::builder()
+            .header("x-forwarded-for", "203.0.113.9, 10.0.0.2")
+            .extension(ConnectInfo(peer))
+            .body(())
+            .unwrap();
+        let untrusting = ClientIp {
+            trust_proxy_headers: false,
+        };
+        assert_eq!(untrusting.extract(&request).unwrap(), peer.ip());
+        let trusting = ClientIp {
+            trust_proxy_headers: true,
+        };
+        assert_eq!(
+            trusting.extract(&request).unwrap(),
+            "203.0.113.9".parse::<IpAddr>().unwrap()
+        );
+        let bare = Request::builder().body(()).unwrap();
+        assert_eq!(
+            untrusting.extract(&bare).unwrap(),
+            IpAddr::from([0, 0, 0, 0]),
+            "one shared key without connect info"
+        );
+    }
+}

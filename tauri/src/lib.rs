@@ -5,7 +5,8 @@
 //! SQLite file per account signed in on it and one of them active, see
 //! `device_accounts`; the other commands read and write the active one
 //! as its user, see `users` and `accounts`, and it syncs with the web
-//! server, see `sync`.
+//! server, see `sync`. A sign-in happens in the system browser, see
+//! `accounts`.
 
 mod accounts;
 mod communities;
@@ -22,6 +23,7 @@ use tauri::{Manager, WindowEvent};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             device_accounts::open_and_manage(app)?;
             sync::setup(app)?;
@@ -34,8 +36,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             users::users_me,
-            accounts::accounts_sign_up,
-            accounts::accounts_sign_in,
+            accounts::accounts_sign_in_start,
+            accounts::accounts_sign_in_pending,
+            accounts::accounts_sign_in_finish,
+            accounts::accounts_sign_in_cancel,
             accounts::accounts_sign_out,
             communities::communities_list,
             communities::communities_create,

@@ -20,6 +20,8 @@ pub mod database;
 pub mod deployment;
 pub mod device_settings;
 pub mod events;
+pub mod mailer;
+pub mod mails;
 pub mod memberships;
 pub mod pending_changes;
 #[cfg(feature = "postgres")]

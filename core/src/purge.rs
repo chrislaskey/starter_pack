@@ -5,7 +5,9 @@
 //! pulled within the window has seen it go; children first, so a
 //! deleted post's community rows, deleted at the same moment, go with
 //! it; the events of rows that are gone go too, and so do the tokens
-//! that have expired, see `tokens`. Each run records
+//! that have expired, see `tokens`, and the users who signed up more
+//! than a day ago and never entered their code, see `accounts`, whom no
+//! device ever pulled. Each run records
 //! its horizon, and a device whose cursor is older than the latest one
 //! may have missed a deletion, so the pull tells it to start over.
 //!
@@ -24,6 +26,8 @@ use crate::{communities, memberships, posts, posts_communities, tokens, users};
 
 /// How long a deleted row is kept, and how long a device may stay away.
 pub const RETENTION_DAYS: i64 = 90;
+/// How long a sign-up has to enter its code before the user goes.
+pub const UNCONFIRMED_DAYS: i64 = 1;
 
 /// The tables purged, children first.
 const TABLES: &[&str] = &[
@@ -55,6 +59,8 @@ pub struct PurgeReport {
 pub enum PurgeError {
     #[error("only the server purges")]
     ServerOnly,
+    #[error(transparent)]
+    User(#[from] crate::users::UserError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -76,6 +82,9 @@ pub async fn run(deployment: &Deployment, now: DateTime<Utc>) -> Result<PurgeRep
     removed.insert("app_events".to_string(), events);
     let expired_tokens = tokens::delete_expired(&mut tx, now).await?;
     removed.insert("users_tokens".to_string(), expired_tokens);
+    let unconfirmed =
+        users::delete_unconfirmed_before(&mut tx, now - Duration::days(UNCONFIRMED_DAYS)).await?;
+    removed.insert("app_users unconfirmed".to_string(), unconfirmed);
     let purge = Purge {
         id: Uuid::now_v7(),
         horizon,
@@ -167,6 +176,51 @@ mod tests {
             assert_eq!(
                 horizon(&deployment).await.expect("the latest"),
                 Some(report.horizon)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn purge_removes_a_sign_up_that_never_entered_its_code_after_a_day() {
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let mailer = crate::mailer::Mailer::memory();
+            let password = "correct horse battery";
+            crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password)
+                .await
+                .expect("bob signed up and stopped there");
+            let alice =
+                crate::accounts::tests::signed_up_for_a_device(&deployment, "alice@example.com")
+                    .await
+                    .user;
+
+            let report = run(&deployment, now()).await.expect("purged");
+            assert_eq!(report.removed["app_users unconfirmed"], 0, "bob has a day");
+            let tomorrow = now() + Duration::days(UNCONFIRMED_DAYS + 1);
+            let report = run(&deployment, tomorrow).await.expect("purged");
+            assert_eq!(report.removed["app_users unconfirmed"], 1);
+            let mut tx = deployment.begin().await.expect("a transaction");
+            assert!(
+                users::get_by_email_in(&mut tx, "bob@example.com")
+                    .await
+                    .expect("looked")
+                    .is_none(),
+                "bob is gone, with his password and his pending sign-in"
+            );
+            assert!(
+                users::get_in(&mut tx, alice.id)
+                    .await
+                    .expect("looked")
+                    .is_some(),
+                "alice, confirmed, stays"
+            );
+            tx.commit().await.expect("committed");
+            assert!(
+                crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password)
+                    .await
+                    .is_ok(),
+                "and the email is free again"
             );
         })
         .await;

@@ -1,5 +1,6 @@
 //! Passwords: a user's password hash in `users_credentials`, server
 //! only, written at sign-up and checked at sign-in, see `accounts`.
+//! A user who signs in another way, later, has no row here.
 //! Argon2id with the crate's defaults; hashing and checking run off the
 //! async runtime's threads, since each takes a moment by design.
 
@@ -32,25 +33,32 @@ pub enum CredentialError {
     Database(#[from] sqlx::Error),
 }
 
-/// Keeps the user's password, as its hash.
-pub(crate) async fn create(
+/// Keeps the user's password, as its hash, in place of any they had.
+pub(crate) async fn set(
     tx: &mut Transaction,
     user_id: Uuid,
     password: &str,
 ) -> Result<(), CredentialError> {
+    let password_hash = checked_hash(password).await?;
+    sql!(
+        &mut *tx,
+        credentials::upsert(user_id, &password_hash, now())
+    )?;
+    Ok(())
+}
+
+/// The hash of the password, once checked for length: the work a
+/// sign-up does, for a sign-up that must take as long without keeping
+/// anything.
+pub(crate) async fn checked_hash(password: &str) -> Result<String, CredentialError> {
     let password = checked_password(password)?;
-    let password_hash = off_the_runtime(move || {
+    off_the_runtime(move || {
         Argon2::default()
             .hash_password(password.as_bytes())
             .map(|hash| hash.to_string())
             .map_err(|error| CredentialError::Hash(error.to_string()))
     })
-    .await?;
-    sql!(
-        &mut *tx,
-        credentials::insert(user_id, &password_hash, now())
-    )?;
-    Ok(())
+    .await
 }
 
 /// Whether the password is the user's; false for a user with no
@@ -103,20 +111,34 @@ mod tests {
     use crate::users;
 
     #[tokio::test]
-    async fn credentials_create_and_verify() {
+    async fn credentials_set_and_verify_and_set_again() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
             let alice = users::create(&deployment, "alice@example.com")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
-            create(&mut tx, alice.id, "correct horse battery")
+            set(&mut tx, alice.id, "correct horse battery")
                 .await
                 .expect("kept");
             assert!(
                 verify(&mut tx, Some(alice.id), "correct horse battery")
                     .await
                     .expect("checked")
+            );
+            set(&mut tx, alice.id, "another horse battery")
+                .await
+                .expect("replaced");
+            assert!(
+                verify(&mut tx, Some(alice.id), "another horse battery")
+                    .await
+                    .expect("checked")
+            );
+            assert!(
+                !verify(&mut tx, Some(alice.id), "correct horse battery")
+                    .await
+                    .expect("checked"),
+                "the old one is gone"
             );
             assert!(
                 !verify(&mut tx, Some(alice.id), "wrong horse battery")
@@ -141,11 +163,11 @@ mod tests {
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
-            let error = create(&mut tx, alice.id, "short")
+            let error = set(&mut tx, alice.id, "short")
                 .await
                 .expect_err("too short");
             assert!(matches!(error, CredentialError::PasswordTooShort));
-            let error = create(&mut tx, alice.id, &"x".repeat(73))
+            let error = set(&mut tx, alice.id, &"x".repeat(73))
                 .await
                 .expect_err("too long");
             assert!(matches!(error, CredentialError::PasswordTooLong));

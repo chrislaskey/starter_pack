@@ -36,23 +36,65 @@ export function usersMe() {
   return send("GET", "/api/users/me");
 }
 
-// A sign-up or a sign-in answers with the user and sets the cookie the
-// browser sends from then on; a sign-out clears it.
+// A sign-up or a sign-in emails a code and answers `{pending}`; the code
+// answers the user and sets the cookie the browser sends from then on, or,
+// with a device's challenge, `{code}` for the device and no cookie. A
+// sign-out clears the cookie.
 
 /**
  * @param {string} email
  * @param {string} password
+ * @returns {Promise<{pending: string}>}
  */
 export function accountsSignUp(email, password) {
-  return send("POST", "/api/accounts/sign-up", { email, password }).then(({ user }) => user);
+  return send("POST", "/api/accounts/sign-up", { email, password });
 }
 
 /**
  * @param {string} email
  * @param {string} password
+ * @returns {Promise<{pending: string}>}
  */
 export function accountsSignIn(email, password) {
-  return send("POST", "/api/accounts/sign-in", { email, password }).then(({ user }) => user);
+  return send("POST", "/api/accounts/sign-in", { email, password });
+}
+
+/**
+ * @param {string} pending
+ * @param {string} code the six digits emailed
+ * @param {string} [challenge] the device's, when it opened this page
+ * @returns {Promise<{user: {id: string, email: string}, token: string} | {code: string}>}
+ */
+export function accountsCode(pending, code, challenge) {
+  return send("POST", "/api/accounts/code", { pending, code, challenge: challenge || null });
+}
+
+/**
+ * A new code emailed for the pending sign-in; the old one stops working.
+ * @param {string} pending
+ */
+export function accountsCodeResend(pending) {
+  return send("POST", "/api/accounts/code/resend", { pending });
+}
+
+// The browser is where a sign-in happens; nothing waits on it.
+
+/** @param {string} [_email] */
+export function accountsSignInStart(_email) {
+  return Promise.reject(new Error("the web signs in on its own page"));
+}
+
+export function accountsSignInPending() {
+  return Promise.resolve(null);
+}
+
+/** @param {string} _code */
+export function accountsSignInFinish(_code) {
+  return Promise.reject(new Error("the web signs in on its own page"));
+}
+
+export function accountsSignInCancel() {
+  return Promise.resolve(null);
 }
 
 export function accountsSignOut() {

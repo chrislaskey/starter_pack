@@ -6,20 +6,58 @@
 use std::path::Path;
 
 use app_core::deployment::Deployment;
+use app_core::mailer::Mailer;
 use axum::Router;
+use axum::extract::FromRef;
 use axum::routing::{delete, get, post, put};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+use crate::rate_limits::{self, RateLimits};
 use crate::{accounts, communities, memberships, posts, sync, users};
 
-pub fn router(svelte_dist: &Path, deployment: Deployment) -> Router {
-    let pages = ServeDir::new(svelte_dist).fallback(ServeFile::new(svelte_dist.join("index.html")));
+/// What every handler may take from the server: the database, where its
+/// email goes, and the rate limits; and whether the client IP is the
+/// proxy's header, see `rate_limits`.
+#[derive(Clone)]
+pub struct AppState {
+    pub deployment: Deployment,
+    pub mailer: Mailer,
+    pub rate_limits: RateLimits,
+    pub trust_proxy_headers: bool,
+}
 
-    Router::new()
+impl FromRef<AppState> for Deployment {
+    fn from_ref(state: &AppState) -> Deployment {
+        state.deployment.clone()
+    }
+}
+
+impl FromRef<AppState> for Mailer {
+    fn from_ref(state: &AppState) -> Mailer {
+        state.mailer.clone()
+    }
+}
+
+impl FromRef<AppState> for RateLimits {
+    fn from_ref(state: &AppState) -> RateLimits {
+        state.rate_limits.clone()
+    }
+}
+
+pub fn router(svelte_dist: &Path, state: AppState) -> Router {
+    let pages = ServeDir::new(svelte_dist).fallback(ServeFile::new(svelte_dist.join("index.html")));
+    let accounts = Router::new()
         .route("/api/accounts/sign-up", post(accounts::sign_up))
         .route("/api/accounts/sign-in", post(accounts::sign_in))
+        .route("/api/accounts/code", post(accounts::code))
+        .route("/api/accounts/code/resend", post(accounts::code_resend))
+        .route("/api/accounts/device-token", post(accounts::device_token))
         .route("/api/accounts/sign-out", delete(accounts::sign_out))
+        .layer(rate_limits::per_ip_layer(state.trust_proxy_headers));
+
+    Router::new()
+        .merge(accounts)
         .route("/api/users/me", get(users::me))
         .route("/api/posts", get(posts::list).post(posts::create))
         .route(
@@ -37,7 +75,7 @@ pub fn router(svelte_dist: &Path, deployment: Deployment) -> Router {
         .route("/api/sync/push", post(sync::push))
         .route("/api/sync/pull", post(sync::pull))
         .route("/api/sync/backfill", post(sync::backfill))
-        .with_state(deployment)
+        .with_state(state)
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
 }
@@ -52,6 +90,8 @@ mod tests {
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
+    use app_core::accounts::Session;
+
     use super::*;
 
     const MISSING_ID: &str = "01900000-0000-7000-8000-000000000000";
@@ -59,10 +99,12 @@ mod tests {
 
     /// A router over an in-memory database with Alice signed up and one
     /// post of hers, and a stand-in `index.html`. Every request `send`
-    /// makes is hers, with her token.
+    /// makes is hers, with her token. The emails go to `mailer`, where
+    /// a test reads the code.
     struct TestRouter {
         router: Router,
         token: String,
+        mailer: Mailer,
     }
 
     async fn test_router() -> (TestRouter, Value) {
@@ -73,9 +115,8 @@ mod tests {
             .await
             .expect("a database");
         let deployment = Deployment::new(database, app_core::deployment::Role::Server);
-        let alice = app_core::accounts::sign_up(&deployment, "alice@example.com", PASSWORD)
-            .await
-            .expect("alice signed up");
+        let mailer = Mailer::memory();
+        let alice = signed_up(&deployment, &mailer, "alice@example.com").await;
         let post = app_core::posts::create(&deployment, &alice.user, "the first post", &[])
             .await
             .expect("a post");
@@ -83,11 +124,35 @@ mod tests {
             .await
             .expect("the post");
         let post = serde_json::to_value(post).expect("json");
+        let state = AppState {
+            deployment,
+            mailer: mailer.clone(),
+            rate_limits: RateLimits::new(),
+            trust_proxy_headers: false,
+        };
         let test_router = TestRouter {
-            router: router(&dist, deployment),
+            router: router(&dist, state),
             token: alice.token,
+            mailer,
         };
         (test_router, post)
+    }
+
+    /// A user signed up on the server and finished with their code.
+    async fn signed_up(deployment: &Deployment, mailer: &Mailer, email: &str) -> Session {
+        let sent = app_core::accounts::sign_up(deployment, mailer, email, PASSWORD)
+            .await
+            .expect("signed up");
+        let code = code_sent_to(mailer, email);
+        app_core::accounts::sign_in_with_code(deployment, &sent.pending, &code)
+            .await
+            .expect("the code matched")
+    }
+
+    /// The code the last email to the address carried.
+    fn code_sent_to(mailer: &Mailer, email: &str) -> String {
+        let mail = mailer.last_sent_to(email).expect("an email");
+        app_core::mails::code_in(&mail).expect("a code in it")
     }
 
     async fn send(
@@ -182,20 +247,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_sign_up_sign_in_and_sign_out_over_the_cookie() {
+    async fn accounts_sign_up_then_the_code_sign_in_and_sign_out_over_the_cookie() {
         let (router, _) = test_router().await;
-        let bob = json!({ "email": "bob@example.com", "password": PASSWORD });
-        let (status, headers, body) = send_with(
+        let bob = json!({ "email": "Bob@example.com", "password": PASSWORD });
+        let (status, body) = send_as(
             &router.router,
-            None,
             None,
             Method::POST,
             "/api/accounts/sign-up",
             Some(bob.clone()),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let pending = body["pending"].as_str().expect("the pending token");
+        let code = code_sent_to(&router.mailer, "bob@example.com");
+
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": pending, "code": "000000" })),
+        )
+        .await;
+        if code != "000000" {
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("That code is wrong")
+            );
+        }
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code/resend",
+            Some(json!({ "pending": pending })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let code = code_sent_to(&router.mailer, "bob@example.com");
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": pending, "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(body["user"]["email"], json!("bob@example.com"));
+        assert!(body["user"]["confirmed_at"].is_string());
         let set_cookie = headers[header::SET_COOKIE].to_str().expect("a cookie");
         assert!(set_cookie.starts_with(&format!("token={}", body["token"].as_str().unwrap())));
         assert!(set_cookie.contains("HttpOnly"));
@@ -269,9 +374,21 @@ mod tests {
             Some(bob),
         )
         .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(body["pending"].is_string());
+        let code = code_sent_to(&router.mailer, "bob@example.com");
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": body["pending"], "code": code })),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["user"]["email"], json!("bob@example.com"));
 
+        let sent_before = router.mailer.sent().len();
         let (status, body) = send_as(
             &router.router,
             None,
@@ -280,10 +397,20 @@ mod tests {
             Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
-            body,
-            json!({ "error": "that email already has an account" })
+            status,
+            StatusCode::ACCEPTED,
+            "a taken email is answered as a new one"
+        );
+        assert!(body["pending"].is_string());
+        assert_eq!(router.mailer.sent().len(), sent_before + 1);
+        assert_eq!(
+            router
+                .mailer
+                .last_sent_to("bob@example.com")
+                .unwrap()
+                .subject,
+            "You already have an account"
         );
         let (status, body) = send_as(
             &router.router,
@@ -298,6 +425,202 @@ mod tests {
             body,
             json!({ "error": "a password needs at least 12 characters" })
         );
+    }
+
+    #[tokio::test]
+    async fn accounts_routes_are_rate_limited_per_address_per_sign_in_and_per_client() {
+        let (router, _) = test_router().await;
+        let alice = json!({ "email": "alice@example.com", "password": PASSWORD });
+        let mut pending = Value::Null;
+        for _ in 0..rate_limits::EMAILS_PER_HOUR_PER_ADDRESS {
+            let (status, body) = send_as(
+                &router.router,
+                None,
+                Method::POST,
+                "/api/accounts/sign-in",
+                Some(alice.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            pending = body["pending"].clone();
+        }
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(alice),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the sixth email in an hour"
+        );
+        assert_eq!(
+            body,
+            json!({ "error": "Too many attempts; try again in a few minutes" })
+        );
+
+        let resend = json!({ "pending": pending });
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code/resend",
+            Some(resend.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "counted as an email to alice too"
+        );
+        let (router, _) = test_router().await;
+        let (_, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(json!({ "email": "alice@example.com", "password": PASSWORD })),
+        )
+        .await;
+        let resend = json!({ "pending": body["pending"] });
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code/resend",
+            Some(resend.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code/resend",
+            Some(resend),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "one a minute per sign-in"
+        );
+
+        let (router, _) = test_router().await;
+        let garbage = json!({ "code": "nope", "verifier": "nope" });
+        for _ in 0..rate_limits::ACCOUNT_REQUESTS_PER_MINUTE_PER_IP {
+            let (status, _) = send_as(
+                &router.router,
+                None,
+                Method::POST,
+                "/api/accounts/device-token",
+                Some(garbage.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/device-token",
+            Some(garbage),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the thirty-first in a minute"
+        );
+        assert!(headers.get(header::RETRY_AFTER).is_some());
+        assert_eq!(
+            body,
+            json!({ "error": "Too many attempts; try again in a few minutes" })
+        );
+        let (status, _) = send_as(&router.router, None, Method::GET, "/api/users/me", None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "other routes are not limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn accounts_a_device_signs_in_through_the_browser_and_exchanges_its_code() {
+        let (router, _) = test_router().await;
+        let (verifier, challenge) = app_core::accounts::verifier_and_challenge();
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(json!({ "email": "alice@example.com", "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let code = code_sent_to(&router.mailer, "alice@example.com");
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": body["pending"], "code": code, "challenge": challenge })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            headers.get(header::SET_COOKIE).is_none(),
+            "no cookie for a device sign-in"
+        );
+        let device_code = body["code"].as_str().expect("the device code");
+        assert!(body.get("token").is_none());
+
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/device-token",
+            Some(json!({ "code": device_code, "verifier": "not the verifier" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, headers, session) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/device-token",
+            Some(json!({ "code": device_code, "verifier": verifier })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(header::SET_COOKIE).is_none());
+        assert_eq!(session["user"]["email"], json!("alice@example.com"));
+        let token = session["token"].as_str().unwrap();
+        let (status, me) = send_as(
+            &router.router,
+            Some(token),
+            Method::GET,
+            "/api/users/me",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["email"], json!("alice@example.com"));
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/device-token",
+            Some(json!({ "code": device_code, "verifier": verifier })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "a device code works once");
     }
 
     #[tokio::test]
@@ -398,7 +721,17 @@ mod tests {
             Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let code = code_sent_to(&router.mailer, "bob@example.com");
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": body["pending"], "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         let token = body["token"].as_str().unwrap();
         let (status, created) = send_as(
             &router.router,

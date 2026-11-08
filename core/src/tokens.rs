@@ -1,9 +1,13 @@
-//! API tokens: what a device sends as a bearer token on every request to
-//! the server, and what the browser's cookie holds, which the server
-//! resolves to a user, `users::get_by_token`. Made by a sign-up or a
-//! sign-in, deleted by a sign-out, see `accounts`. Only the token's
-//! hash is kept, so reading the table gives no token that works; a token
-//! expires `VALIDITY_DAYS` after it was made.
+//! Tokens: every secret the server hands out, one row of `users_tokens`
+//! each, kept as its hash so reading the table gives nothing that works,
+//! and told apart by its `Context`, which also sets how long it lives.
+//! The API token an app sends as a bearer token on every request and
+//! the token the browser's cookie holds, which the server resolves to a
+//! user, `users::get_by_token`; the pending sign-in that passed the
+//! password and waits for its emailed code, which carries the code's
+//! hash and the wrong attempts so far; and the device code a finished
+//! browser sign-in leaves for the device to collect, see `accounts`.
+//! Made and deleted there; the expired ones go with the purge.
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
@@ -12,59 +16,252 @@ use uuid::Uuid;
 use crate::database::{Transaction, sql};
 use crate::deployment::now;
 
-/// How long a token works, as Phoenix's API tokens do.
-pub const VALIDITY_DAYS: i64 = 365;
+/// How long an app's token works, as Phoenix's API tokens do.
+pub const API_VALIDITY_DAYS: i64 = 365;
+/// How long the browser's token works, as Phoenix's sessions do.
+pub const SESSION_VALIDITY_DAYS: i64 = 60;
+/// How long a sign-in waits for its code.
+pub const SIGN_IN_CODE_VALIDITY_MINUTES: i64 = 10;
+/// How long a device has to collect its code.
+pub const DEVICE_CODE_VALIDITY_MINUTES: i64 = 5;
+
+/// What a token is for, which sets how long it lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    /// An app's bearer token, a year.
+    Api,
+    /// The browser's cookie, sixty days.
+    Session,
+    /// A sign-in that passed the password and waits for its emailed
+    /// code, ten minutes.
+    SignInCode,
+    /// A finished browser sign-in waiting for the device to collect it,
+    /// five minutes.
+    DeviceCode,
+}
+
+impl Context {
+    pub const ALL: [Context; 4] = [
+        Context::Api,
+        Context::Session,
+        Context::SignInCode,
+        Context::DeviceCode,
+    ];
+
+    /// The context as the column keeps it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Context::Api => "api",
+            Context::Session => "session",
+            Context::SignInCode => "sign_in_code",
+            Context::DeviceCode => "device_code",
+        }
+    }
+
+    pub fn parse(context: &str) -> Option<Context> {
+        Context::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == context)
+    }
+
+    /// How long a token of this context works.
+    pub fn validity(self) -> Duration {
+        match self {
+            Context::Api => Duration::days(API_VALIDITY_DAYS),
+            Context::Session => Duration::days(SESSION_VALIDITY_DAYS),
+            Context::SignInCode => Duration::minutes(SIGN_IN_CODE_VALIDITY_MINUTES),
+            Context::DeviceCode => Duration::minutes(DEVICE_CODE_VALIDITY_MINUTES),
+        }
+    }
+
+    /// The time a token of this context must have been made after to be
+    /// valid at `now`.
+    pub fn made_after_to_be_valid(self, now: DateTime<Utc>) -> DateTime<Utc> {
+        now - self.validity()
+    }
+}
 
 /// A token as `users_tokens` keeps it: by its hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub id: Uuid,
     pub user_id: Uuid,
+    pub context: Context,
     pub token_hash: String,
+    /// The emailed code's hash, for a pending sign-in.
+    pub code_hash: Option<String>,
+    /// Wrong codes so far, for a pending sign-in.
+    pub attempts: i64,
     pub inserted_at: DateTime<Utc>,
 }
 
-/// Makes a token for the user and returns it: 32 random bytes as hex,
-/// kept as its hash and matched exactly.
-pub(crate) async fn create(tx: &mut Transaction, user_id: Uuid) -> Result<String, sqlx::Error> {
-    let mut bytes = [0u8; 32];
-    rand::fill(&mut bytes);
-    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let row = Token {
-        id: Uuid::now_v7(),
-        user_id,
-        token_hash: hash(&token),
-        inserted_at: now(),
-    };
-    sql!(&mut *tx, tokens::insert(&row))?;
+/// Makes a token for the user, an app's or the browser's, and returns
+/// it: 32 random bytes as hex, kept as its hash and matched exactly.
+pub(crate) async fn create(
+    tx: &mut Transaction,
+    user_id: Uuid,
+    context: Context,
+) -> Result<String, sqlx::Error> {
+    let token = random_hex(32);
+    insert(tx, user_id, context, hash(&token), None).await?;
     Ok(token)
 }
 
-/// Deletes the token, so it no longer stands for anyone; whether it did.
-pub(crate) async fn delete(tx: &mut Transaction, token: &str) -> Result<bool, sqlx::Error> {
-    sql!(&mut *tx, tokens::delete_by_hash(&hash(token)))
+/// Makes the user's pending sign-in, replacing any earlier one, and
+/// returns the pending token the page holds and the six-digit code to
+/// email them, both kept as hashes.
+pub(crate) async fn create_sign_in_code(
+    tx: &mut Transaction,
+    user_id: Uuid,
+) -> Result<(String, String), sqlx::Error> {
+    delete_of_user(tx, user_id, Context::SignInCode).await?;
+    let pending = random_hex(32);
+    let code = random_code();
+    insert(
+        tx,
+        user_id,
+        Context::SignInCode,
+        hash(&pending),
+        Some(hash(&code)),
+    )
+    .await?;
+    Ok((pending, code))
 }
 
-/// Deletes the tokens that have expired as of `now`, for the purge.
+/// Makes the device code for the user's finished browser sign-in: 16
+/// random bytes as hex, kept as the hash of the code and the device's
+/// challenge together, so the row is found only by someone holding
+/// both, see `accounts::sign_in_with_device_code`.
+pub(crate) async fn create_device_code(
+    tx: &mut Transaction,
+    user_id: Uuid,
+    challenge: &str,
+) -> Result<String, sqlx::Error> {
+    let code = random_hex(16);
+    insert(
+        tx,
+        user_id,
+        Context::DeviceCode,
+        device_code_hash(&code, challenge),
+        None,
+    )
+    .await?;
+    Ok(code)
+}
+
+/// Gives the pending sign-in a new code, its ten minutes starting over
+/// and its wrong attempts forgotten; the code to email.
+pub(crate) async fn reset_code(tx: &mut Transaction, id: Uuid) -> Result<String, sqlx::Error> {
+    let code = random_code();
+    sql!(&mut *tx, tokens::set_code(id, &hash(&code), now()))?;
+    Ok(code)
+}
+
+/// The token with the hash in the context, if it has not expired as of
+/// `now`.
+pub(crate) async fn get_valid(
+    tx: &mut Transaction,
+    token_hash: &str,
+    context: Context,
+    now: DateTime<Utc>,
+) -> Result<Option<Token>, sqlx::Error> {
+    sql!(
+        &mut *tx,
+        tokens::get_by_hash(token_hash, context, context.made_after_to_be_valid(now))
+    )
+}
+
+/// Counts one more wrong code against the pending sign-in; the attempts
+/// so far, this one included.
+pub(crate) async fn count_attempt(tx: &mut Transaction, id: Uuid) -> Result<i64, sqlx::Error> {
+    sql!(&mut *tx, tokens::increment_attempts(id))
+}
+
+pub(crate) async fn delete_by_id(tx: &mut Transaction, id: Uuid) -> Result<(), sqlx::Error> {
+    sql!(&mut *tx, tokens::delete_by_id(id))
+}
+
+/// Deletes the user's tokens of the context.
+pub(crate) async fn delete_of_user(
+    tx: &mut Transaction,
+    user_id: Uuid,
+    context: Context,
+) -> Result<u64, sqlx::Error> {
+    sql!(&mut *tx, tokens::delete_of_user(user_id, context))
+}
+
+/// Deletes an app's or the browser's token, so it no longer stands for
+/// anyone; whether it did.
+pub(crate) async fn delete(tx: &mut Transaction, token: &str) -> Result<bool, sqlx::Error> {
+    sql!(&mut *tx, tokens::delete_signed_in_by_hash(&hash(token)))
+}
+
+/// Deletes the tokens that have expired as of `now`, each context by its
+/// own validity, for the purge.
 pub(crate) async fn delete_expired(
     tx: &mut Transaction,
     now: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
-    sql!(
-        &mut *tx,
-        tokens::delete_made_before(made_after_to_be_valid(now))
-    )
+    let mut deleted = 0;
+    for context in Context::ALL {
+        deleted += sql!(
+            &mut *tx,
+            tokens::delete_made_before(context, context.made_after_to_be_valid(now))
+        )?;
+    }
+    Ok(deleted)
 }
 
-/// The time a token must have been made after to be valid at `now`.
-pub(crate) fn made_after_to_be_valid(now: DateTime<Utc>) -> DateTime<Utc> {
-    now - Duration::days(VALIDITY_DAYS)
+/// The time an app's token must have been made after to be valid at
+/// `now`, and the browser's.
+pub(crate) fn made_after_to_be_valid(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+    (
+        Context::Api.made_after_to_be_valid(now),
+        Context::Session.made_after_to_be_valid(now),
+    )
 }
 
 /// The hash kept for a token: SHA-256 as hex.
 pub(crate) fn hash(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The hash a device code row is kept under: of the code and the
+/// device's challenge together.
+pub(crate) fn device_code_hash(code: &str, challenge: &str) -> String {
+    hash(&format!("{code}{challenge}"))
+}
+
+/// Random bytes as hex, twice as many characters.
+pub(crate) fn random_hex(bytes: usize) -> String {
+    let mut buffer = vec![0u8; bytes];
+    rand::fill(&mut buffer[..]);
+    buffer.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Six digits, leading zeros included.
+fn random_code() -> String {
+    format!("{:06}", rand::random_range(0..1_000_000u32))
+}
+
+async fn insert(
+    tx: &mut Transaction,
+    user_id: Uuid,
+    context: Context,
+    token_hash: String,
+    code_hash: Option<String>,
+) -> Result<(), sqlx::Error> {
+    let row = Token {
+        id: Uuid::now_v7(),
+        user_id,
+        context,
+        token_hash,
+        code_hash,
+        attempts: 0,
+        inserted_at: now(),
+    };
+    sql!(&mut *tx, tokens::insert(&row))
 }
 
 #[cfg(test)]
@@ -82,14 +279,21 @@ mod tests {
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
-            let token = create(&mut tx, alice.id).await.expect("a token");
+            let token = create(&mut tx, alice.id, Context::Api)
+                .await
+                .expect("a token");
+            let session = create(&mut tx, alice.id, Context::Session)
+                .await
+                .expect("a session token");
             tx.commit().await.expect("committed");
             assert_eq!(token.len(), 64);
 
-            let user = users::get_by_token(&deployment, &token)
-                .await
-                .expect("the user");
-            assert_eq!(user, alice);
+            for token in [&token, &session] {
+                let user = users::get_by_token(&deployment, token)
+                    .await
+                    .expect("the user");
+                assert_eq!(user, alice);
+            }
             let error = users::get_by_token(&deployment, "not-a-token")
                 .await
                 .expect_err("unknown");
@@ -108,23 +312,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tokens_are_kept_hashed_and_expire() {
+    async fn tokens_are_kept_hashed_and_expire_each_by_its_context() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
             let alice = users::create(&deployment, "alice@example.com")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
-            let token = create(&mut tx, alice.id).await.expect("a token");
+            let token = create(&mut tx, alice.id, Context::Api)
+                .await
+                .expect("a token");
+            let session = create(&mut tx, alice.id, Context::Session)
+                .await
+                .expect("a session token");
+            let (pending, code) = create_sign_in_code(&mut tx, alice.id)
+                .await
+                .expect("a pending sign-in");
+            let device_code = create_device_code(&mut tx, alice.id, "the challenge")
+                .await
+                .expect("a device code");
             tx.commit().await.expect("committed");
+            assert_eq!(code.len(), 6);
+            assert!(code.chars().all(|c| c.is_ascii_digit()));
+            assert_eq!(device_code.len(), 32);
+            assert_ne!(hash(&token), token);
 
-            let in_a_year = now() + Duration::days(VALIDITY_DAYS + 1);
             let mut tx = deployment.begin().await.expect("a transaction");
+            let row = get_valid(&mut tx, &hash(&pending), Context::SignInCode, now())
+                .await
+                .expect("looked")
+                .expect("the pending sign-in");
+            assert_eq!(row.code_hash, Some(hash(&code)));
+            assert!(
+                get_valid(&mut tx, &hash(&pending), Context::Api, now())
+                    .await
+                    .expect("looked")
+                    .is_none(),
+                "a pending token never passes as an API token"
+            );
+            assert!(
+                get_valid(
+                    &mut tx,
+                    &device_code_hash(&device_code, "the challenge"),
+                    Context::DeviceCode,
+                    now()
+                )
+                .await
+                .expect("looked")
+                .is_some()
+            );
+            assert!(
+                get_valid(
+                    &mut tx,
+                    &device_code_hash(&device_code, "another challenge"),
+                    Context::DeviceCode,
+                    now()
+                )
+                .await
+                .expect("looked")
+                .is_none(),
+                "not without the right challenge"
+            );
+            assert_eq!(count_attempt(&mut tx, row.id).await.expect("one"), 1);
+            assert_eq!(count_attempt(&mut tx, row.id).await.expect("two"), 2);
+            let new_code = reset_code(&mut tx, row.id).await.expect("a new code");
+            let row = get_valid(&mut tx, &hash(&pending), Context::SignInCode, now())
+                .await
+                .expect("looked")
+                .expect("still the pending sign-in");
+            assert_eq!(row.code_hash, Some(hash(&new_code)));
+            assert_eq!(row.attempts, 0, "forgotten with the new code");
+
             assert_eq!(delete_expired(&mut tx, now()).await.expect("none"), 0);
+            let in_an_hour = now() + Duration::hours(1);
+            assert_eq!(
+                delete_expired(&mut tx, in_an_hour).await.expect("two"),
+                2,
+                "the code and the device code"
+            );
+            let in_a_season = now() + Duration::days(SESSION_VALIDITY_DAYS + 1);
+            assert_eq!(delete_expired(&mut tx, in_a_season).await.expect("one"), 1);
+            let in_a_year = now() + Duration::days(API_VALIDITY_DAYS + 1);
             assert_eq!(delete_expired(&mut tx, in_a_year).await.expect("one"), 1);
             tx.commit().await.expect("committed");
             assert!(users::get_by_token(&deployment, &token).await.is_err());
-            assert_ne!(hash(&token), token);
+            assert!(users::get_by_token(&deployment, &session).await.is_err());
         })
         .await;
     }

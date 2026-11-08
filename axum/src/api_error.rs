@@ -125,13 +125,15 @@ impl From<AccountError> for ApiError {
         let status = match error {
             AccountError::User(error) => return error.into(),
             AccountError::Sync(error) => return error.into(),
-            AccountError::InvalidEmailOrPassword => StatusCode::UNAUTHORIZED,
+            AccountError::InvalidEmailOrPassword
+            | AccountError::CodeDoesNotMatch
+            | AccountError::UnknownDeviceCode => StatusCode::UNAUTHORIZED,
             AccountError::Credential(
                 CredentialError::PasswordTooShort | CredentialError::PasswordTooLong,
             ) => StatusCode::UNPROCESSABLE_ENTITY,
+            AccountError::Mail(_) => StatusCode::SERVICE_UNAVAILABLE,
             AccountError::ServerOnly
             | AccountError::DeviceOnly
-            | AccountError::AlreadySignedIn
             | AccountError::Credential(_)
             | AccountError::DeviceSettings(_)
             | AccountError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,

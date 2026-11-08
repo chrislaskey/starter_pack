@@ -43,9 +43,12 @@ Inside the Tauri app each is a command of the same name
 | `membershipsJoin(communityId)` | `PUT /api/memberships/:community_id` |
 | `membershipsLeave(communityId)` | `DELETE /api/memberships/:community_id`, 204 |
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
-| `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 201 with the user and the token |
+| `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
 | `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
+| `accountsCode(pending, code, challenge?)` | `POST /api/accounts/code`, the user and the token, and the cookie; with a device's challenge, the device code and no cookie |
+| `accountsCodeResend(pending)` | `POST /api/accounts/code/resend`, 202, a new code emailed |
 | `accountsSignOut()` | `DELETE /api/accounts/sign-out`, 204 |
+| `accountsSignInStart(email?)`, `accountsSignInPending()`, `accountsSignInFinish(code)`, `accountsSignInCancel()` | none: the web signs in on its own page; the app's `POST /api/accounts/device-token` is what `accountsSignInFinish` calls, see "Accounts on a device" |
 | `pendingChangesList()` | none: the web has nothing waiting |
 | `deviceAccountsList()`, `deviceAccountsSwitch(userId)`, `deviceAccountsDeactivate()`, `deviceAccountsRemove(userId, losingChanges)` | none: the web keeps no accounts, see "Accounts on a device" |
 
@@ -75,37 +78,62 @@ what they write is theirs, `owner_id` on a post, and what they read is
 what they own or what is in a community of theirs, see
 [Communities](#communities). `app_users` is the app's view of each account, one row
 per person with their email, written by the server at sign-up and
-synced to devices like any row. Credentials never leave the server: the
-password hash is in `users_credentials` (`core/src/credentials.rs`,
-Argon2id) and the tokens in `users_tokens` (`core/src/tokens.rs`), kept
-as hashes and good for a year, both by the user's id.
+synced to devices like any row, with `confirmed_at` once the person
+proved the email. Credentials never leave the server: the password hash
+is in `users_credentials` (`core/src/credentials.rs`, Argon2id) and
+every secret the server hands out in `users_tokens`
+(`core/src/tokens.rs`), kept as hashes, each in a context that sets how
+long it lives: `api` for the apps' bearer tokens, a year; `session` for
+the browser's cookie, sixty days; `sign_in_code` for a sign-in waiting
+for its emailed code, ten minutes; `device_code` for a finished browser
+sign-in a device collects, five minutes.
 
-Signing up, in and out is `core/src/accounts.rs`, with an email and a
-password, on the server: a sign-up writes the user, the password and a
-token in one transaction, a sign-in checks the password and makes a
-token, a sign-out deletes it. The server resolves the user of every
-other request from its token, `axum/src/current_user.rs`: the apps send
-it as `Authorization: Bearer`, and a browser sends the cookie the
-sign-in set (`HttpOnly`, `SameSite=Strict`, `Secure` away from
-localhost). A request with no token, or a token the server does not
-know, is 401, whatever it asks for; the pages send a visitor to the
-sign-in page before showing anything that needs one (`svelte/src/lib/router.js`).
+Signing up, in and out is `core/src/accounts.rs`, on the server, and
+every sign-up and sign-in ends with a six-digit code emailed to the
+person, the design in `docs/design/accounts-sign-in.md`. A sign-up
+writes the user, unconfirmed, and the password, a sign-in checks the
+password; both then make a pending sign-in, email its code
+(`core/src/mails.rs` through `core/src/mailer.rs`) and answer the
+pending token. The code, five wrong tries at most, confirms the email
+the first time and makes the token; a sign-out deletes it. Emails are
+lowercased, and a sign-up with an email that has an account is answered
+as a new one, its owner emailed instead. Where the email goes is
+`MAILER`: unset or `log`, the server logs it in full, which is how a dev
+reads the code; `resend`, it goes through [Resend](https://resend.com)
+with `RESEND_API_KEY` and `MAIL_FROM` (`axum/src/mailer.rs`). The
+server resolves the user of every other request from its token,
+`axum/src/current_user.rs`: the apps send it as `Authorization: Bearer`,
+and a browser sends the cookie the code set (`HttpOnly`,
+`SameSite=Strict`, `Secure` away from localhost). A request with no
+token, or a token the server does not know, is 401, whatever it asks
+for; the pages send a visitor to the sign-in page before showing
+anything that needs one (`svelte/src/lib/router.js`). The accounts
+routes are rate limited per address, per pending sign-in and per
+client IP (`axum/src/rate_limits.rs`, the `governor` crate); behind a
+reverse proxy, `TRUST_PROXY_HEADERS=1` takes the client IP from
+`X-Forwarded-For`.
 
-A device signs up or in through the same transport it syncs over and
-keeps who signed in and their token as the `signed_in` device setting.
-A sign-out syncs first, then tells the server to forget the token and
-clears the setting; the data stays, pending changes included, so
-signing in again resumes from the cursor. Nobody acts until someone
-signs in: there is no default user anywhere. To try a second user over HTTP:
+A device never asks for a password: it signs in in the system browser,
+on the web's own sign-in page, and exchanges the code the page shows
+for its token, see "Accounts on a device". It keeps who signed in and
+their token as the `signed_in` device setting. A sign-out syncs first,
+then tells the server to forget the token and clears the setting; the
+data stays, pending changes included, so signing in again resumes from
+the cursor. Nobody acts until someone signs in: there is no default user
+anywhere. To try a second user over HTTP, with the code read from the
+server's log:
 
 ```sh
 curl -H "Content-Type: application/json" \
   -d '{"email":"alice@example.com","password":"correct horse battery"}' \
-  localhost:4000/api/accounts/sign-up   # answers her token
+  localhost:4000/api/accounts/sign-up   # answers {"pending": ...}; the code is in the log
+curl -H "Content-Type: application/json" \
+  -d '{"pending":"<pending>","code":"<code>"}' \
+  localhost:4000/api/accounts/code      # answers her token
 curl -H "Authorization: Bearer <token>" localhost:4000/api/posts
 ```
 
-What was left out, magic links and the rest of the Phoenix flow, is
+What was left out, password reset and the rest of the Phoenix flow, is
 `docs/suggestions/accounts.md`.
 
 ## Communities
@@ -245,7 +273,8 @@ the `InProcess` transport, which resolves tokens as the web server does;
 and once over HTTP against a running web server, as the dev user:
 
 ```sh
-SYNC_SERVER_URL=http://localhost:4000 cargo test -p app_core --features sync-http two_devices -- --ignored
+SYNC_SERVER_URL=http://localhost:4000 TEST_SERVER_DATABASE_URL=sqlite:../axum/data/app.db \
+  cargo test -p app_core --features sync-http two_devices -- --ignored
 ```
 
 ## Pages
@@ -257,8 +286,8 @@ shows the page at the path, swapped in place:
 | Path | Shows |
 | --- | --- |
 | `/` | `HomePage.svelte` |
-| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte` |
-| `/accounts/sign-in` | `accounts/AccountsSignInPage.svelte`, where a signed-out visitor is sent |
+| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte`, on the web: the email and password, then the code |
+| `/accounts/sign-in` | `accounts/AccountsSignInPage.svelte`, where a signed-out visitor is sent on the web; with `?challenge=`, a device's sign-in, ending with the code to paste into the app |
 | `/posts` | `posts/PostsIndexPage.svelte` |
 | `/posts/new` | `posts/PostsNewPage.svelte` |
 | `/posts/:id` | `posts/PostsShowPage.svelte`, with Edit and Delete |
@@ -282,10 +311,19 @@ its own under `accounts/`, listed in `device.db`, and one of them
 active, whose file every command reads and writes (`tauri/src/device_accounts.rs`,
 the design in `docs/design/device-accounts.md`). The accounts page,
 `/accounts`, lists them: the active one, the others to switch to at once
-or, signed out, to sign in to with the password, each with Remove from
-device, and Add account. Adding or signing in closes the active account
-first, so no account's file is open while the sign-in page shows, and
-the server's answer goes into the file of the user it names. A sign-out
+or, signed out, to sign in to again, each with Remove from device, and
+Add account. Adding or signing in closes the active account first and
+opens the system browser on the web's sign-in page
+(`tauri/src/accounts.rs`, the design in
+`docs/design/accounts-sign-in.md`): the app keeps a verifier in
+`device.db` and puts its hash in the page's URL as the challenge; the
+page, done, shows a code; the person pastes it into the dialog
+(`accounts/AccountsSignInDialog.svelte`), and the app exchanges the code
+and the verifier for its token, which goes into the file of the user
+the server names. The app never sees a password, and the browser is not
+signed in afterwards. Where the page is comes from `BROWSER_SIGN_IN_URL`,
+which `bin/dev` sets to the dev server's, else the sync server's own
+`/accounts/sign-in`. A sign-out
 closes the account and keeps its file; Remove from device deletes it,
 after a confirmation, and asks again when a change in it has not
 reached the server (`accounts/AccountsRemoveDialog.svelte`). Only the
@@ -362,10 +400,12 @@ cargo run -p app_web                        # http://localhost:4000, serving sve
 (cd tauri && cargo tauri build)             # the app bundle, under target/release/bundle
 ```
 
-The web server reads `PORT`, `DATABASE_URL` and `SVELTE_DIST` (default
-`svelte/dist`), and logs with `RUST_LOG` (default
-`app_web=info,tower_http=info`). The app reads `DATA_DIR` and
-`SYNC_SERVER_URL`.
+The web server reads `PORT`, `DATABASE_URL`, `SVELTE_DIST` (default
+`svelte/dist`), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`, and
+`TRUST_PROXY_HEADERS`, and logs with `RUST_LOG` (default
+`app_web=info,app_core=info,tower_http=info`, which includes the emails
+the log mailer writes). The app reads `DATA_DIR`, `SYNC_SERVER_URL` and
+`BROWSER_SIGN_IN_URL`.
 `pnpm check` in `svelte/` type-checks the pages.
 
 ### Mobile
