@@ -41,11 +41,13 @@ workspace's target/ while it builds, so the second waits for the first.
 
 Ports:
   PORT unset   The web server on 4000 and the Svelte dev server on 1420, as
-               the README says.
+               the README says. When another program holds one of them, a
+               warning, then 4010 and 5010; an error when those are taken too.
   PORT set     The web server on PORT and the Svelte dev server on
-               PORT + 1000, so consecutive ports never meet. Code Reviewer
-               sets a distinct PORT in each session's tmux environment, so
-               each worktree's apps run on ports of their own.
+               PORT + 1000, so consecutive ports never meet; an error when
+               either is taken. Code Reviewer sets a distinct PORT in each
+               session's tmux environment, so each worktree's apps run on
+               ports of their own.
 
 Examples:
   bin/dev                          # the web, on 4000 and 1420
@@ -59,34 +61,17 @@ fail() {
   exit 1
 }
 
-case "${PORT:-}" in
-  '')
-    web_port=4000
-    vite_port=1420
-    ;;
-  *[!0-9]*)
-    fail "PORT must be a number, got '$PORT'"
-    ;;
-  *)
-    web_port="$PORT"
-    vite_port=$((PORT + 1000))
-    ;;
-esac
-if [ "$web_port" -lt 1024 ] || [ "$vite_port" -gt 65535 ]; then
-  fail "PORT must be between 1024 and 64535, got '$web_port'"
-fi
-
-print_ports() {
-  echo "Web server  http://localhost:$web_port"
-  echo "Svelte dev  http://localhost:$vite_port"
-}
+DEFAULT_WEB_PORT=4000
+DEFAULT_VITE_PORT=1420
+FALLBACK_PORT=4010
 
 # The targets are the leading arguments; the rest go to the mobile dev command.
 targets=()
+only_print_ports=false
 while [ $# -gt 0 ]; do
   case "$1" in
     web|desktop|ios|android) targets+=("$1"); shift ;;
-    ports) print_ports; exit 0 ;;
+    ports) only_print_ports=true; shift ;;
     help|-h|--help) help; exit 0 ;;
     -*) fail "unknown option '$1'; run \`$0 --help\`" ;;
     *) break ;;
@@ -97,6 +82,71 @@ if [ ${#targets[@]} -eq 0 ]; then
     fail "unknown target '$1'; run \`$0 --help\`"
   fi
   targets=(web)
+fi
+
+starts_web=false
+for target in "${targets[@]}"; do
+  [ "$target" = web ] && starts_web=true
+done
+
+# The programs listening on a port, by name, or nothing when it is free.
+list_port_listeners() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fc 2>/dev/null | sed -n 's/^c//p' | sort -u | tr '\n' ' '
+}
+
+# The ports this run listens on that another program holds, with the
+# programs, one per line. The web port only when the web target runs: the
+# apps alone send to a web server started elsewhere.
+list_taken_ports() {
+  local port listeners ports=("$vite_port")
+  [ "$starts_web" = true ] && ports+=("$web_port")
+  for port in "${ports[@]}"; do
+    listeners=$(list_port_listeners "$port")
+    [ -z "$listeners" ] || echo "  $port, held by ${listeners% }"
+  done
+}
+
+case "${PORT:-}" in
+  '')
+    web_port=$DEFAULT_WEB_PORT
+    vite_port=$DEFAULT_VITE_PORT
+    taken=$(list_taken_ports)
+    if [ -n "$taken" ]; then
+      web_port=$FALLBACK_PORT
+      vite_port=$((FALLBACK_PORT + 1000))
+      echo "bin/dev: warning: the default ports are taken:" >&2
+      echo "$taken" >&2
+      echo "bin/dev: trying $web_port and $vite_port; set PORT to pick, like \`PORT=4020 $0 ...\`" >&2
+      taken=$(list_taken_ports)
+      if [ -n "$taken" ]; then
+        fail "the fallback ports are taken too:
+$taken
+Set PORT to free ones, like \`PORT=4020 $0 ...\` (the pages on PORT + 1000)"
+      fi
+    fi
+    ;;
+  *[!0-9]*)
+    fail "PORT must be a number, got '$PORT'"
+    ;;
+  *)
+    web_port="$PORT"
+    vite_port=$((PORT + 1000))
+    if [ "$web_port" -lt 1024 ] || [ "$vite_port" -gt 65535 ]; then
+      fail "PORT must be between 1024 and 64535, got '$web_port'"
+    fi
+    taken=$(list_taken_ports)
+    if [ -n "$taken" ]; then
+      fail "the ports from PORT=$PORT are taken:
+$taken
+Set PORT to free ones (the pages on PORT + 1000)"
+    fi
+    ;;
+esac
+
+if [ "$only_print_ports" = true ]; then
+  echo "Web server  http://localhost:$web_port"
+  echo "Svelte dev  http://localhost:$vite_port"
+  exit 0
 fi
 
 # The Tauri CLI opens the Simulator app on the device and installs the

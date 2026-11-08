@@ -393,8 +393,9 @@ bin/dev web desktop ios "iPhone 16"
 its pages from it, so the desktop and the iOS app can run together; two
 Tauri targets compile in turn, since Cargo locks the workspace's build
 directory. It takes its ports from `PORT` when set (the server on `PORT`,
-the pages on `PORT + 1000`), so worktrees don't collide; `bin/dev --help`
-has the rest. By hand:
+the pages on `PORT + 1000`), so worktrees don't collide. Without `PORT`,
+when another program holds 4000 or 1420, it warns and uses 4010 and 5010
+instead; `bin/dev --help` has the rest. By hand:
 
 ```sh
 (cd svelte && pnpm install && pnpm build)   # writes svelte/dist
