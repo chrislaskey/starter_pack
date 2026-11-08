@@ -47,5 +47,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "starter-pack": {
+      "syncServerUrl": "http://localhost:4000",
+      "browserSignInUrl": ""
+    }
   }
 }

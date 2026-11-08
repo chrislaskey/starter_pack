@@ -254,11 +254,14 @@ database (`device_settings`, one JSON value per key for what a person
 chooses on a device, every one declared with its first value in
 `core/src/device_settings.rs` and added to a device when the app starts)
 that makes a sync return at once with no request until they go online
-again. It syncs against
-`SYNC_SERVER_URL`: read
-when the app starts, else compiled in at build time, which is how a
-phone build learns it, else `http://localhost:4000`. `bin/dev` sets it to
-the web server it starts. The web has nothing to sync and shows no sync
+again. It syncs against the web
+server `tauri/src/server_urls.rs` resolves when the app starts:
+`SYNC_SERVER_URL` from the environment, which reaches the desktop app
+started from a shell, else `syncServerUrl` under `plugins.starter-pack`
+in `tauri/tauri.conf.json`, which is compiled into every build and is
+the only way a value reaches a phone build, else `http://localhost:4000`.
+`bin/dev` sets it, and the sign-in page's URL beside it, with the
+`--config` override for the web server it starts. The web has nothing to sync and shows no sync
 status.
 
 The device holds exactly what its user sees. The pull brings each row
@@ -321,9 +324,9 @@ page, done, shows a code; the person pastes it into the dialog
 (`accounts/AccountsSignInDialog.svelte`), and the app exchanges the code
 and the verifier for its token, which goes into the file of the user
 the server names. The app never sees a password, and the browser is not
-signed in afterwards. Where the page is comes from `BROWSER_SIGN_IN_URL`,
-which `bin/dev` sets to the dev server's, else the sync server's own
-`/accounts/sign-in`. A sign-out
+signed in afterwards. Where the page is comes from `BROWSER_SIGN_IN_URL`, else
+`browserSignInUrl` in the config beside `syncServerUrl`, which `bin/dev`
+sets to the dev server's, else the sync server's own `/accounts/sign-in`. A sign-out
 closes the account and keeps its file; Remove from device deletes it,
 after a confirmation, and asks again when a change in it has not
 reached the server (`accounts/AccountsRemoveDialog.svelte`). Only the
@@ -405,7 +408,8 @@ The web server reads `PORT`, `DATABASE_URL`, `SVELTE_DIST` (default
 `TRUST_PROXY_HEADERS`, and logs with `RUST_LOG` (default
 `app_web=info,app_core=info,tower_http=info`, which includes the emails
 the log mailer writes). The app reads `DATA_DIR`, `SYNC_SERVER_URL` and
-`BROWSER_SIGN_IN_URL`.
+`BROWSER_SIGN_IN_URL`, the two URLs also from `tauri/tauri.conf.json`
+for a phone build.
 `pnpm check` in `svelte/` type-checks the pages.
 
 ### Mobile

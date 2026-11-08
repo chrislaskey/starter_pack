@@ -1,7 +1,8 @@
 <!-- Signing up, at /accounts/sign-up, on the web: the email and the
      password, then the code that was emailed, which proves the email;
      done, the person is signed in and sees the posts. Opened by a device
-     with ?challenge=, the code ends in a code for the device instead. -->
+     with ?challenge=, the code ends in a code for the device instead; the
+     email is filled in from ?email=. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import { accountsCode, accountsCodeResend, accountsSignUp } from "../lib/core/index.js";
@@ -15,7 +16,7 @@
   const query = new URLSearchParams(window.location.search);
   const challenge = query.get("challenge") ?? "";
 
-  let email = $state("");
+  let email = $state(query.get("email") ?? "");
   let password = $state("");
   let pending = $state("");
   let code = $state("");
@@ -87,6 +88,6 @@
     <AccountsCodeForm {email} bind:code {error} {busy} {resent} onsubmit={finish} onresend={resend} onstartover={startOver} />
   {:else}
     <AccountsForm bind:email bind:password submitText="Sign up" passwordAutocomplete="new-password" {error} {busy} onsubmit={signUp} />
-    <p class="muted">Already have an account? <a href={accountsSignInUrl(undefined, challenge)} class="link">Sign in</a></p>
+    <p class="muted">Already have an account? <a href={accountsSignInUrl(email || undefined)} class="link">Sign in</a></p>
   {/if}
 </main>

@@ -29,8 +29,9 @@ Targets, any number of them, \`web\` when none:
   help      Show this help. Also -h and --help.
 
 ARGS, whatever follows the targets, go to the mobile app's dev command:
-\`bin/dev ios "iPhone 16"\` picks that simulator. Closing the dev server
-(Ctrl-C) stops every target.
+\`bin/dev ios "iPhone 16"\` picks that simulator, booted first so the
+install does not race its start. Closing the dev server (Ctrl-C) stops
+every target.
 
 The Svelte dev server is started once, here, and every target loads its
 pages from it, so the desktop and the iOS app can run side by side on one
@@ -98,6 +99,33 @@ if [ ${#targets[@]} -eq 0 ]; then
   targets=(web)
 fi
 
+# The Tauri CLI opens the Simulator app on the device and installs the
+# app at once, without waiting for the device to boot, so a run from a
+# simulator that was shut down fails at the install with "Unable to
+# lookup in current state: Shutdown". Booting the named simulator first,
+# and waiting for it, is what makes `bin/dev ios "iPhone 16"` work cold;
+# with no name the CLI picks or prompts, and nothing is booted here. Of
+# several simulators with the name, the one on the newest iOS.
+boot_simulator() {
+  local name="$1" udid
+  [ -n "$name" ] || return 0
+  udid=$(xcrun simctl list devices available -j 2>/dev/null | python3 -c '
+import json, sys
+name = sys.argv[1]
+found = []
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    for device in devices:
+        if device["name"] == name:
+            found.append((runtime, device["udid"]))
+print(sorted(found)[-1][1] if found else "")' "$name")
+  if [ -z "$udid" ]; then
+    echo "bin/dev: no simulator named '$name'; the Tauri CLI lists the ones there are" >&2
+    return 0
+  fi
+  echo "bin/dev: booting the simulator $name ($udid)"
+  xcrun simctl bootstatus "$udid" -b > /dev/null
+}
+
 pids=()
 # Stops every target and the dev server when one of them is closed, or this
 # script is interrupted.
@@ -124,9 +152,11 @@ pids+=($!)
 # which send /api to the web server, so `bin/dev web desktop` is the pair.
 sign_in_url="http://localhost:$vite_port/accounts/sign-in"
 
-# The Tauri CLI's config override: the pages from the dev server above, and
-# no dev server of the CLI's own.
-tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"}}"
+# The Tauri CLI's config override: the pages from the dev server above, no
+# dev server of the CLI's own, and the two URLs the app needs, under the
+# starter-pack entry of plugins, since a phone build gets no environment
+# from here (tauri/src/server_urls.rs).
+tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"},\"plugins\":{\"starter-pack\":{\"syncServerUrl\":\"http://localhost:$web_port\",\"browserSignInUrl\":\"$sign_in_url\"}}}"
 
 for target in "${targets[@]}"; do
   case "$target" in
@@ -137,7 +167,7 @@ for target in "${targets[@]}"; do
       ;;
     desktop)
       echo "bin/dev: the desktop app"
-      (cd "$ROOT/tauri" && SYNC_SERVER_URL="http://localhost:$web_port" BROWSER_SIGN_IN_URL="$sign_in_url" exec cargo tauri dev --config "$tauri_config") &
+      (cd "$ROOT/tauri" && exec cargo tauri dev --config "$tauri_config") &
       pids+=($!)
       ;;
     ios|android)
@@ -145,10 +175,13 @@ for target in "${targets[@]}"; do
       (
         cd "$ROOT/tauri"
         case "$target" in
-          ios) [ -d gen/apple ] || cargo tauri ios init ;;
+          ios)
+            [ -d gen/apple ] || cargo tauri ios init
+            boot_simulator "${1:-}"
+            ;;
           android) [ -d gen/android ] || cargo tauri android init ;;
         esac
-        SYNC_SERVER_URL="http://localhost:$web_port" BROWSER_SIGN_IN_URL="$sign_in_url" exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
+        exec cargo tauri "$target" dev --config "$tauri_config" ${1+"$@"}
       ) &
       pids+=($!)
       ;;

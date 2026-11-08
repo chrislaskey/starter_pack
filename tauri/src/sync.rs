@@ -1,8 +1,7 @@
 //! Syncing the active account's database with the web server, see
 //! `docs/design/offline-sync.md`: `app_core::sync::run` over HTTP to the
-//! server at `SYNC_SERVER_URL`, read when the app starts, else the value
-//! compiled in, which is how a phone build learns it, else the dev
-//! server's. One sync runs at a time: when the app starts, when it comes
+//! server at the URL `server_urls` resolves when the app starts. One
+//! sync runs at a time: when the app starts, when it comes
 //! to the foreground, after every write, from the Sync now button, and
 //! every half minute. Each one ends with a `synced` event to the pages,
 //! carrying the report or the error.
@@ -14,7 +13,6 @@
 //! A sync is a spawned task, not a queued job, and the only queue is the
 //! pending events: see "How a sync is started and run" in the design.
 
-use std::env;
 use std::sync::{Mutex as SyncMutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -25,8 +23,8 @@ use tokio::sync::{Mutex, MutexGuard};
 use app_core::sync::{self, Http, Report, Status, SyncError};
 
 use crate::device_accounts::DeviceAccounts;
+use crate::server_urls;
 
-const DEFAULT_SERVER_URL: &str = "http://localhost:4000";
 const INTERVAL: Duration = Duration::from_secs(30);
 /// A foreground sync is skipped this soon after the last sync started: a
 /// resume and a focus arrive together, and a click back into a desktop
@@ -56,7 +54,7 @@ impl SyncServer {
 }
 
 pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
-    let url = server_url();
+    let url = server_urls::sync_server_url(app.handle());
     log::info!("sync server {url}");
     app.manage(SyncServer {
         transport: Http::new(&url)?,
@@ -73,14 +71,6 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     Ok(())
-}
-
-/// The web server, for the sync and for where the sign-in page is.
-pub(crate) fn server_url() -> String {
-    env::var("SYNC_SERVER_URL")
-        .ok()
-        .or_else(|| option_env!("SYNC_SERVER_URL").map(String::from))
-        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
 }
 
 /// Starts a sync in the background.

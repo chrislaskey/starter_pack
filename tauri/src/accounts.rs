@@ -1,8 +1,9 @@
 //! The accounts commands: signing in and out on this device. A sign-in
 //! happens in the system browser, on the web's own sign-in page, see
 //! `docs/design/accounts-sign-in.md`: `accounts_sign_in_start` makes
-//! the verifier, keeps it in `device.db`, and opens the browser at
-//! `BROWSER_SIGN_IN_URL` with the verifier's challenge; the page, done,
+//! the verifier, keeps it in `device.db`, and opens the browser at the
+//! sign-in page `server_urls` names with the verifier's challenge; the
+//! page, done,
 //! shows a code the person pastes into the app, and
 //! `accounts_sign_in_finish` exchanges it with the verifier for the
 //! session, which goes into the account's own file, see
@@ -11,8 +12,6 @@
 //! waiting reaches the server, then closes the account, whose data stays
 //! for the next sign-in.
 
-use std::env;
-
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -20,6 +19,7 @@ use app_core::accounts;
 use app_core::users::User;
 
 use crate::device_accounts::{DeviceAccounts, PendingSignIn};
+use crate::server_urls;
 use crate::sync::{self, SyncServer};
 
 /// Keeps a verifier and opens the browser on the sign-in page, with the
@@ -35,7 +35,11 @@ pub async fn accounts_sign_in_start(
         .sign_in_start(&verifier, email.as_deref())
         .await
         .map_err(|error| error.to_string())?;
-    let url = browser_sign_in_url(&challenge, email.as_deref());
+    let url = sign_in_page_with(
+        &server_urls::browser_sign_in_url(&app),
+        &challenge,
+        email.as_deref(),
+    );
     log::info!("opening the browser to sign in at {url}");
     app.opener()
         .open_url(url, None::<&str>)
@@ -111,15 +115,8 @@ pub async fn accounts_sign_out(
         .map_err(|error| error.to_string())
 }
 
-/// The web's sign-in page, with the challenge and the email: at
-/// `BROWSER_SIGN_IN_URL`, read when the app starts, else the value
-/// compiled in, else the sync server's own `/accounts/sign-in`, which
-/// is where the pages are in production.
-fn browser_sign_in_url(challenge: &str, email: Option<&str>) -> String {
-    let page = env::var("BROWSER_SIGN_IN_URL")
-        .ok()
-        .or_else(|| option_env!("BROWSER_SIGN_IN_URL").map(String::from))
-        .unwrap_or_else(|| format!("{}/accounts/sign-in", sync::server_url()));
+/// The sign-in page with the challenge and the email in its query.
+fn sign_in_page_with(page: &str, challenge: &str, email: Option<&str>) -> String {
     let mut url = format!("{page}?challenge={}", encode(challenge));
     if let Some(email) = email.filter(|email| !email.is_empty()) {
         url.push_str(&format!("&email={}", encode(email)));
@@ -147,13 +144,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accounts_browser_sign_in_url_carries_the_challenge_and_the_email_encoded() {
-        let url = browser_sign_in_url("abc123", Some("alice+1@example.com"));
-        assert!(
-            url.ends_with("/accounts/sign-in?challenge=abc123&email=alice%2B1%40example.com"),
-            "{url}"
+    fn accounts_sign_in_page_with_carries_the_challenge_and_the_email_encoded() {
+        let page = "http://localhost:5002/accounts/sign-in";
+        let url = sign_in_page_with(page, "abc123", Some("alice+1@example.com"));
+        assert_eq!(
+            url,
+            "http://localhost:5002/accounts/sign-in?challenge=abc123&email=alice%2B1%40example.com"
         );
-        let url = browser_sign_in_url("abc123", Some(""));
-        assert!(url.ends_with("?challenge=abc123"), "{url}");
+        let url = sign_in_page_with(page, "abc123", Some(""));
+        assert_eq!(
+            url,
+            "http://localhost:5002/accounts/sign-in?challenge=abc123"
+        );
     }
 }

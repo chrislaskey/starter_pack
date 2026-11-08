@@ -88,6 +88,6 @@
     <AccountsCodeForm {email} bind:code {error} {busy} {resent} onsubmit={finish} onresend={resend} onstartover={startOver} />
   {:else}
     <AccountsForm bind:email bind:password submitText="Sign in" passwordAutocomplete="current-password" {error} {busy} onsubmit={signIn} />
-    <p class="muted">New here? <a href={accountsSignUpUrl(challenge)} class="link">Sign up</a></p>
+    <p class="muted">New here? <a href={accountsSignUpUrl(email || undefined)} class="link">Sign up</a></p>
   {/if}
 </main>

@@ -15,6 +15,7 @@ mod device_accounts;
 mod memberships;
 mod pending_changes;
 mod posts;
+mod server_urls;
 mod sync;
 mod users;
 

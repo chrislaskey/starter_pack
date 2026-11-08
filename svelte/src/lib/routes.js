@@ -27,17 +27,36 @@ export function accountsIndexUrl() {
   return ACCOUNTS_INDEX_PATH;
 }
 
-/** @param {string} [challenge] a device's, carried through from the sign-in page it opened */
-export function accountsSignUpUrl(challenge) {
-  return withQuery(ACCOUNTS_SIGN_UP_PATH, { challenge });
+// The account pages carry two things in their query, which every link
+// between them keeps unless the caller says otherwise: a device's
+// challenge, when it opened the page in the browser to sign in, and the
+// email to fill in. So the nav's Sign in and Sign up, and the pages'
+// own links, all stay a device's sign-in.
+
+/**
+ * @param {string} [email] to fill in, else the current address's
+ * @param {string} [challenge] a device's, else the current address's
+ */
+export function accountsSignUpUrl(email = currentQuery("email"), challenge = currentQuery("challenge")) {
+  return withQuery(ACCOUNTS_SIGN_UP_PATH, { email, challenge });
 }
 
 /**
- * @param {string} [email] filled in on the page, for an account signed out on this device
- * @param {string} [challenge] a device's, when it opened the page in the browser to sign in
+ * @param {string} [email] to fill in, for an account signed out on this device, else the current address's
+ * @param {string} [challenge] a device's, else the current address's
  */
-export function accountsSignInUrl(email, challenge) {
+export function accountsSignInUrl(email = currentQuery("email"), challenge = currentQuery("challenge")) {
   return withQuery(ACCOUNTS_SIGN_IN_PATH, { email, challenge });
+}
+
+/**
+ * A value in the current address's query, or "" when absent or when
+ * there is no window yet.
+ * @param {string} name
+ */
+function currentQuery(name) {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get(name) ?? "";
 }
 
 /**
