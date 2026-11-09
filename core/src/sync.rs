@@ -22,6 +22,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::accounts::{self, AccountError, Session};
+#[cfg(feature = "sync-http")]
+use crate::avatars::{AvatarUpdate, AvatarUpload, AvatarUploadNew};
 use crate::communities::{self, Community, CommunityError};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, now};
@@ -601,13 +603,45 @@ impl Http {
         })
     }
 
+    /// `avatars::create_upload` on the server, as the token's user.
+    pub async fn avatars_create_upload(
+        &self,
+        token: &str,
+        request: &AvatarUploadNew,
+    ) -> Result<AvatarUpload, SyncError> {
+        self.post(Some(token), "/api/avatars/uploads", request)
+            .await
+    }
+
+    /// `avatars::update` on the server, as the token's user.
+    pub async fn avatars_update(
+        &self,
+        token: &str,
+        request: &AvatarUpdate,
+    ) -> Result<User, SyncError> {
+        self.send(reqwest::Method::PUT, Some(token), "/api/avatars", request)
+            .await
+    }
+
     async fn post<Request: Serialize, Response: serde::de::DeserializeOwned>(
         &self,
         token: Option<&str>,
         path: &str,
         request: &Request,
     ) -> Result<Response, SyncError> {
-        let mut builder = self.client.post(format!("{}{path}", self.base_url));
+        self.send(reqwest::Method::POST, token, path, request).await
+    }
+
+    async fn send<Request: Serialize, Response: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        token: Option<&str>,
+        path: &str,
+        request: &Request,
+    ) -> Result<Response, SyncError> {
+        let mut builder = self
+            .client
+            .request(method, format!("{}{path}", self.base_url));
         if let Some(token) = token {
             builder = builder.bearer_auth(token);
         }

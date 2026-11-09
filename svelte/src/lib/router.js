@@ -22,6 +22,7 @@ import {
   POSTS_INDEX_PATH,
   POSTS_NEW_PATH,
   POSTS_SHOW_PATH,
+  PROFILE_EDIT_PATH,
   accountsIndexUrl,
   accountsSignInUrl,
 } from "./routes.js";
@@ -52,6 +53,7 @@ const { navigate, route } = createRouter({
   [POSTS_EDIT_PATH]: () => import("../posts/PostsEditPage.svelte"),
   [COMMUNITIES_INDEX_PATH]: () => import("../communities/CommunitiesIndexPage.svelte"),
   [CONFLICTS_INDEX_PATH]: () => import("../conflicts/ConflictsIndexPage.svelte"),
+  [PROFILE_EDIT_PATH]: () => import("../profile/ProfileEditPage.svelte"),
 });
 
 /**

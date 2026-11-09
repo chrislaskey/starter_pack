@@ -7,7 +7,15 @@
   import { accountsSignOut, hasDeviceAccounts } from "./core/index.js";
   import { currentUser, forgetCurrentUser } from "./current_user.js";
   import { navigateToUrl } from "./router.js";
-  import { accountsIndexUrl, accountsSignInUrl, accountsSignUpUrl, communitiesIndexUrl, homeUrl, postsIndexUrl } from "./routes.js";
+  import {
+    accountsIndexUrl,
+    accountsSignInUrl,
+    accountsSignUpUrl,
+    communitiesIndexUrl,
+    homeUrl,
+    postsIndexUrl,
+    profileEditUrl,
+  } from "./routes.js";
 
   /** @type {{email: string} | null} */
   let me = $state(null);
@@ -39,6 +47,7 @@
   {#if me}
     <a href={postsIndexUrl()} class="link">Posts</a>
     <a href={communitiesIndexUrl()} class="link">Communities</a>
+    <a href={profileEditUrl()} class="link">Profile</a>
   {/if}
   <span class="grow"></span>
   {#if me}

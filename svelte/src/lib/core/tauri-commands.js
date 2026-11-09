@@ -1,10 +1,48 @@
 // app_core over the Tauri app's commands (../../../../tauri/src/).
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { FormError } from "./form_error.js";
 
 /** The user signed in on this device; an error when nobody is. */
 export function usersMe() {
   return invoke("users_me");
+}
+
+/**
+ * A form's command, whose error is `{error, errors}`, thrown as the
+ * browser's would be.
+ * @param {string} command
+ * @param {Record<string, unknown>} args
+ */
+async function invokeForm(command, args) {
+  try {
+    return await invoke(command, args);
+  } catch (problem) {
+    if (problem && typeof problem === "object" && "error" in problem) {
+      const { error, errors } = /** @type {{error: string, errors?: Record<string, string[]>}} */ (problem);
+      throw new FormError(error, errors);
+    }
+    throw problem;
+  }
+}
+
+/**
+ * Where to PUT the picture the person picked, asked of the web server.
+ * @param {string} contentType
+ * @param {number} size in bytes
+ * @returns {Promise<{upload_url: string, content_type: string, key: string}>}
+ */
+export function avatarsCreateUpload(contentType, size) {
+  return invokeForm("avatars_create_upload", { contentType, size });
+}
+
+/**
+ * Makes the uploaded file the user's picture, on the web server, and
+ * here at once; answers the user.
+ * @param {string} key
+ */
+export function avatarsUpdate(key) {
+  return invokeForm("avatars_update", { key });
 }
 
 // The app never asks for a password: a sign-in happens in the system

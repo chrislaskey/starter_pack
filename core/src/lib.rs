@@ -13,6 +13,7 @@
 //! and `docs/design/offline-sync.md`.
 
 pub mod accounts;
+pub mod avatars;
 pub mod communities;
 pub mod conflicts;
 pub mod credentials;
@@ -20,6 +21,7 @@ pub mod database;
 pub mod deployment;
 pub mod device_settings;
 pub mod events;
+pub mod field_errors;
 pub mod mailer;
 pub mod mails;
 pub mod memberships;
@@ -30,6 +32,8 @@ pub mod posts;
 pub mod posts_communities;
 pub mod purge;
 mod sqlite;
+#[cfg(feature = "object-storage")]
+pub mod storage;
 pub mod sync;
 pub mod tokens;
 pub mod users;

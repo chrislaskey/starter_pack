@@ -1,5 +1,7 @@
 // app_core over the web server's JSON API (../../../../axum/src/). An
-// error answer, `{"error": "..."}`, is thrown with its message.
+// error answer, `{"error": "..."}`, is thrown with its message, as a
+// FormError with the fields' messages when it has `"errors"`.
+import { FormError } from "./form_error.js";
 
 /**
  * @param {string} method
@@ -12,20 +14,21 @@ async function send(method, path, body) {
     headers: { Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) throw await errorOf(response);
   if (response.status === 204) return undefined;
   return response.json();
 }
 
 /** @param {Response} response */
-async function errorMessage(response) {
+async function errorOf(response) {
   try {
-    const { error } = await response.json();
-    if (typeof error === "string") return error;
+    const { error, errors } = await response.json();
+    if (errors) return new FormError(error, errors);
+    if (typeof error === "string") return new Error(error);
   } catch {
     // Not the API's JSON: fall back to the status
   }
-  return `${response.status} ${response.statusText}`;
+  return new Error(`${response.status} ${response.statusText}`);
 }
 
 /** @param {string} id */
@@ -34,6 +37,24 @@ const postPath = (id) => `/api/posts/${encodeURIComponent(id)}`;
 /** The user signed in, whom the server takes the request to be from; an error when nobody is. */
 export function usersMe() {
   return send("GET", "/api/users/me");
+}
+
+/**
+ * Where to PUT the picture the person picked, once the server takes it.
+ * @param {string} contentType
+ * @param {number} size in bytes
+ * @returns {Promise<{upload_url: string, content_type: string, key: string}>}
+ */
+export function avatarsCreateUpload(contentType, size) {
+  return send("POST", "/api/avatars/uploads", { content_type: contentType, size });
+}
+
+/**
+ * Makes the uploaded file the user's picture; answers the user.
+ * @param {string} key
+ */
+export function avatarsUpdate(key) {
+  return send("PUT", "/api/avatars", { key });
 }
 
 // A sign-up or a sign-in emails a code and answers `{pending}`; the code

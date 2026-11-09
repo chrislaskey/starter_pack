@@ -14,6 +14,7 @@ export const POSTS_SHOW_PATH = "/posts/:id";
 export const POSTS_EDIT_PATH = "/posts/:id/edit";
 export const COMMUNITIES_INDEX_PATH = "/communities";
 export const CONFLICTS_INDEX_PATH = "/conflicts";
+export const PROFILE_EDIT_PATH = "/profile";
 
 /** The pages anyone sees; every other page needs someone signed in. */
 export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH];
@@ -96,4 +97,8 @@ export function communitiesIndexUrl() {
 
 export function conflictsIndexUrl() {
   return CONFLICTS_INDEX_PATH;
+}
+
+export function profileEditUrl() {
+  return PROFILE_EDIT_PATH;
 }

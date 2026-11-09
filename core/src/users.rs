@@ -9,13 +9,14 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::device_settings::{self, DeviceSettingsError, SIGNED_IN};
+use crate::events::{self, Answer, Conflicts, Event, Fields};
 use crate::sync::{Cursor, TableRow};
 use crate::tokens;
 
@@ -40,6 +41,9 @@ pub struct User {
     /// none until then, and such a user has no token, see `accounts`.
     #[serde(default)]
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// The public URL of their picture in object storage, see `avatars`.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// Who is signed in on a device, and the token the device sends the
@@ -120,6 +124,7 @@ async fn insert_in(tx: &mut Transaction, email: &str, confirmed: bool) -> Result
         deleted_at: None,
         deleted_by_id: None,
         confirmed_at: confirmed.then_some(now),
+        avatar_url: None,
     };
     sql!(&mut *tx, users::insert(&user)).map_err(email_taken)?;
     Ok(user)
@@ -130,6 +135,50 @@ async fn insert_in(tx: &mut Transaction, email: &str, confirmed: bool) -> Result
 pub(crate) async fn confirm_in(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
     sql!(&mut *tx, users::set_confirmed_at(id, now()))?;
     get_live(tx, id).await
+}
+
+/// Sets the user's picture, on the server, as an event in its log like
+/// any change a person makes; the devices pull the row. A device never
+/// writes it, so there is no merge, see `avatars`.
+#[cfg_attr(not(feature = "object-storage"), allow(dead_code))]
+pub(crate) async fn update_avatar_url_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    avatar_url: &str,
+) -> Result<User, UserError> {
+    let user = get_live(tx, id).await?;
+    let now = now();
+    let event = Event::update(
+        TABLE,
+        id,
+        user.version,
+        Fields::from_iter([("avatar_url".to_string(), json!(user.avatar_url))]),
+        Fields::from_iter([("avatar_url".to_string(), json!(avatar_url))]),
+        now,
+    );
+    let updated = User {
+        avatar_url: Some(avatar_url.to_string()),
+        updated_at: now,
+        version: user.version + 1,
+        last_synced_at: Some(now),
+        ..user
+    };
+    sql!(&mut *tx, users::update(&updated))?;
+    let answer = Answer::applied(
+        event.id,
+        updated.version,
+        Conflicts::new(),
+        table_row(&updated)?,
+    );
+    events::record(tx, id, &event, &answer).await?;
+    Ok(updated)
+}
+
+/// Every user's picture, deleted users' too, since a deleted row keeps
+/// its file until the purge removes the row.
+#[cfg_attr(not(feature = "object-storage"), allow(dead_code))]
+pub(crate) async fn list_avatar_urls_in(tx: &mut Transaction) -> Result<Vec<String>, UserError> {
+    Ok(sql!(tx, users::list_avatar_urls())?)
 }
 
 /// Deletes the users who never proved their email and were made before
@@ -316,6 +365,7 @@ pub(crate) mod tests {
             deleted_at: None,
             deleted_by_id: None,
             confirmed_at: Some(now),
+            avatar_url: None,
         }
     }
 

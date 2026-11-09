@@ -45,7 +45,9 @@ Ports:
                warning, then 4010 and 5010; an error when those are taken too.
   PORT set     The web server on PORT and the Svelte dev server on
                PORT + 1000, so consecutive ports never meet; an error when
-               either is taken. Code Reviewer sets a distinct PORT in each
+               either is taken.
+  Storage      Garage on the web server's port + 2000 to + 2003, see
+               \`bin/storage --help\`. Code Reviewer sets a distinct PORT in each
                session's tmux environment, so each worktree's apps run on
                ports of their own.
 
@@ -143,9 +145,12 @@ Set PORT to free ones (the pages on PORT + 1000)"
     ;;
 esac
 
+storage_port=$((web_port + 2000))
+
 if [ "$only_print_ports" = true ]; then
   echo "Web server  http://localhost:$web_port"
   echo "Svelte dev  http://localhost:$vite_port"
+  echo "Storage     http://127.0.0.1:$storage_port, files on $((storage_port + 2))"
   exit 0
 fi
 
@@ -208,11 +213,31 @@ sign_in_url="http://localhost:$vite_port/accounts/sign-in"
 # from here (tauri/src/server_urls.rs).
 tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"},\"plugins\":{\"starter-pack\":{\"syncServerUrl\":\"http://localhost:$web_port\",\"browserSignInUrl\":\"$sign_in_url\"}}}"
 
+# Garage, the web server's bucket, when it is installed; without it the
+# server runs with uploads off. Its STORAGE_* variables go to the server
+# once the first start has set it up.
+storage_env=()
+if [ "$starts_web" = true ]; then
+  if command -v garage > /dev/null; then
+    (STORAGE_PORT="$storage_port" exec "$ROOT/bin/storage" start) &
+    pids+=($!)
+    for _ in $(seq 1 50); do
+      STORAGE_PORT="$storage_port" "$ROOT/bin/storage" env > /dev/null 2>&1 && break
+      sleep 0.2
+    done
+    while IFS= read -r line; do
+      storage_env+=("$line")
+    done < <(STORAGE_PORT="$storage_port" "$ROOT/bin/storage" env)
+  else
+    echo "bin/dev: warning: garage is not installed, so uploads are off; \`brew install garage\`" >&2
+  fi
+fi
+
 for target in "${targets[@]}"; do
   case "$target" in
     web)
       echo "bin/dev: the web server on http://localhost:$web_port"
-      (cd "$ROOT" && PORT="$web_port" exec cargo run -p app_web) &
+      (cd "$ROOT" && exec env ${storage_env[@]+"${storage_env[@]}"} PORT="$web_port" cargo run -p app_web) &
       pids+=($!)
       ;;
     desktop)

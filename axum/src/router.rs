@@ -7,6 +7,7 @@ use std::path::Path;
 
 use app_core::deployment::Deployment;
 use app_core::mailer::Mailer;
+use app_core::storage::Storage;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{delete, get, post, put};
@@ -14,15 +15,16 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::rate_limits::{self, RateLimits};
-use crate::{accounts, communities, memberships, posts, sync, users};
+use crate::{accounts, avatars, communities, memberships, posts, sync, users};
 
 /// What every handler may take from the server: the database, where its
-/// email goes, and the rate limits; and whether the client IP is the
-/// proxy's header, see `rate_limits`.
+/// email goes, the bucket uploads go to if any, and the rate limits; and
+/// whether the client IP is the proxy's header, see `rate_limits`.
 #[derive(Clone)]
 pub struct AppState {
     pub deployment: Deployment,
     pub mailer: Mailer,
+    pub storage: Option<Storage>,
     pub rate_limits: RateLimits,
     pub trust_proxy_headers: bool,
 }
@@ -36,6 +38,12 @@ impl FromRef<AppState> for Deployment {
 impl FromRef<AppState> for Mailer {
     fn from_ref(state: &AppState) -> Mailer {
         state.mailer.clone()
+    }
+}
+
+impl FromRef<AppState> for Option<Storage> {
+    fn from_ref(state: &AppState) -> Option<Storage> {
+        state.storage.clone()
     }
 }
 
@@ -59,6 +67,8 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
     Router::new()
         .merge(accounts)
         .route("/api/users/me", get(users::me))
+        .route("/api/avatars", put(avatars::update))
+        .route("/api/avatars/uploads", post(avatars::create_upload))
         .route("/api/posts", get(posts::list).post(posts::create))
         .route(
             "/api/posts/{id}",
@@ -100,11 +110,13 @@ mod tests {
     /// A router over an in-memory database with Alice signed up and one
     /// post of hers, and a stand-in `index.html`. Every request `send`
     /// makes is hers, with her token. The emails go to `mailer`, where
-    /// a test reads the code.
+    /// a test reads the code, and uploads to `storage`, in memory, where
+    /// a test puts the file a page would have.
     struct TestRouter {
         router: Router,
         token: String,
         mailer: Mailer,
+        storage: Storage,
     }
 
     async fn test_router() -> (TestRouter, Value) {
@@ -124,9 +136,11 @@ mod tests {
             .await
             .expect("the post");
         let post = serde_json::to_value(post).expect("json");
+        let storage = Storage::memory();
         let state = AppState {
             deployment,
             mailer: mailer.clone(),
+            storage: Some(storage.clone()),
             rate_limits: RateLimits::new(),
             trust_proxy_headers: false,
         };
@@ -134,6 +148,7 @@ mod tests {
             router: router(&dist, state),
             token: alice.token,
             mailer,
+            storage,
         };
         (test_router, post)
     }
@@ -244,6 +259,42 @@ mod tests {
         assert_eq!(body, json!({ "error": "Sign in first" }));
         let (status, _) = send_as(&router.router, None, Method::GET, "/api/posts", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn avatars_upload_then_update_with_field_errors_as_json() {
+        let (router, _) = test_router().await;
+        let wrong = json!({ "content_type": "text/html", "size": 0 });
+        let (status, body) = send(&router, Method::POST, "/api/avatars/uploads", Some(wrong)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["errors"],
+            json!({
+                "content_type": ["must be a PNG, JPEG, GIF or WebP picture"],
+                "size": ["is empty"],
+            })
+        );
+
+        let png = b"\x89PNG\r\n\x1a\nthe rest".to_vec();
+        let picked = json!({ "content_type": "image/png", "size": png.len() });
+        let (status, upload) =
+            send(&router, Method::POST, "/api/avatars/uploads", Some(picked)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let key = upload["key"].as_str().expect("a key").to_string();
+        assert_eq!(upload["content_type"], json!("image/png"));
+
+        router.storage.put(&key, png).await.expect("the upload");
+        let (status, user) = send(
+            &router,
+            Method::PUT,
+            "/api/avatars",
+            Some(json!({ "key": key })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(user["avatar_url"], json!(format!("memory:///{key}")));
+        let (_, me) = get(&router, "/api/users/me").await;
+        assert_eq!(me["avatar_url"], user["avatar_url"]);
     }
 
     #[tokio::test]

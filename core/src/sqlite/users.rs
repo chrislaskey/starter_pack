@@ -21,6 +21,7 @@ struct UserRow {
     deleted_at: Option<DateTime<Utc>>,
     deleted_by_id: Option<Hyphenated>,
     confirmed_at: Option<DateTime<Utc>>,
+    avatar_url: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -35,6 +36,7 @@ impl From<UserRow> for User {
             deleted_at: row.deleted_at,
             deleted_by_id: row.deleted_by_id.map(Hyphenated::into_uuid),
             confirmed_at: row.confirmed_at,
+            avatar_url: row.avatar_url,
         }
     }
 }
@@ -42,7 +44,7 @@ impl From<UserRow> for User {
 macro_rules! select {
     ($($rest:expr),+ $(,)?) => {
         concat!(
-            "SELECT id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at FROM app_users ",
+            "SELECT id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at, avatar_url FROM app_users ",
             $($rest),+
         )
     };
@@ -67,7 +69,7 @@ pub async fn get_by_token_hash(
     session_made_after: DateTime<Utc>,
 ) -> Result<Option<User>, sqlx::Error> {
     let row: Option<UserRow> = sqlx::query_as(
-        "SELECT u.id, u.email, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id, u.confirmed_at
+        "SELECT u.id, u.email, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id, u.confirmed_at, u.avatar_url
          FROM app_users u JOIN users_tokens t ON t.user_id = u.id
          WHERE t.token_hash = $1 AND u.deleted_at IS NULL
            AND ((t.context = 'api' AND t.inserted_at > $2) OR (t.context = 'session' AND t.inserted_at > $3))",
@@ -96,6 +98,33 @@ pub async fn set_confirmed_at(
     .execute(connection)
     .await?;
     Ok(())
+}
+
+/// Writes the fields a user's event may change, with the sync columns.
+#[cfg_attr(not(feature = "object-storage"), allow(dead_code))]
+pub async fn update(connection: &mut SqliteConnection, user: &User) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_users SET avatar_url = $2, updated_at = $3, version = $4, last_synced_at = $5
+         WHERE id = $1",
+    )
+    .bind(user.id.hyphenated())
+    .bind(&user.avatar_url)
+    .bind(user.updated_at)
+    .bind(user.version)
+    .bind(user.last_synced_at)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Every user's picture, deleted users' too, for the sweep.
+#[cfg_attr(not(feature = "object-storage"), allow(dead_code))]
+pub async fn list_avatar_urls(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT avatar_url FROM app_users WHERE avatar_url IS NOT NULL")
+        .fetch_all(connection)
+        .await
 }
 
 /// Deletes the users who never proved their email and were made before
@@ -175,8 +204,8 @@ pub async fn list_synced_after(
 
 pub async fn insert(connection: &mut SqliteConnection, user: &User) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at, avatar_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(user.id.hyphenated())
     .bind(&user.email)
@@ -187,6 +216,7 @@ pub async fn insert(connection: &mut SqliteConnection, user: &User) -> Result<()
     .bind(user.deleted_at)
     .bind(user.deleted_by_id.map(Uuid::hyphenated))
     .bind(user.confirmed_at)
+    .bind(&user.avatar_url)
     .execute(connection)
     .await?;
     Ok(())
@@ -195,13 +225,13 @@ pub async fn insert(connection: &mut SqliteConnection, user: &User) -> Result<()
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(connection: &mut SqliteConnection, user: &User) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "INSERT INTO app_users (id, email, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id, confirmed_at, avatar_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (id) DO UPDATE SET
            email = excluded.email, inserted_at = excluded.inserted_at, updated_at = excluded.updated_at,
            version = excluded.version, last_synced_at = excluded.last_synced_at,
            deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id,
-           confirmed_at = excluded.confirmed_at",
+           confirmed_at = excluded.confirmed_at, avatar_url = excluded.avatar_url",
     )
     .bind(user.id.hyphenated())
     .bind(&user.email)
@@ -212,6 +242,7 @@ pub async fn upsert(connection: &mut SqliteConnection, user: &User) -> Result<()
     .bind(user.deleted_at)
     .bind(user.deleted_by_id.map(Uuid::hyphenated))
     .bind(user.confirmed_at)
+    .bind(&user.avatar_url)
     .execute(connection)
     .await?;
     Ok(())

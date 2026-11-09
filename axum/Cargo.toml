@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-app_core = { workspace = true, features = ["postgres", "mail-resend"] }
+app_core = { workspace = true, features = ["postgres", "mail-resend", "object-storage"] }
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
 governor = "0.10"

@@ -4,8 +4,9 @@
 //! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
 //! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
 //! beside this crate when unset, or a PostgreSQL database. The email it
-//! sends goes where `MAILER` says, see `mailer`, and its accounts routes
-//! are rate limited, see `rate_limits`.
+//! sends goes where `MAILER` says, see `mailer`, uploads go to the bucket
+//! `STORAGE_BUCKET` names, see `storage`, and its accounts routes are
+//! rate limited, see `rate_limits`.
 //!
 //! With arguments it runs a command on that database instead and exits:
 //! `purge` removes what was deleted longer ago than the retention
@@ -13,6 +14,7 @@
 
 mod accounts;
 mod api_error;
+mod avatars;
 mod communities;
 mod current_user;
 mod database;
@@ -21,6 +23,7 @@ mod memberships;
 mod posts;
 mod rate_limits;
 mod router;
+mod storage;
 mod sync;
 mod users;
 
@@ -71,6 +74,7 @@ async fn main() -> Result<(), String> {
 
     let deployment = database::open().await?;
     let mailer = mailer::open()?;
+    let storage = storage::open()?;
     let arguments: Vec<String> = env::args().skip(1).collect();
     if !arguments.is_empty() {
         return command(&deployment, &arguments).await;
@@ -87,6 +91,7 @@ async fn main() -> Result<(), String> {
     let state = AppState {
         deployment,
         mailer,
+        storage,
         rate_limits,
         trust_proxy_headers: trust_proxy_headers(),
     };

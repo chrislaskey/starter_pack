@@ -1,5 +1,6 @@
 //! An error as the API answers it: a status and `{"error": "..."}`, from
-//! the error of whichever core module the handler called.
+//! the error of whichever core module the handler called; a form's
+//! fields that were wrong also as `"errors": {"field": ["message"]}`.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -7,8 +8,10 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use app_core::accounts::AccountError;
+use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
 use app_core::credentials::CredentialError;
+use app_core::field_errors::FieldErrors;
 use app_core::memberships::MembershipError;
 use app_core::posts::PostError;
 use app_core::posts_communities::PostCommunityError;
@@ -19,6 +22,7 @@ use app_core::users::UserError;
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    field_errors: Option<FieldErrors>,
 }
 
 impl ApiError {
@@ -26,6 +30,16 @@ impl ApiError {
         ApiError {
             status,
             message: message.into(),
+            field_errors: None,
+        }
+    }
+
+    /// 422, with the fields that were wrong.
+    pub fn from_field_errors(field_errors: FieldErrors) -> ApiError {
+        ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "Some fields need another look".to_string(),
+            field_errors: Some(field_errors),
         }
     }
 }
@@ -120,6 +134,25 @@ impl From<UserError> for ApiError {
     }
 }
 
+impl From<AvatarError> for ApiError {
+    fn from(error: AvatarError) -> Self {
+        let status = match error {
+            AvatarError::Invalid(field_errors) => return ApiError::from_field_errors(field_errors),
+            AvatarError::User(error) => return error.into(),
+            AvatarError::Sync(error) => return error.into(),
+            AvatarError::NotYours => StatusCode::FORBIDDEN,
+            AvatarError::UploadMissing
+            | AvatarError::UploadExpired
+            | AvatarError::NotTheImageType
+            | AvatarError::TooLarge => StatusCode::UNPROCESSABLE_ENTITY,
+            AvatarError::ServerOnly | AvatarError::Storage(_) | AvatarError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
 impl From<AccountError> for ApiError {
     fn from(error: AccountError) -> Self {
         let status = match error {
@@ -167,6 +200,10 @@ impl IntoResponse for ApiError {
         if self.status.is_server_error() {
             tracing::error!("{}", self.message);
         }
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let body = match self.field_errors {
+            Some(field_errors) => json!({ "error": self.message, "errors": field_errors }),
+            None => json!({ "error": self.message }),
+        };
+        (self.status, Json(body)).into_response()
     }
 }

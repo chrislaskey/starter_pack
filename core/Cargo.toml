@@ -14,10 +14,15 @@ postgres = ["sqlx/postgres"]
 sync-http = ["dep:reqwest"]
 # Sending email through Resend, for the server in production
 mail-resend = ["dep:reqwest", "dep:secrecy"]
+# Uploads straight to S3-style object storage, for the server; never in the Tauri app
+object-storage = ["dep:object_store", "dep:secrecy", "dep:futures-util"]
 
 [dependencies]
 argon2 = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+futures-util = { version = "0.3", default-features = false, optional = true }
+garde = { version = "0.23", features = ["derive"] }
+object_store = { version = "0.14", default-features = false, features = ["aws"], optional = true }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 secrecy = { version = "0.10", optional = true }

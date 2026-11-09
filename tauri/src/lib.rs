@@ -9,6 +9,7 @@
 //! `accounts`.
 
 mod accounts;
+mod avatars;
 mod communities;
 mod conflicts;
 mod device_accounts;
@@ -37,6 +38,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             users::users_me,
+            avatars::avatars_create_upload,
+            avatars::avatars_update,
             accounts::accounts_sign_in_start,
             accounts::accounts_sign_in_pending,
             accounts::accounts_sign_in_finish,

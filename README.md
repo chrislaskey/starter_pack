@@ -17,6 +17,7 @@ tauri/     app_tauri, the desktop and mobile app: app_core behind Tauri commands
 svelte/    the pages, one Svelte app the web server serves and the Tauri app bundles
 bin/dev    starts a deployment in dev mode
 bin/reset  deletes the local SQLite files and drops the dev PostgreSQL database
+bin/storage runs Garage, the S3-style bucket uploads go to in dev
 phoenix/   the Phoenix version this one replaces in stages, kept as the reference
 ```
 
@@ -43,6 +44,9 @@ Inside the Tauri app each is a command of the same name
 | `membershipsJoin(communityId)` | `PUT /api/memberships/:community_id` |
 | `membershipsLeave(communityId)` | `DELETE /api/memberships/:community_id`, 204 |
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
+| `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
+| `avatarsUpdate(key)` | `PUT /api/avatars` with `{"key": "..."}`, the user with their `avatar_url` |
+| `avatarsUpload(file, onProgress?)` | both, with the file PUT straight to the bucket between them, see [Forms and uploads](#forms-and-uploads) |
 | `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
 | `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
 | `accountsCode(pending, code, challenge?)` | `POST /api/accounts/code`, the user and the token, and the cookie; with a device's challenge, the device code and no cookie |
@@ -135,6 +139,29 @@ curl -H "Authorization: Bearer <token>" localhost:4000/api/posts
 
 What was left out, password reset and the rest of the Phoenix flow, is
 `docs/suggestions/accounts.md`.
+
+## Forms and uploads
+
+A form's rules are declared on its request's struct in core with
+`garde`, `#[garde(custom(is_image_type))]`, and checked with
+`FieldErrors::check` (`core/src/field_errors.rs`), which answers the
+messages by field, as an Ecto changeset's errors. The server answers
+them with 422 as `{"error": "...", "errors": {"field": ["message"]}}`,
+an app's command answers the same object, and both are thrown to the
+page as a `FormError` (`svelte/src/lib/core/form_error.js`), whose
+`errors` the `FieldErrors` component shows under the input they belong
+to. The page checks nothing itself beyond `accept` and `required`.
+
+A file goes from the person's device straight to object storage, never
+through the server (`core/src/avatars.rs`, `core/src/storage.rs`, over
+`object_store`): the server checks what was picked and answers a URL
+signed for its key and content type, the page PUTs the file there, and
+the server checks the file arrived and is the image it said before the
+user's `avatar_url` points at it. The Profile page sets the picture.
+Uploads are online only for now; the design, the failure cases and how
+files are deleted are `docs/design/uploads.md`. In dev the bucket is
+Garage, which `bin/dev` starts with the web server when it is installed
+(`brew install garage`); without it the server runs with uploads off.
 
 ## Communities
 
@@ -405,7 +432,10 @@ cargo run -p app_web                        # http://localhost:4000, serving sve
 ```
 
 The web server reads `PORT`, `DATABASE_URL`, `SVELTE_DIST` (default
-`svelte/dist`), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`, and
+`svelte/dist`), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`,
+`STORAGE_BUCKET` with `STORAGE_ENDPOINT`, `STORAGE_REGION`,
+`STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` and
+`STORAGE_PUBLIC_URL` (`bin/storage env` prints Garage's), and
 `TRUST_PROXY_HEADERS`, and logs with `RUST_LOG` (default
 `app_web=info,app_core=info,tower_http=info`, which includes the emails
 the log mailer writes). The app reads `DATA_DIR`, `SYNC_SERVER_URL` and

@@ -6,10 +6,15 @@
 import { isTauri } from "@tauri-apps/api/core";
 import * as httpApi from "./http-api.js";
 import * as tauriCommands from "./tauri-commands.js";
+import { putFile } from "./uploads.js";
+
+export { FormError } from "./form_error.js";
 
 const core = isTauri() ? tauriCommands : httpApi;
 
 export const usersMe = core.usersMe;
+export const avatarsCreateUpload = core.avatarsCreateUpload;
+export const avatarsUpdate = core.avatarsUpdate;
 export const accountsSignUp = core.accountsSignUp;
 export const accountsSignIn = core.accountsSignIn;
 export const accountsCode = core.accountsCode;
@@ -41,3 +46,16 @@ export const conflictsList = core.conflictsList;
 export const conflictsReapply = core.conflictsReapply;
 export const conflictsLetGo = core.conflictsLetGo;
 export const pendingChangesList = core.pendingChangesList;
+
+/**
+ * Uploads the picture straight to object storage, then makes it the
+ * user's picture; answers the user. Throws a FormError for a file the
+ * server does not take.
+ * @param {File} file
+ * @param {(fraction: number) => void} [onProgress] from 0 to 1
+ */
+export async function avatarsUpload(file, onProgress) {
+  const upload = await core.avatarsCreateUpload(file.type, file.size);
+  await putFile(upload, file, onProgress);
+  return core.avatarsUpdate(upload.key);
+}

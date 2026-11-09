@@ -158,6 +158,7 @@ Any other field is refused as `not_editable: <field>`:
 | `app_communities` | `name` | nothing, a community does not change yet |
 | `app_users_communities` | `user_id`, `community_id`, `role` | `deleted_at` |
 | `app_posts_communities` | `post_id`, `community_id`, `users_communities_id` | `deleted_at` |
+| `app_users` | nothing, the server makes a user | `avatar_url`, by the server only for now, see `uploads.md` |
 
 Who made the event is not on the wire: the server records the user its
 token stood for, a device the user signed in, as `user_id` in
