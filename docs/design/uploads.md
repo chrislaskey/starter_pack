@@ -158,9 +158,10 @@ through Garage's web endpoint at `http://starter-pack.web.localhost:<port>`,
 the bucket `starter-pack-private` for files, read through signed URLs
 only (`offline-files-decisions.md`), CORS open to every origin for the
 pages' PUTs, and a key for the server, kept there, never committed. `bin/dev` starts it with the web
-server and passes the server `bin/storage env`. Production's bucket
-allows only the web's origin and the app's (`tauri://localhost`,
-`http://tauri.localhost`).
+server and passes the server `bin/storage env`. Production's buckets
+allow only the web's origin and the app's (`tauri://localhost`,
+`http://tauri.localhost`), `PUT` on both and `GET` on the private one,
+which the web's Copy reads an image with.
 
 The URLs are `127.0.0.1` and `*.localhost`, which the desktop and the
 iOS simulator reach; an Android emulator or a phone would need the

@@ -28,14 +28,11 @@ later, on purpose:
   text and PDF.
 - **Download on phones**, through the system's share sheet, which
   needs a plugin.
-- **Copying an image on the other platforms.** macOS is built, as one
-  clipboard item with the file, its bytes, a PNG and a TIFF. In a
-  browser, `navigator.clipboard.write` with a PNG drawn from the image,
-  which loses a GIF's animation. On Windows and Linux,
+- **Copying an image on Windows, Linux and Android.** macOS, iOS and
+  the web are built. On Windows and Linux,
   `tauri-plugin-clipboard-manager`'s `write_image`, a still, or the
-  platform's own formats for an animation. On iOS, `UIPasteboard` with
-  the GIF's bytes, by `objc2-ui-kit`. On Android, a `content://` URI
-  from a FileProvider, in a small Kotlin plugin.
+  platform's own formats for an animation. On Android, a `content://`
+  URI from a FileProvider, in a small Kotlin plugin.
 - **Thumbnails.** The index shows each image whole, scaled down by the
   page, so it fetches every image's full bytes.
 - **A checksum.** The server checks a file's size only.

@@ -136,10 +136,11 @@ pub async fn files_cache_delete(device: State<'_, DeviceAccounts>) -> Result<Fil
         .map_err(|error| error.to_string())
 }
 
-/// Whether this build copies an image to the clipboard: macOS does.
+/// Whether this build copies an image to the clipboard: macOS and iOS
+/// do.
 #[tauri::command]
 pub fn files_copy_supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "ios"))
 }
 
 /// Copies the image to the clipboard, from this device's copy of it,
@@ -161,16 +162,16 @@ pub async fn files_copy(
     copy_image(&app, &shown.file.content_type, path).await
 }
 
-/// AppKit's pasteboard and images are the main thread's.
-#[cfg(target_os = "macos")]
+/// AppKit's and UIKit's pasteboards and images are the main thread's.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 async fn copy_image(
     app: &AppHandle,
     content_type: &str,
     path: std::path::PathBuf,
 ) -> Result<(), String> {
-    use crate::macos::pasteboard::{self, ClipboardImage};
+    use crate::clipboard::{self, ClipboardImage};
 
-    let uniform_type = pasteboard::uniform_type_of(content_type)
+    let uniform_type = clipboard::uniform_type_of(content_type)
         .ok_or("This kind of image cannot be copied yet")?;
     let bytes = tokio::fs::read(&path)
         .await
@@ -183,13 +184,13 @@ async fn copy_image(
             file: &path,
         };
         // The command stopped waiting if this fails; nothing to tell
-        let _ = copied.send(pasteboard::copy_image(image).map(|_types| ()));
+        let _ = copied.send(clipboard::copy_image(image).map(|_types| ()));
     })
     .map_err(|error| error.to_string())?;
     result.await.map_err(|error| error.to_string())?
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 async fn copy_image(
     _app: &AppHandle,
     _content_type: &str,

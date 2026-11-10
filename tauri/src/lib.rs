@@ -10,12 +10,12 @@
 
 mod accounts;
 mod avatars;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod clipboard;
 mod communities;
 mod conflicts;
 mod device_accounts;
 mod files;
-#[cfg(target_os = "macos")]
-mod macos;
 mod memberships;
 mod pending_changes;
 mod posts;

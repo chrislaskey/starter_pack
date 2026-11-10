@@ -233,14 +233,42 @@ export function filesCacheDelete() {
   return Promise.resolve(null);
 }
 
-/** Not in a browser yet, see docs/suggestions/files.md. */
+/** Whether this browser writes images to the clipboard. */
 export function filesCopySupported() {
-  return Promise.resolve(false);
+  return Promise.resolve(typeof ClipboardItem !== "undefined" && Boolean(navigator.clipboard?.write));
 }
 
-/** @param {string} _id */
-export function filesCopy(_id) {
-  return Promise.reject(new Error("Copying is not available in a browser yet"));
+/**
+ * Copies the image to the clipboard as a PNG, the one image type
+ * browsers write, so an animated GIF is copied as its first frame. The
+ * write starts before any await, inside the click, as Safari requires;
+ * the bytes come with no cache, since a copy the page's <img> left in
+ * the cache lacks the bucket's CORS headers this read needs.
+ * @param {string} id
+ */
+export function filesCopy(id) {
+  const png = fetch(`${filePath(id)}/content`, { cache: "no-store" }).then(async (response) => {
+    if (!response.ok) throw new Error(`Could not read the image (${response.status})`);
+    return asPng(await response.blob());
+  });
+  return navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+}
+
+/**
+ * @param {Blob} image
+ * @returns {Promise<Blob>}
+ */
+async function asPng(image) {
+  if (image.type === "image/png") return image;
+  const bitmap = await createImageBitmap(image);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((png) => (png ? resolve(png) : reject(new Error("Could not copy the image"))), "image/png"),
+  );
 }
 
 export function filesDownloadSupported() {

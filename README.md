@@ -49,7 +49,7 @@ Inside the Tauri app each is a command of the same name
 | `filesDelete(id)` | `DELETE /api/files/:id`, 204 |
 | `filesContentUrl(id)` | `/api/files/:id/content`, a redirect to the bytes for an `<img>`; in the app the `files` protocol, serving the device's copy |
 | `filesDownload(id)`, `filesDownloadSupported()` | the same URL with `?download=1`; in the desktop app a copy into Downloads |
-| `filesCopy(id)`, `filesCopySupported()` | the app only, macOS so far: the image onto the clipboard |
+| `filesCopy(id)`, `filesCopySupported()` | the image onto the clipboard: on the web as a PNG, in the macOS and iOS apps with its own bytes too |
 | `filesCacheGet()`, `filesCacheDelete()` | the app only: the copies of synced files kept on the device, and removing them |
 | `conflictsList()`, `conflictsReapply(id)`, `conflictsTryAgain(id)`, `conflictsLetGo(id)` | none: the web has nothing to resolve |
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |

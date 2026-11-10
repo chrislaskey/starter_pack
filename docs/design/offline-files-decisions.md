@@ -198,10 +198,17 @@ is off when it asks for reduced motion, then on or off as the person
 sets it, whatever the system says.
 
 **Copy.** On the show page a click on an image copies it to the
-clipboard, in the macOS app only so far (`tauri/src/macos/pasteboard.rs`):
-one clipboard item holding the file, its own bytes, a PNG and a TIFF,
-so an animated GIF pastes animated where GIFs are taken and as a still
-elsewhere. The other platforms are in `docs/suggestions/files.md`.
+clipboard:
+
+| Where | What goes on the clipboard | An animated GIF |
+| --- | --- | --- |
+| macOS app, `tauri/src/clipboard/macos.rs` | one item: the file, its own bytes, a PNG and a TIFF | animated where GIFs are taken, a still elsewhere |
+| iOS app, `tauri/src/clipboard/ios.rs` | one item: its own bytes and a PNG | the same |
+| web, `filesCopy` in `http-api.js` | a PNG, the one image type browsers write | its first frame |
+
+The web reads the bytes with `fetch`, so the private bucket's CORS
+must allow `GET` from the web's origin. Windows, Linux and Android have
+no Copy yet, see `docs/suggestions/files.md`.
 
 **Download** is a button on the show page only: on the web the content
 URL asking for an attachment; in the desktop app a copy into the

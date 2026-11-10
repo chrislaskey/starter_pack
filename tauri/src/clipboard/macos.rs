@@ -1,8 +1,5 @@
-//! Copying an image to the macOS clipboard so each app pastes the form
-//! it understands: an animated GIF stays animated where GIFs are taken,
-//! and is a still picture elsewhere.
-
-use std::path::Path;
+//! The macOS clipboard: one pasteboard item with the image's file, its
+//! own bytes, and PNG and TIFF renderings.
 
 use objc2::AnyThread as _;
 use objc2::rc::Retained;
@@ -13,35 +10,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSString, NSURL};
 
-const PNG_TYPE: &str = "public.png";
-
-/// An image to copy: its encoded bytes, their uniform type identifier,
-/// see `uniform_type_of`, and a file on disk with the same bytes.
-pub struct ClipboardImage<'a> {
-    pub bytes: &'a [u8],
-    pub uniform_type: &'a str,
-    pub file: &'a Path,
-}
-
-/// The uniform type identifier macOS knows an image content type by,
-/// for those the clipboard takes.
-pub fn uniform_type_of(content_type: &str) -> Option<&'static str> {
-    match content_type.split(';').next().unwrap_or_default().trim() {
-        "image/png" => Some(PNG_TYPE),
-        "image/jpeg" => Some("public.jpeg"),
-        "image/gif" => Some("com.compuserve.gif"),
-        "image/webp" => Some("org.webmproject.webp"),
-        "image/tiff" => Some("public.tiff"),
-        "image/bmp" => Some("com.microsoft.bmp"),
-        "image/heic" => Some("public.heic"),
-        _ => None,
-    }
-}
+use super::{ClipboardImage, PNG_TYPE};
 
 /// Copies an image as one pasteboard item with several representations:
 /// the file URL, the bytes under their own type, and PNG and TIFF
 /// renderings. Returns the types written.
-pub fn copy_image(image: ClipboardImage<'_>) -> Result<Vec<String>, String> {
+pub(super) fn copy_image(image: ClipboardImage<'_>) -> Result<Vec<String>, String> {
     write_image(image, &NSPasteboard::generalPasteboard())
 }
 
@@ -99,13 +73,7 @@ fn render_png(tiff: &NSData) -> Option<Retained<NSData>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A GIF of one white pixel.
-    const GIF: &[u8] = &[
-        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
-        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
-    ];
+    use crate::clipboard::tests::GIF;
 
     /// On a pasteboard of the test's own, so the person's clipboard is
     /// left alone.
@@ -127,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn pasteboard_copy_image_writes_a_gif_as_its_file_its_bytes_png_and_tiff() {
+    fn clipboard_macos_copy_image_writes_a_gif_as_its_file_its_bytes_png_and_tiff() {
         let (pasteboard, written) = written("com.compuserve.gif", GIF).expect("copied");
         assert_eq!(
             written,
@@ -151,14 +119,8 @@ mod tests {
     }
 
     #[test]
-    fn pasteboard_copy_image_refuses_bytes_that_are_no_image() {
+    fn clipboard_macos_copy_image_refuses_bytes_that_are_no_image() {
         let error = written("public.png", b"hello").expect_err("not an image");
         assert!(error.contains("cannot be read"), "{error}");
-    }
-
-    #[test]
-    fn pasteboard_uniform_type_of_knows_the_images_it_copies() {
-        assert_eq!(uniform_type_of("image/gif"), Some("com.compuserve.gif"));
-        assert_eq!(uniform_type_of("image/svg+xml"), None);
     }
 }
