@@ -265,9 +265,27 @@ export function communitiesList() {
   return invoke("communities_list");
 }
 
+/** One community, `{community, membership}`. @param {string} id */
+export function communitiesGet(id) {
+  return invoke("communities_get", { id });
+}
+
 /** @param {string} name */
 export function communitiesCreate(name) {
-  return invoke("communities_create", { name });
+  return invokeForm("communities_create", { name });
+}
+
+/**
+ * @param {string} id
+ * @param {string} name
+ */
+export function communitiesUpdate(id, name) {
+  return invokeForm("communities_update", { id, name });
+}
+
+/** @param {string} id */
+export function communitiesDelete(id) {
+  return invoke("communities_delete", { id });
 }
 
 /** @param {string} communityId */

@@ -40,7 +40,10 @@ Inside the Tauri app each is a command of the same name
 | `postsUpdate(id, body, communityIds)` | `PUT /api/posts/:id` with the same |
 | `postsDelete(id)` | `DELETE /api/posts/:id`, 204 |
 | `communitiesList()` | `GET /api/communities`, each with the user's membership or null |
-| `communitiesCreate(name)` | `POST /api/communities` with `{"name": "..."}`, 201 |
+| `communitiesGet(id)` | `GET /api/communities/:id`, with the user's membership or null |
+| `communitiesCreate(name)` | `POST /api/communities` with `{"name": "..."}`, 201, the maker a member |
+| `communitiesUpdate(id, name)` | `PUT /api/communities/:id` with the same; a member only, else 403 |
+| `communitiesDelete(id)` | `DELETE /api/communities/:id`, 204; a member only, and every membership goes with it |
 | `membershipsJoin(communityId)` | `PUT /api/memberships/:community_id` |
 | `membershipsLeave(communityId)` | `DELETE /api/memberships/:community_id`, 204 |
 | `filesList()`, `filesGet(id)` | `GET /api/files`, `GET /api/files/:id`, each file with how it is shown and where it stands |

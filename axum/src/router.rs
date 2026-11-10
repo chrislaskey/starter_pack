@@ -78,6 +78,12 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
             get(communities::list).post(communities::create),
         )
         .route(
+            "/api/communities/{id}",
+            get(communities::get)
+                .put(communities::update)
+                .delete(communities::delete),
+        )
+        .route(
             "/api/memberships/{community_id}",
             put(memberships::join).delete(memberships::leave),
         )
@@ -746,6 +752,46 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn communities_show_update_and_delete() {
+        let (router, _) = test_router().await;
+        let (_, community) = send(
+            &router,
+            Method::POST,
+            "/api/communities",
+            Some(json!({ "name": "Gardening" })),
+        )
+        .await;
+        let path = format!("/api/communities/{}", community["id"].as_str().unwrap());
+
+        let (status, shown) = get(&router, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(shown["community"], community);
+        assert_eq!(shown["membership"]["role"], json!("member"));
+
+        let (status, updated) = send(
+            &router,
+            Method::PUT,
+            &path,
+            Some(json!({ "name": "Weeding" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["name"], json!("Weeding"));
+        let (status, body) = send(&router, Method::PUT, &path, Some(json!({ "name": " " }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"], json!({ "name": ["is blank"] }));
+
+        let (status, _) = send(&router, Method::DELETE, &path, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = get(&router, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, listed) = get(&router, "/api/communities").await;
+        assert_eq!(listed, json!([]));
+        let (status, _) = get(&router, &format!("/api/communities/{MISSING_ID}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

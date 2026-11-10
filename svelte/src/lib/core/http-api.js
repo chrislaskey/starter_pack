@@ -290,9 +290,30 @@ export function communitiesList() {
   return send("GET", "/api/communities");
 }
 
+/** @param {string} id */
+const communityPath = (id) => `/api/communities/${encodeURIComponent(id)}`;
+
+/** One community, `{community, membership}`. @param {string} id */
+export function communitiesGet(id) {
+  return send("GET", communityPath(id));
+}
+
 /** @param {string} name */
 export function communitiesCreate(name) {
   return send("POST", "/api/communities", { name });
+}
+
+/**
+ * @param {string} id
+ * @param {string} name
+ */
+export function communitiesUpdate(id, name) {
+  return send("PUT", communityPath(id), { name });
+}
+
+/** @param {string} id */
+export function communitiesDelete(id) {
+  return send("DELETE", communityPath(id));
 }
 
 /** @param {string} communityId */

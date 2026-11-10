@@ -156,7 +156,7 @@ Any other field is refused as `not_editable: <field>`:
 | Table | Create | Update |
 | --- | --- | --- |
 | `app_posts` | `body` | `body`, `deleted_at` |
-| `app_communities` | `name` | nothing, a community does not change yet |
+| `app_communities` | `name` | `name`, `deleted_at`, by a live member |
 | `app_users_communities` | `user_id`, `community_id`, `role` | `deleted_at` |
 | `app_posts_communities` | `post_id`, `community_id`, `users_communities_id` | `deleted_at` |
 | `app_users` | nothing, the server makes a user | `avatar_url`, by the server only for now, see `uploads.md` |
@@ -184,6 +184,10 @@ The fields that applied are written in one update, which increments the
 version once on the server. The answer is the event's status, `applied`,
 `conflict` or `rejected`, the version after it, the conflicts, a reason
 when rejected, and the row as it now stands on the server.
+
+A community is merged as a post is, `name` field by field; only a live
+member's events change it, another user's are refused as `not_a_member`
+with the server's row.
 
 A membership or a post's community row is not merged. The server reads
 the event as what the person meant, a join, a leave, an add or a
@@ -259,7 +263,9 @@ takes them away. So, as in Phoenix:
   unless their post was deleted meanwhile, in which case the row takes
   the post's delete. A row the owner removed on purpose was deleted at
   another moment and stays removed. Deleting a post copies its delete
-  onto its community rows.
+  onto its community rows. Deleting a community copies its delete onto
+  every live membership in it, and from each onto its community rows,
+  as a leave does; a deleted community cannot be joined or rejoined.
 - **Every row a pull sends comes after the rows it points at.** A
   membership after its user and community, a post after its owner, a
   post's community row after the post, the community and the membership

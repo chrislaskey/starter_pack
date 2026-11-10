@@ -98,6 +98,20 @@ pub async fn list_live_of_user(
     Ok(rows.into_iter().map(Membership::from).collect())
 }
 
+/// The community's live memberships.
+pub async fn list_live_of_community(
+    connection: &mut PgConnection,
+    community_id: Uuid,
+) -> Result<Vec<Membership>, sqlx::Error> {
+    let rows: Vec<MembershipRow> = sqlx::query_as(select!(
+        "WHERE community_id = $1 AND deleted_at IS NULL ORDER BY inserted_at, id"
+    ))
+    .bind(community_id)
+    .fetch_all(connection)
+    .await?;
+    Ok(rows.into_iter().map(Membership::from).collect())
+}
+
 /// The rows the server wrote after the cursor that the user sees, in
 /// cursor order, deleted or not: a page of a pull.
 pub async fn list_synced_after(

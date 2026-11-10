@@ -88,9 +88,13 @@ impl From<CommunityError> for ApiError {
     fn from(error: CommunityError) -> Self {
         let status = match &error {
             CommunityError::NotFound { .. } => StatusCode::NOT_FOUND,
-            CommunityError::BlankName
-            | CommunityError::Invalid(_)
-            | CommunityError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            CommunityError::NotAMember => StatusCode::FORBIDDEN,
+            CommunityError::Invalid(field_errors) => {
+                return ApiError::from_field_errors(field_errors.clone());
+            }
+            CommunityError::Malformed(_) | CommunityError::Rejected(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             CommunityError::Membership(error) => return ApiError::from_membership(error),
             CommunityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

@@ -5,16 +5,24 @@ memberships with join, leave and rejoin, a post in the communities its
 owner chose, visibility, backfill and prune, see
 `docs/design/offline-sync.md`. Left for later, on purpose:
 
-- **A community's own page**, `/communities/:id`, listing its posts, and
-  its members. `posts::list` already answers everything a user sees with
-  each post's communities; a feed of one community is a filter on the
+- **A community's posts and members on its own page**, which shows
+  only its name, Join or Leave, and a member's Edit and Delete today.
+  `posts::list` already answers everything a user sees with each post's
+  communities; a feed of one community is a filter on the
   same visibility predicate, and the members are the live memberships of
   the community, which a device holds once it is in it.
 - **Roles beyond `member`.** `role` is a string column every row holds
   `member` in; `admin`, and whatever an admin may do, such as removing
   another member's post from the community, is an app's rule.
-- **Editing or deleting a community.** An update event on
-  `app_communities` is refused today. Who may change one is a role.
+- **Who may edit or delete a community.** Any live member renames or
+  deletes one today, `member` being the only role; there is no owner
+  column. An app with admins narrows that to a role, in
+  `communities::apply_in`, the one place both the server and a device
+  check it. A community whose last member left can be changed by nobody
+  until someone joins again.
+- **Undoing a community's delete.** A delete takes every membership
+  along at one moment, so reviving them would mirror a rejoin; nothing
+  revives a community today.
 - **Discoverable and public communities.** Every user sees every
   community of the deployment, which is what lets a device list and join
   them. An app that wants private communities needs a rule for who sees

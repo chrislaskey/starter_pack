@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::Community;
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::events::{self, Answer, AnswerStatus, Conflicts, Event, EventKind, Fields};
@@ -328,7 +329,13 @@ async fn apply_in(
                 None => membership.deleted_at,
             };
             match (membership.deleted_at, deleted_at) {
-                (Some(_), None) => revive(tx, role, membership).await?,
+                (Some(_), None) => {
+                    match sql!(&mut *tx, communities::get(membership.community_id))? {
+                        Some(community) if community.deleted_at.is_none() => {}
+                        _ => return rejected(event, "unknown_community", Some(membership)),
+                    }
+                    revive(tx, role, membership).await?
+                }
                 (None, Some(at)) => leave_at(tx, role, user, membership, at).await?,
                 _ => membership,
             }
@@ -366,6 +373,25 @@ async fn leave_at(
         .await
         .map_err(|error| MembershipError::Invalid(error.to_string()))?;
     Ok(membership)
+}
+
+/// Soft-deletes every live membership in the deleted community at the
+/// community's moment, and every live row under them; copied down, not
+/// logged, as a post's delete is.
+pub(crate) async fn delete_with_community(
+    tx: &mut Transaction,
+    role: Role,
+    community: &Community,
+) -> Result<(), MembershipError> {
+    for mut membership in sql!(&mut *tx, memberships::list_live_of_community(community.id))? {
+        membership.deleted_at = community.deleted_at;
+        membership.deleted_by_id = community.deleted_by_id;
+        write_changed(tx, role, &mut membership).await?;
+        posts_communities::delete_with_membership(tx, role, &membership)
+            .await
+            .map_err(|error| MembershipError::Invalid(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Clears the membership's delete, and the delete of every row that

@@ -123,6 +123,26 @@ pub async fn insert(
     Ok(())
 }
 
+pub async fn update(
+    connection: &mut SqliteConnection,
+    community: &Community,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_communities SET name = $2, updated_at = $3, version = $4, last_synced_at = $5, deleted_at = $6, deleted_by_id = $7
+         WHERE id = $1",
+    )
+    .bind(community.id.hyphenated())
+    .bind(&community.name)
+    .bind(community.updated_at)
+    .bind(community.version)
+    .bind(community.last_synced_at)
+    .bind(community.deleted_at)
+    .bind(community.deleted_by_id.map(Uuid::hyphenated))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(
     connection: &mut SqliteConnection,

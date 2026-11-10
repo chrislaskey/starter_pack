@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::{self, CommunityError};
 use crate::deployment::Deployment;
 use crate::events::{self, EventKind, Fields, StoredEvent};
 use crate::files::{self, FileError};
@@ -35,6 +36,8 @@ pub enum PendingChangeError {
     Post(#[from] PostError),
     #[error(transparent)]
     File(#[from] FileError),
+    #[error(transparent)]
+    Community(#[from] CommunityError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -51,6 +54,9 @@ pub async fn list(deployment: &Deployment) -> Result<Vec<PendingChange>, Pending
             files::TABLE => files::get_in(&mut tx, stored.event.row_id)
                 .await?
                 .map(|file| file.name),
+            communities::TABLE => communities::get_in(&mut tx, stored.event.row_id)
+                .await?
+                .map(|community| community.name),
             _ => None,
         };
         changes.push(pending_change(stored, about));

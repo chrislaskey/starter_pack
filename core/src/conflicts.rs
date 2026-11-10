@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::{self, CommunityError};
 use crate::database::Transaction;
 use crate::deployment::{Deployment, now};
 use crate::events::{self, AnswerStatus, Event, EventKind, EventStatus, Fields, StoredEvent};
@@ -74,6 +75,8 @@ pub enum ConflictError {
     Post(#[from] PostError),
     #[error(transparent)]
     File(#[from] FileError),
+    #[error(transparent)]
+    Community(#[from] CommunityError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -119,6 +122,11 @@ pub async fn reapply(deployment: &Deployment, user: &User, id: Uuid) -> Result<(
     let answer = match stored.event.table.as_str() {
         files::TABLE => {
             files::apply_in(&mut tx, deployment.role, user, &event, true)
+                .await?
+                .answer
+        }
+        communities::TABLE => {
+            communities::apply_in(&mut tx, deployment.role, user, &event)
                 .await?
                 .answer
         }
@@ -179,7 +187,7 @@ async fn get(tx: &mut Transaction, id: Uuid) -> Result<StoredEvent, ConflictErro
 /// The row a conflict is about, as much of it as the page and a reapply
 /// need.
 struct Row {
-    /// A post's first line, a file's name.
+    /// A post's first line, a file's or a community's name.
     about: String,
     version: i64,
     /// The fields an event may change, as they stand now.
@@ -209,6 +217,17 @@ async fn row_of(tx: &mut Transaction, event: &Event) -> Result<Option<Row>, Conf
                     about: file.name.clone(),
                     version: file.version,
                     fields: file.fields(&["name", "deleted_at"])?,
+                })
+            })
+            .transpose()?,
+        communities::TABLE => communities::get_in(tx, event.row_id)
+            .await?
+            .filter(|community| community.deleted_at.is_none())
+            .map(|community| {
+                Ok::<Row, CommunityError>(Row {
+                    about: community.name.clone(),
+                    version: community.version,
+                    fields: community.fields(communities::UPDATE_FIELDS)?,
                 })
             })
             .transpose()?,

@@ -2379,6 +2379,101 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn sync_a_community_deleted_on_the_web_empties_a_members_device() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            posts::create(&server, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+            let b = device_of(&bob, &bob_token).await;
+            sync(&b, &server).await;
+            assert_eq!(bodies(&b, &bob).await, vec!["roses"]);
+
+            communities::delete(&server, &alice, gardening.id)
+                .await
+                .expect("deleted");
+            let report = sync(&b, &server).await;
+            assert_eq!(report.pruned, 1);
+            assert!(bodies(&b, &bob).await.is_empty());
+            assert!(
+                communities::list(&b, &bob)
+                    .await
+                    .expect("the communities")
+                    .is_empty()
+            );
+            assert!(
+                memberships::list_mine(&b, &bob)
+                    .await
+                    .expect("memberships")
+                    .is_empty()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_community_renamed_and_deleted_on_a_device_reaches_the_server() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, alice_token) = user_with_token(&server, "alice@example.com").await;
+            let (bob, _) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let a = device_of(&alice, &alice_token).await;
+            sync(&a, &server).await;
+
+            let renamed = communities::update(&a, &alice, gardening.id, "Weeding")
+                .await
+                .expect("renamed offline");
+            assert_eq!(renamed.version, 1, "a device leaves the version");
+            sync(&a, &server).await;
+            let on_server = communities::get(&server, &bob, gardening.id)
+                .await
+                .expect("found");
+            assert_eq!(on_server.community.name, "Weeding");
+            assert_eq!(on_server.community.version, 2);
+
+            communities::delete(&a, &alice, gardening.id)
+                .await
+                .expect("deleted offline");
+            assert!(
+                memberships::list_mine(&a, &alice)
+                    .await
+                    .expect("memberships")
+                    .is_empty(),
+                "left at once on the device"
+            );
+            assert_eq!(pending(&a).await, 1, "one event, the rest copied down");
+            sync(&a, &server).await;
+            assert_eq!(pending(&a).await, 0);
+            let error = communities::get(&server, &bob, gardening.id)
+                .await
+                .expect_err("gone on the server");
+            assert!(matches!(error, CommunityError::NotFound { .. }));
+            assert!(
+                memberships::list_mine(&server, &bob)
+                    .await
+                    .expect("memberships")
+                    .is_empty(),
+                "bob's membership went with it"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn sync_joining_from_the_device_pushes_the_membership_and_backfills() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);

@@ -3,7 +3,9 @@
 //! `memberships`, and a post is in the communities its owner chose, see
 //! `posts_communities`. Any user creates a community and joins it as
 //! they do; every user sees every community, so a device can list them
-//! and join; nothing changes a community yet, so an update is refused.
+//! and join. Any live member renames or deletes one, `member` being the
+//! only role yet. A delete takes every membership in the community along,
+//! and with them the posts' community rows, all at the one moment.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,13 +16,14 @@ use uuid::Uuid;
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::events::{self, Answer, AnswerStatus, Conflicts, Event, EventKind, Fields};
+use crate::field_errors::FieldErrors;
 use crate::memberships::{self, Membership, MembershipError};
 use crate::sync::{Cursor, TableRow};
 use crate::users::User;
 
 pub const TABLE: &str = "app_communities";
 const CREATE_FIELDS: &[&str] = &["name"];
-const UPDATE_FIELDS: &[&str] = &[];
+pub(crate) const UPDATE_FIELDS: &[&str] = &["name", "deleted_at"];
 
 /// A community as the pages show it, with the sync columns every synced
 /// row carries.
@@ -36,8 +39,8 @@ pub struct Community {
     pub deleted_by_id: Option<Uuid>,
 }
 
-/// A community as the index page lists it: with the user's membership
-/// when they are in it.
+/// A community as the pages show it: with the user's membership when
+/// they are in it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommunityAndMembership {
     pub community: Community,
@@ -48,10 +51,12 @@ pub struct CommunityAndMembership {
 pub enum CommunityError {
     #[error("community {id} not found")]
     NotFound { id: Uuid },
-    #[error("a community needs a name")]
-    BlankName,
+    #[error("only a member can change a community")]
+    NotAMember,
     #[error("{0}")]
-    Invalid(String),
+    Invalid(FieldErrors),
+    #[error("{0}")]
+    Malformed(String),
     #[error("the change was refused: {0}")]
     Rejected(String),
     #[error(transparent)]
@@ -62,7 +67,7 @@ pub enum CommunityError {
 
 impl From<serde_json::Error> for CommunityError {
     fn from(error: serde_json::Error) -> CommunityError {
-        CommunityError::Invalid(error.to_string())
+        CommunityError::Malformed(error.to_string())
     }
 }
 
@@ -88,12 +93,21 @@ pub async fn list(
         .collect())
 }
 
-/// One community by its id, unless deleted.
-pub async fn get(deployment: &Deployment, id: Uuid) -> Result<Community, CommunityError> {
+/// One community by its id, unless deleted, with the user's membership
+/// when they are in it.
+pub async fn get(
+    deployment: &Deployment,
+    user: &User,
+    id: Uuid,
+) -> Result<CommunityAndMembership, CommunityError> {
     let mut tx = deployment.begin().await?;
     let community = get_live(&mut tx, id).await?;
+    let membership = memberships::get_live_in(&mut tx, user.id, id).await?;
     tx.commit().await?;
-    Ok(community)
+    Ok(CommunityAndMembership {
+        community,
+        membership,
+    })
 }
 
 /// Makes a community, which the user joins.
@@ -116,6 +130,54 @@ pub async fn create(
     memberships::join_in(&mut tx, deployment.role, user, community.id).await?;
     tx.commit().await?;
     Ok(community)
+}
+
+/// Writes a new name over a community the user is a member of.
+pub async fn update(
+    deployment: &Deployment,
+    user: &User,
+    id: Uuid,
+    name: &str,
+) -> Result<Community, CommunityError> {
+    let name = checked_name(name)?;
+    let mut tx = deployment.begin().await?;
+    let community = get_as_member(&mut tx, user, id).await?;
+    if community.name == name {
+        return Ok(community);
+    }
+    let event = Event::update(
+        TABLE,
+        id,
+        community.version,
+        fields(json!({ "name": community.name })),
+        fields(json!({ "name": name })),
+        now(),
+    );
+    let community = apply_in(&mut tx, deployment.role, user, &event)
+        .await?
+        .community()?;
+    tx.commit().await?;
+    Ok(community)
+}
+
+/// Deletes a community the user is a member of: a soft delete, which
+/// takes every membership in it along.
+pub async fn delete(deployment: &Deployment, user: &User, id: Uuid) -> Result<(), CommunityError> {
+    let mut tx = deployment.begin().await?;
+    let community = get_as_member(&mut tx, user, id).await?;
+    let event = Event::update(
+        TABLE,
+        id,
+        community.version,
+        fields(json!({ "deleted_at": null })),
+        fields(json!({ "deleted_at": now() })),
+        now(),
+    );
+    apply_in(&mut tx, deployment.role, user, &event)
+        .await?
+        .community()?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Applies an event of the user's to its community and answers it.
@@ -189,9 +251,23 @@ async fn get_live(tx: &mut Transaction, id: Uuid) -> Result<Community, Community
     }
 }
 
-struct Applied {
-    answer: Answer,
-    community: Option<Community>,
+/// The live community, if the user is a live member of it.
+async fn get_as_member(
+    tx: &mut Transaction,
+    user: &User,
+    id: Uuid,
+) -> Result<Community, CommunityError> {
+    let community = get_live(tx, id).await?;
+    if memberships::get_live_in(tx, user.id, id).await?.is_none() {
+        return Err(CommunityError::NotAMember);
+    }
+    Ok(community)
+}
+
+/// An event applied: the answer, and the community as it now stands.
+pub(crate) struct Applied {
+    pub answer: Answer,
+    pub community: Option<Community>,
 }
 
 impl Applied {
@@ -206,9 +282,10 @@ impl Applied {
     }
 }
 
-/// Applies the event in the transaction: a create writes the row, and
-/// an update is refused, since nothing on a community changes yet.
-async fn apply_in(
+/// Applies the event in the transaction: a create writes the row; an
+/// update, from a live member only, merges into the row as a post's
+/// does, and a delete takes the memberships along.
+pub(crate) async fn apply_in(
     tx: &mut Transaction,
     role: Role,
     user: &User,
@@ -233,47 +310,90 @@ async fn apply_in(
         let community = get_in(tx, event.row_id).await?;
         return rejected(event, reason, community);
     }
-    if event.kind == EventKind::Update {
-        let community = get_in(tx, event.row_id).await?;
-        return rejected(
-            event,
-            "not_editable: a community does not change",
-            community,
-        );
-    }
-    if let Some(existing) = get_in(tx, event.row_id).await? {
-        return rejected(event, "exists", Some(existing));
-    }
 
     let now = now();
-    let (version, last_synced_at) = match role {
-        Role::Server => (1, Some(now)),
-        Role::Device => (0, None),
-    };
-    let name = event
-        .changes
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let name = match checked_name(name) {
-        Ok(name) => name,
-        Err(error) => return rejected(event, format!("invalid: {error}"), None),
-    };
-    let community = Community {
-        id: event.row_id,
-        name,
-        inserted_at: now,
-        updated_at: now,
-        version,
-        last_synced_at,
-        deleted_at: None,
-        deleted_by_id: None,
-    };
-    sql!(&mut *tx, communities::insert(&community))?;
+    match event.kind {
+        EventKind::Create => {
+            if let Some(existing) = get_in(tx, event.row_id).await? {
+                return rejected(event, "exists", Some(existing));
+            }
+            let (version, last_synced_at) = match role {
+                Role::Server => (1, Some(now)),
+                Role::Device => (0, None),
+            };
+            let blank = Community {
+                id: event.row_id,
+                name: String::new(),
+                inserted_at: now,
+                updated_at: now,
+                version,
+                last_synced_at,
+                deleted_at: None,
+                deleted_by_id: None,
+            };
+            let community = match blank.with_fields(&event.changes) {
+                Ok(community) => community,
+                Err(error) => return rejected(event, format!("invalid: {error}"), None),
+            };
+            sql!(&mut *tx, communities::insert(&community))?;
+            finish(tx, role, user, event, Conflicts::new(), community).await
+        }
+        EventKind::Update => {
+            let Some(community) = get_in(tx, event.row_id).await? else {
+                return rejected(event, "unknown_community", None);
+            };
+            if memberships::get_live_in(tx, user.id, community.id)
+                .await?
+                .is_none()
+            {
+                return rejected(event, "not_a_member", Some(community));
+            }
+            let (changes, conflicts) = events::merge(
+                &community.fields(UPDATE_FIELDS)?,
+                community.version,
+                event.base_version,
+                &event.base,
+                &event.changes,
+            );
+            if changes.is_empty() {
+                return finish(tx, role, user, event, conflicts, community).await;
+            }
+            let mut updated = match community.with_fields(&changes) {
+                Ok(updated) => updated,
+                Err(error) => {
+                    return rejected(event, format!("invalid: {error}"), Some(community));
+                }
+            };
+            updated.updated_at = now;
+            if changes.contains_key("deleted_at") {
+                updated.deleted_by_id = updated.deleted_at.map(|_| user.id);
+            }
+            if role == Role::Server {
+                updated.version += 1;
+                updated.last_synced_at = Some(now);
+            }
+            sql!(&mut *tx, communities::update(&updated))?;
+            if changes.contains_key("deleted_at") && updated.deleted_at.is_some() {
+                memberships::delete_with_community(tx, role, &updated).await?;
+            }
+            finish(tx, role, user, event, conflicts, updated).await
+        }
+    }
+}
+
+/// Answers an applied event and does the role's part.
+async fn finish(
+    tx: &mut Transaction,
+    role: Role,
+    user: &User,
+    event: &Event,
+    conflicts: Conflicts,
+    community: Community,
+) -> Result<Applied, CommunityError> {
     let answer = Answer::applied(
         event.id,
         community.version,
-        Conflicts::new(),
+        conflicts,
         table_row(&community)?,
     );
     match role {
@@ -298,6 +418,28 @@ fn rejected(
     })
 }
 
+impl Community {
+    /// The named fields as they travel on the wire.
+    pub(crate) fn fields(&self, names: &[&str]) -> Result<Fields, CommunityError> {
+        let mut all = fields(serde_json::to_value(self)?);
+        all.retain(|name, _| names.contains(&name.as_str()));
+        Ok(all)
+    }
+
+    /// The community with the fields written over it, checked.
+    fn with_fields(&self, changes: &Fields) -> Result<Community, CommunityError> {
+        let mut all = fields(serde_json::to_value(self)?);
+        for (name, value) in changes {
+            all.insert(name.clone(), value.clone());
+        }
+        let community: Community = serde_json::from_value(Value::Object(all))?;
+        Ok(Community {
+            name: checked_name(&community.name)?,
+            ..community
+        })
+    }
+}
+
 fn fields(value: Value) -> Fields {
     match value {
         Value::Object(fields) => fields,
@@ -309,7 +451,9 @@ fn fields(value: Value) -> Fields {
 fn checked_name(name: &str) -> Result<String, CommunityError> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(CommunityError::BlankName);
+        return Err(CommunityError::Invalid(FieldErrors::one(
+            "name", "is blank",
+        )));
     }
     Ok(name.to_string())
 }
@@ -318,31 +462,27 @@ fn checked_name(name: &str) -> Result<String, CommunityError> {
 mod tests {
     use super::*;
     use crate::database::{Database, with_each_database};
-    use crate::users;
+    use crate::{posts, users};
 
     fn server(database: Database) -> Deployment {
         Deployment::new(database, Role::Server)
+    }
+
+    async fn user(deployment: &Deployment, email: &str) -> User {
+        users::create(deployment, email).await.expect("a user")
     }
 
     #[tokio::test]
     async fn communities_create_joins_the_maker_and_lists_for_everyone() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
-                .await
-                .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
-                .await
-                .expect("a user");
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
             let gardening = create(&deployment, &alice, " Gardening ")
                 .await
                 .expect("a community");
             assert_eq!(gardening.name, "Gardening");
             assert_eq!(gardening.version, 1);
-            assert_eq!(
-                get(&deployment, gardening.id).await.expect("found"),
-                gardening
-            );
 
             let alices = list(&deployment, &alice).await.expect("the list");
             assert_eq!(alices.len(), 1);
@@ -356,20 +496,84 @@ mod tests {
             assert!(bobs[0].membership.is_none());
 
             let error = create(&deployment, &alice, " ").await.expect_err("blank");
-            assert!(matches!(error, CommunityError::BlankName));
-            let error = get(&deployment, Uuid::now_v7()).await.expect_err("missing");
+            assert!(
+                matches!(error, CommunityError::Invalid(errors) if errors == FieldErrors::one("name", "is blank"))
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn communities_get_with_the_users_membership() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
+            let gardening = create(&deployment, &alice, "Gardening")
+                .await
+                .expect("a community");
+
+            let alices = get(&deployment, &alice, gardening.id).await.expect("found");
+            assert_eq!(alices.community, gardening);
+            assert!(alices.membership.is_some());
+            let bobs = get(&deployment, &bob, gardening.id).await.expect("found");
+            assert!(bobs.membership.is_none());
+
+            let error = get(&deployment, &alice, Uuid::now_v7())
+                .await
+                .expect_err("missing");
             assert!(matches!(error, CommunityError::NotFound { .. }));
         })
         .await;
     }
 
     #[tokio::test]
-    async fn communities_apply_event_refuses_an_update() {
+    async fn communities_update_by_a_member_only() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
+            let gardening = create(&deployment, &alice, "Gardening")
                 .await
-                .expect("a user");
+                .expect("a community");
+
+            let renamed = update(&deployment, &alice, gardening.id, " Weeding ")
+                .await
+                .expect("renamed");
+            assert_eq!(renamed.name, "Weeding");
+            assert_eq!(renamed.version, 2);
+            assert_eq!(renamed.inserted_at, gardening.inserted_at);
+            let same = update(&deployment, &alice, gardening.id, "Weeding")
+                .await
+                .expect("unchanged");
+            assert_eq!(same.version, 2);
+
+            let error = update(&deployment, &alice, gardening.id, "")
+                .await
+                .expect_err("blank");
+            assert!(matches!(error, CommunityError::Invalid(_)));
+            let error = update(&deployment, &bob, gardening.id, "Bob's")
+                .await
+                .expect_err("not a member");
+            assert!(matches!(error, CommunityError::NotAMember));
+
+            memberships::join(&deployment, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let renamed = update(&deployment, &bob, gardening.id, "Bob's")
+                .await
+                .expect("any member renames");
+            assert_eq!(renamed.name, "Bob's");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn communities_apply_event_refuses_a_non_members_change_with_the_servers_row() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
             let gardening = create(&deployment, &alice, "Gardening")
                 .await
                 .expect("a community");
@@ -381,14 +585,93 @@ mod tests {
                 fields(json!({ "name": "Weeding" })),
                 now(),
             );
-            let answer = apply_event(&deployment, &alice, &event)
+
+            let answer = apply_event(&deployment, &bob, &event)
                 .await
                 .expect("answered");
             assert_eq!(answer.status, AnswerStatus::Rejected);
-            assert_eq!(answer.reason.as_deref(), Some("not_editable: name"));
+            assert_eq!(answer.reason.as_deref(), Some("not_a_member"));
             assert_eq!(
                 answer.server.expect("the row").row["name"],
                 json!("Gardening")
+            );
+
+            let answer = apply_event(&deployment, &alice, &event)
+                .await
+                .expect("answered");
+            assert_eq!(answer.status, AnswerStatus::Applied);
+            let again = apply_event(&deployment, &alice, &event)
+                .await
+                .expect("answered again");
+            assert_eq!(again.version, answer.version, "a retry applies once");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn communities_delete_takes_every_membership_and_its_posts_along() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
+            let bob = user(&deployment, "bob@example.com").await;
+            let carol = user(&deployment, "carol@example.com").await;
+            let gardening = create(&deployment, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&deployment, &bob, gardening.id)
+                .await
+                .expect("joined");
+            posts::create(&deployment, &alice, "roses", &[gardening.id])
+                .await
+                .expect("a post");
+
+            let error = delete(&deployment, &carol, gardening.id)
+                .await
+                .expect_err("not a member");
+            assert!(matches!(error, CommunityError::NotAMember));
+
+            delete(&deployment, &bob, gardening.id)
+                .await
+                .expect("deleted");
+            let error = get(&deployment, &alice, gardening.id)
+                .await
+                .expect_err("gone");
+            assert!(matches!(error, CommunityError::NotFound { .. }));
+            assert!(list(&deployment, &alice).await.expect("none").is_empty());
+            assert!(
+                posts::list(&deployment, &bob)
+                    .await
+                    .expect("the posts")
+                    .is_empty(),
+                "the post left with the community"
+            );
+            let alices = posts::list(&deployment, &alice).await.expect("the posts");
+            assert_eq!(alices.len(), 1, "her own post stays hers");
+            assert!(alices[0].communities.is_empty());
+
+            let mut tx = deployment.begin().await.expect("a transaction");
+            let row = get_in(&mut tx, gardening.id)
+                .await
+                .expect("the row")
+                .expect("kept");
+            assert_eq!(row.deleted_by_id, Some(bob.id));
+            for member in [&alice, &bob] {
+                let membership = sql!(
+                    &mut tx,
+                    memberships::get_by_user_and_community(member.id, gardening.id)
+                )
+                .expect("the row")
+                .expect("kept");
+                assert_eq!(membership.deleted_at, row.deleted_at, "the one moment");
+                assert_eq!(membership.deleted_by_id, Some(bob.id));
+            }
+            tx.commit().await.expect("committed");
+
+            let error = memberships::join(&deployment, &alice, gardening.id)
+                .await
+                .expect_err("nothing to rejoin");
+            assert!(
+                matches!(error, MembershipError::Rejected(reason) if reason == "unknown_community")
             );
         })
         .await;

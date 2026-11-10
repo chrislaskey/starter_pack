@@ -17,6 +17,9 @@ export const FILES_NEW_PATH = "/files/new";
 export const FILES_SHOW_PATH = "/files/:id";
 export const FILES_EDIT_PATH = "/files/:id/edit";
 export const COMMUNITIES_INDEX_PATH = "/communities";
+export const COMMUNITIES_NEW_PATH = "/communities/new";
+export const COMMUNITIES_SHOW_PATH = "/communities/:id";
+export const COMMUNITIES_EDIT_PATH = "/communities/:id/edit";
 export const CONFLICTS_INDEX_PATH = "/conflicts";
 export const PROFILE_EDIT_PATH = "/profile";
 
@@ -115,6 +118,20 @@ export function filesEditUrl(id) {
 
 export function communitiesIndexUrl() {
   return COMMUNITIES_INDEX_PATH;
+}
+
+export function communitiesNewUrl() {
+  return COMMUNITIES_NEW_PATH;
+}
+
+/** @param {string} id */
+export function communitiesShowUrl(id) {
+  return COMMUNITIES_SHOW_PATH.replace(":id", encodeURIComponent(id));
+}
+
+/** @param {string} id */
+export function communitiesEditUrl(id) {
+  return COMMUNITIES_EDIT_PATH.replace(":id", encodeURIComponent(id));
 }
 
 export function conflictsIndexUrl() {
