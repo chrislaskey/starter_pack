@@ -52,6 +52,7 @@ export const syncSetOffline = core.syncSetOffline;
 export const onSynced = core.onSynced;
 export const conflictsList = core.conflictsList;
 export const conflictsReapply = core.conflictsReapply;
+export const conflictsTryAgain = core.conflictsTryAgain;
 export const conflictsLetGo = core.conflictsLetGo;
 export const pendingChangesList = core.pendingChangesList;
 

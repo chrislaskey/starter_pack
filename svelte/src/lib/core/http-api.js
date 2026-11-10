@@ -296,6 +296,11 @@ export function conflictsReapply(_id) {
 }
 
 /** @param {string} _id */
+export function conflictsTryAgain(_id) {
+  return Promise.reject(new Error("nothing to try again on the web"));
+}
+
+/** @param {string} _id */
 export function conflictsLetGo(_id) {
   return Promise.reject(new Error("nothing to let go on the web"));
 }

@@ -44,6 +44,8 @@ pub const MAX_BYTES: u64 = 25 * 1024 * 1024;
 pub const MAX_NAME_LENGTH: usize = 255;
 /// What a file with no content type of its own is sent as.
 pub const UNKNOWN_CONTENT_TYPE: &str = "application/octet-stream";
+/// Why a device refuses a waiting file itself: there is nothing to send.
+pub const BYTES_GONE: &str = "the file's bytes are no longer on this device";
 /// Why the server leaves a create pending: the bytes are not in its
 /// bucket yet, so the device sends them and pushes again.
 pub const FILE_NOT_UPLOADED: &str = "file_not_uploaded";
@@ -320,10 +322,9 @@ pub async fn delete(deployment: &Deployment, user: &User, id: Uuid) -> Result<()
     let mut tx = deployment.begin().await?;
     let file = get_own(&mut tx, user, id).await?;
     if deployment.role == Role::Device && create_of(&mut tx, id).await?.is_some() {
-        events::delete_of_row(&mut tx, TABLE, id).await?;
-        sql!(&mut tx, files::delete_row(id))?;
+        forget_in(&mut tx, id).await?;
         tx.commit().await?;
-        return delete_local(&local_path(deployment, id)?).await;
+        return delete_local_copy(deployment, id).await;
     }
     let event = Event::update(
         TABLE,
@@ -460,9 +461,8 @@ pub async fn ask_about_waiting<T: Transport>(
         if reachable {
             match transport.files_create_upload(token, request).await {
                 Ok(upload) => file.upload = Some(upload),
-                Err(SyncError::Refused(reason)) => {
-                    note_error(deployment, event.id, &reason).await?;
-                }
+                // The server will not take this file, whatever is sent
+                Err(SyncError::Refused(reason)) => refuse(deployment, event.id, &reason).await?,
                 Err(error @ SyncError::Transport(_)) => {
                     reachable = false;
                     note_error(deployment, event.id, &error.to_string()).await?;
@@ -475,21 +475,35 @@ pub async fn ask_about_waiting<T: Transport>(
     Ok(waiting)
 }
 
-/// The files whose bytes the server does not have: their events are
-/// held back from the push.
-pub fn not_uploaded(waiting: &[WaitingFile]) -> BTreeSet<Uuid> {
-    waiting
+/// The files whose events are held back from the push: those waiting
+/// whose bytes the server does not have, and those it refused, whose
+/// later events, a rename say, it would answer by a row it never had.
+pub async fn held_back(
+    deployment: &Deployment,
+    waiting: &[WaitingFile],
+) -> Result<BTreeSet<Uuid>, SyncError> {
+    let mut held_back: BTreeSet<Uuid> = waiting
         .iter()
         .filter(|file| !file.upload.as_ref().is_some_and(|upload| upload.uploaded))
         .map(|file| file.id)
-        .collect()
+        .collect();
+    let mut tx = deployment.begin().await?;
+    let refused = events::conflicts(&mut tx)
+        .await?
+        .into_iter()
+        .filter(|stored| stored.event.table == TABLE && stored.event.kind == EventKind::Create)
+        .map(|stored| stored.event.row_id);
+    held_back.extend(refused);
+    tx.commit().await?;
+    Ok(held_back)
 }
 
 /// The last step of a sync on a device before the files' events are
 /// pushed: sends the bytes of each waiting file the server gave a URL
 /// for, from the account's folder, and marks it uploaded. How many
-/// went. A file that fails keeps its reason and waits for the next
-/// sync; once the bucket cannot be reached the rest wait too.
+/// went. A file whose bytes are gone from the device is refused; one
+/// the bucket says no to counts a try and waits for the next sync; once
+/// the bucket cannot be reached the rest wait too, and nothing counts.
 ///
 /// This runs inside the sync, which holds the sync lock while bytes go.
 /// An application with large files calls it from a task of its own
@@ -506,13 +520,19 @@ pub async fn upload_waiting<T: Transport>(
             continue;
         };
         let path = local_path(deployment, file.id)?;
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            refuse(deployment, file.create_id, BYTES_GONE).await?;
+            continue;
+        }
         match transport.files_upload(token, upload, &path).await {
             Ok(()) => {
                 upload.uploaded = true;
                 uploaded += 1;
             }
             Err(SyncError::Refused(reason)) => {
-                note_error(deployment, file.create_id, &reason).await?;
+                let mut tx = deployment.begin().await?;
+                events::count_attempt(&mut tx, file.create_id, &reason).await?;
+                tx.commit().await?;
             }
             Err(error @ SyncError::Transport(_)) => {
                 note_error(deployment, file.create_id, &error.to_string()).await?;
@@ -524,7 +544,15 @@ pub async fn upload_waiting<T: Transport>(
     Ok(uploaded)
 }
 
-/// Keeps why a waiting file's bytes did not go, for the pages.
+/// Stops trying a waiting file, with why: kept for the person.
+async fn refuse(deployment: &Deployment, create_id: Uuid, reason: &str) -> Result<(), SyncError> {
+    let mut tx = deployment.begin().await?;
+    events::refuse(&mut tx, create_id, reason).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Keeps why a waiting file's bytes did not go, without counting a try.
 async fn note_error(
     deployment: &Deployment,
     create_id: Uuid,
@@ -630,6 +658,19 @@ pub async fn local_copy<T: Transport>(
     }
     tokio::fs::rename(&partial, &path).await?;
     Ok(path)
+}
+
+/// Removes the row and every event of a file that never reached the
+/// server, on a device; its bytes go once this is committed, see
+/// `delete_local_copy`.
+pub(crate) async fn forget_in(tx: &mut Transaction, id: Uuid) -> Result<(), FileError> {
+    events::delete_of_row(tx, TABLE, id).await?;
+    Ok(sql!(tx, files::delete_row(id))?)
+}
+
+/// Removes a file's bytes from this device, if they are there.
+pub(crate) async fn delete_local_copy(deployment: &Deployment, id: Uuid) -> Result<(), FileError> {
+    delete_local(&local_path(deployment, id)?).await
 }
 
 /// Where a file's bytes are on this device, there or not.
@@ -1046,12 +1087,13 @@ fn attachment_named(name: &str) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::accounts::Session;
+    use crate::conflicts::{self, ConflictError, Resolve};
     use crate::database::{Database, with_each_database};
     use crate::sync::tests::user_with_token;
     use crate::sync::{
         self, BackfillRequest, InProcess, Page, PullRequest, PushRequest, PushResponse,
     };
-    use crate::{posts, users};
+    use crate::{pending_changes, posts, users};
 
     /// A server with a bucket in memory.
     pub(crate) fn server(database: Database) -> (Deployment, Storage) {
@@ -1167,6 +1209,10 @@ pub(crate) mod tests {
         file_pushes_lost: std::sync::Mutex<u32>,
         /// Answers that the bucket has every file's bytes, asked or not.
         says_uploaded: bool,
+        /// Cannot be reached about files, as with the bucket down.
+        down_for_files: bool,
+        /// Will not take any file, and says why.
+        refuses_files: Option<&'static str>,
     }
 
     impl<'a> Faulty<'a> {
@@ -1175,6 +1221,8 @@ pub(crate) mod tests {
                 server: InProcess { server },
                 file_pushes_lost: std::sync::Mutex::new(0),
                 says_uploaded: false,
+                down_for_files: false,
+                refuses_files: None,
             }
         }
     }
@@ -1225,6 +1273,12 @@ pub(crate) mod tests {
             token: Option<&str>,
             request: FileUploadNew,
         ) -> Result<FileUpload, SyncError> {
+            if self.down_for_files {
+                return Err(SyncError::Transport("502 from the server".to_string()));
+            }
+            if let Some(reason) = self.refuses_files {
+                return Err(SyncError::Refused(reason.to_string()));
+            }
             let upload = self.server.files_create_upload(token, request).await?;
             Ok(FileUpload {
                 uploaded: upload.uploaded || self.says_uploaded,
@@ -1418,10 +1472,7 @@ pub(crate) mod tests {
                 .expect("a sync");
             assert_eq!(report.uploaded, 1);
             assert_eq!(report.pushed, 2, "the post and the other file");
-            assert_eq!(
-                report.pending, 2,
-                "the file's create and its rename wait together"
-            );
+            assert_eq!(report.pending, 1, "its rename, held back with it");
             assert_eq!(in_bucket(&storage, &alice, kept.id).await, Some(4));
             assert_eq!(in_bucket(&storage, &alice, lost.id).await, None);
             let on_server: Vec<String> = list(&server, &alice)
@@ -1432,9 +1483,21 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(on_server, ["kept.txt"]);
             let (state, error) = state_of(&a, &alice, lost.id).await;
-            assert_eq!(state, FileState::Waiting);
-            assert!(error.is_some(), "why it did not go is kept for the page");
+            assert_eq!(state, FileState::Refused, "there is nothing to send");
+            assert_eq!(error.as_deref(), Some(BYTES_GONE));
             assert_eq!(state_of(&a, &alice, kept.id).await.0, FileState::Synced);
+
+            let report = sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(
+                report.pushed, 0,
+                "its rename is not sent for a row the server never had"
+            );
+            assert_eq!(
+                get(&a, &alice, lost.id).await.expect("kept").file.name,
+                "renamed.txt"
+            );
         })
         .await;
     }
@@ -1517,6 +1580,227 @@ pub(crate) mod tests {
                 .await
                 .expect("a sync");
             assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_the_server_saying_no_thirty_times_refuses_a_file_which_is_then_tried_again() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            let wrong = Faulty {
+                says_uploaded: true,
+                ..Faulty::new(&server)
+            };
+
+            for _ in 1..events::MAX_ATTEMPTS {
+                let report = sync::run(&a, &wrong).await.expect("a sync");
+                assert_eq!(report.conflicts, 0);
+            }
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Waiting);
+            let report = sync::run(&a, &wrong).await.expect("the thirtieth");
+            assert_eq!(report.conflicts, 1);
+            assert_eq!(report.pending, 0);
+            let (state, error) = state_of(&a, &alice, file.id).await;
+            assert_eq!(state, FileState::Refused);
+            assert_eq!(error.as_deref(), Some("tried 30 times: file_not_uploaded"));
+            assert!(
+                local_path(&a, file.id).expect("a path").exists(),
+                "not lost"
+            );
+
+            let report = sync::run(&a, &wrong).await.expect("a sync");
+            assert_eq!(
+                report.rejected, 0,
+                "a refused file is not sent again on its own"
+            );
+            let listed = conflicts::list(&a).await.expect("the conflicts");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].about.as_deref(), Some("notes.txt"));
+            assert_eq!(listed[0].resolve, Resolve::TryAgain);
+            assert_eq!(listed[0].reason, error);
+            let error = conflicts::reapply(&a, &alice, listed[0].id)
+                .await
+                .expect_err("a create is tried again");
+            assert!(matches!(error, ConflictError::NotReapplied));
+
+            conflicts::try_again(&a, listed[0].id)
+                .await
+                .expect("queued again");
+            assert_eq!(
+                state_of(&a, &alice, file.id).await,
+                (FileState::Waiting, None)
+            );
+            sync::run(&a, &wrong).await.expect("a sync");
+            let mut tx = a.begin().await.expect("a transaction");
+            let create = create_of(&mut tx, file.id)
+                .await
+                .expect("looked")
+                .expect("pending");
+            assert_eq!(create.attempts, 1, "counted from none again");
+            tx.commit().await.expect("committed");
+
+            sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+            assert!(conflicts::list(&a).await.expect("none").is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_server_or_bucket_that_is_failing_counts_no_try_however_long() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            posts::create(&a, &alice, "a post", &[])
+                .await
+                .expect("a post");
+            let down = Faulty {
+                down_for_files: true,
+                ..Faulty::new(&server)
+            };
+
+            for _ in 0..events::MAX_ATTEMPTS + 5 {
+                sync::run(&a, &down).await.expect("a sync");
+            }
+            let (state, error) = state_of(&a, &alice, file.id).await;
+            assert_eq!(state, FileState::Waiting);
+            assert!(error.is_some(), "why is shown under the file");
+            let mut tx = a.begin().await.expect("a transaction");
+            let create = create_of(&mut tx, file.id)
+                .await
+                .expect("looked")
+                .expect("pending");
+            assert_eq!(create.attempts, 0);
+            tx.commit().await.expect("committed");
+            assert_eq!(
+                posts::list(&server, &alice).await.expect("the posts").len(),
+                1,
+                "the post went all the same"
+            );
+
+            sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_file_the_server_will_not_take_is_kept_until_let_go() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            let strict = Faulty {
+                refuses_files: Some("size: is larger than 1 KB"),
+                ..Faulty::new(&server)
+            };
+
+            let report = sync::run(&a, &strict).await.expect("a sync");
+            assert_eq!(report.pending, 0);
+            let (state, error) = state_of(&a, &alice, file.id).await;
+            assert_eq!(
+                state,
+                FileState::Refused,
+                "at once: trying again changes nothing"
+            );
+            assert_eq!(error.as_deref(), Some("size: is larger than 1 KB"));
+            assert_eq!(sync::status(&a).await.expect("the status").conflicts, 1);
+            update(&a, &alice, file.id, "renamed.txt")
+                .await
+                .expect("renamed while refused");
+            sync::run(&a, &strict).await.expect("a sync");
+            assert_eq!(
+                get(&a, &alice, file.id)
+                    .await
+                    .expect("still here")
+                    .file
+                    .name,
+                "renamed.txt"
+            );
+
+            let listed = conflicts::list(&a).await.expect("the conflicts");
+            conflicts::let_go(&a, listed[0].id).await.expect("let go");
+            assert!(list(&a, &alice).await.expect("the files").is_empty());
+            assert_eq!(sync::status(&a).await.expect("the status").pending, 0);
+            assert_eq!(
+                std::fs::read_dir(folder.path())
+                    .expect("the folder")
+                    .count(),
+                0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_name_edited_on_two_devices_keeps_the_first_and_the_other_is_reapplied() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _a_folder) = device_with_folder(&alice, &token).await;
+            let (b, _b_folder) = device_with_folder(&alice, &token).await;
+            let transport = InProcess { server: &server };
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            sync::run(&a, &transport).await.expect("a sync");
+            sync::run(&b, &transport).await.expect("a sync");
+
+            update(&a, &alice, file.id, "from a.txt")
+                .await
+                .expect("renamed on a");
+            update(&b, &alice, file.id, "from b.txt")
+                .await
+                .expect("renamed on b");
+            sync::run(&a, &transport).await.expect("a sync");
+            let report = sync::run(&b, &transport).await.expect("a sync");
+            assert_eq!(report.conflicts, 1);
+            assert_eq!(
+                get(&b, &alice, file.id).await.expect("on b").file.name,
+                "from a.txt"
+            );
+            let changes = pending_changes::list(&b).await.expect("none waiting");
+            assert!(changes.is_empty());
+            let listed = conflicts::list(&b).await.expect("the conflicts");
+            assert_eq!(listed[0].about.as_deref(), Some("from a.txt"));
+            assert_eq!(listed[0].resolve, Resolve::Reapply);
+            assert_eq!(listed[0].fields[0].yours, json!("from b.txt"));
+
+            conflicts::reapply(&b, &alice, listed[0].id)
+                .await
+                .expect("reapplied");
+            assert_eq!(
+                pending_changes::list(&b).await.expect("one waiting")[0]
+                    .about
+                    .as_deref(),
+                Some("from b.txt")
+            );
+            sync::run(&b, &transport).await.expect("a sync");
+            assert_eq!(
+                get(&server, &alice, file.id)
+                    .await
+                    .expect("on the server")
+                    .file
+                    .name,
+                "from b.txt"
+            );
         })
         .await;
     }

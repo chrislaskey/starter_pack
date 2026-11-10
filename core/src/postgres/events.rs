@@ -24,6 +24,7 @@ struct EventRow {
     conflicts: Option<Json<Conflicts>>,
     version: Option<i64>,
     last_error: Option<String>,
+    attempts: i64,
 }
 
 impl TryFrom<EventRow> for StoredEvent {
@@ -52,6 +53,7 @@ impl TryFrom<EventRow> for StoredEvent {
             conflicts: row.conflicts.map(|json| json.0).unwrap_or_default(),
             version: row.version,
             last_error: row.last_error,
+            attempts: row.attempts,
         })
     }
 }
@@ -59,7 +61,7 @@ impl TryFrom<EventRow> for StoredEvent {
 macro_rules! select {
     ($rest:literal) => {
         concat!(
-            "SELECT id, user_id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error FROM app_events ",
+            "SELECT id, user_id, table_name, row_id, type, base_version, base, changes, made_at, status, conflicts, version, last_error, attempts FROM app_events ",
             $rest
         )
     };
@@ -201,6 +203,51 @@ pub async fn mark_conflict(
         .bind(Json(conflicts))
         .execute(connection)
         .await?;
+    Ok(())
+}
+
+/// Counts one more try the server or the bucket said no to, with why;
+/// answers how many that makes.
+pub async fn add_attempt(
+    connection: &mut PgConnection,
+    id: Uuid,
+    reason: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "UPDATE app_events SET attempts = attempts + 1, last_error = $2 WHERE id = $1 RETURNING attempts",
+    )
+    .bind(id)
+    .bind(reason)
+    .fetch_one(connection)
+    .await
+}
+
+/// Stops trying the event: kept as a conflict with why, for the person.
+pub async fn mark_refused(
+    connection: &mut PgConnection,
+    id: Uuid,
+    conflicts: &Conflicts,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_events SET status = 'conflict', conflicts = $2, last_error = $3 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(Json(conflicts))
+    .bind(reason)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Puts the event back in the queue as if it had never been tried.
+pub async fn mark_pending(connection: &mut PgConnection, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_events SET status = 'pending', conflicts = NULL, last_error = NULL, attempts = 0 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(connection)
+    .await?;
     Ok(())
 }
 

@@ -5,6 +5,14 @@
 //! resource's `apply_event`. The `app_events` table is the server's log
 //! of every event answered and a device's queue of events not yet
 //! answered, with the conflicts the person has not resolved.
+//!
+//! An event in the queue is tried by every sync, but not for ever: each
+//! time the server or the bucket says no to it and it stays pending
+//! counts, `count_attempt`, and at `MAX_ATTEMPTS` it is refused, kept
+//! as a conflict with the reason until the person tries it again or
+//! lets it go. Not reaching the server counts nothing, and neither does
+//! a server or a bucket that is failing, so an outage of any length
+//! refuses nothing.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +23,10 @@ use uuid::Uuid;
 
 use crate::database::{Transaction, sql};
 use crate::sync::TableRow;
+
+/// How many times the server or the bucket may say no to an event
+/// before a device stops trying it.
+pub const MAX_ATTEMPTS: i64 = 30;
 
 /// A row's fields as they travel on the wire, by name.
 pub type Fields = Map<String, Value>;
@@ -209,8 +221,12 @@ pub struct StoredEvent {
     /// On the server, the row's version after the event.
     pub version: Option<i64>,
     /// On the server, why it was rejected; on a device, the reason of a
-    /// rejection that kept the event pending.
+    /// rejection that kept the event pending, or why it was refused.
     pub last_error: Option<String>,
+    /// On a device, how many times the server or the bucket said no to
+    /// it while it stayed pending.
+    #[serde(default)]
+    pub attempts: i64,
 }
 
 impl StoredEvent {
@@ -305,6 +321,7 @@ pub async fn record(
         conflicts: answer.conflicts.clone(),
         version: answer.version,
         last_error: answer.reason.clone(),
+        attempts: 0,
     };
     sql!(tx, events::insert(&stored))
 }
@@ -318,6 +335,7 @@ pub async fn queue(tx: &mut Transaction, user_id: Uuid, event: &Event) -> Result
         conflicts: Conflicts::new(),
         version: None,
         last_error: None,
+        attempts: 0,
     };
     sql!(tx, events::insert(&stored))
 }
@@ -389,8 +407,54 @@ pub async fn mark_conflict(
     sql!(tx, events::mark_conflict(id, conflicts))
 }
 
+/// Keeps why a pending event did not go, without counting a try: the
+/// server or the bucket was not reached, or is failing.
 pub async fn mark_error(tx: &mut Transaction, id: Uuid, reason: &str) -> Result<(), sqlx::Error> {
     sql!(tx, events::mark_error(id, reason))
+}
+
+/// Counts a try the server or the bucket said no to, with why. At
+/// `MAX_ATTEMPTS` the event is refused; true when it now is.
+pub async fn count_attempt(
+    tx: &mut Transaction,
+    id: Uuid,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    let attempts = sql!(&mut *tx, events::add_attempt(id, reason))?;
+    if attempts < MAX_ATTEMPTS {
+        return Ok(false);
+    }
+    refuse(tx, id, &format!("tried {attempts} times: {reason}")).await?;
+    Ok(true)
+}
+
+/// Stops trying a pending event: it is kept as a conflict with nothing
+/// on the server's side, and why, until the person tries it again or
+/// lets it go.
+pub async fn refuse(tx: &mut Transaction, id: Uuid, reason: &str) -> Result<(), sqlx::Error> {
+    let Some(stored) = get(tx, id).await? else {
+        return Ok(());
+    };
+    let conflicts: Conflicts = stored
+        .event
+        .changes
+        .iter()
+        .map(|(field, yours)| {
+            (
+                field.clone(),
+                FieldConflict {
+                    yours: yours.clone(),
+                    server: Value::Null,
+                },
+            )
+        })
+        .collect();
+    sql!(tx, events::mark_refused(id, &conflicts, reason))
+}
+
+/// Puts a refused event back in the queue, its tries counted from none.
+pub async fn try_again(tx: &mut Transaction, id: Uuid) -> Result<(), sqlx::Error> {
+    sql!(tx, events::mark_pending(id))
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::deployment::Deployment;
 use crate::events::{self, EventKind, Fields, StoredEvent};
+use crate::files::{self, FileError};
 use crate::posts::{self, PostError};
 
 /// A change waiting to reach the server, as the page shows it.
@@ -21,7 +22,8 @@ pub struct PendingChange {
     pub kind: EventKind,
     /// When the change was made, on the device's clock.
     pub made_at: DateTime<Utc>,
-    /// What it was about, a post's first line; none for another table.
+    /// What it was about, a post's first line or a file's name; none for
+    /// another table.
     pub about: Option<String>,
     /// The values the person chose.
     pub changes: Fields,
@@ -31,6 +33,8 @@ pub struct PendingChange {
 pub enum PendingChangeError {
     #[error(transparent)]
     Post(#[from] PostError),
+    #[error(transparent)]
+    File(#[from] FileError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -40,12 +44,14 @@ pub async fn list(deployment: &Deployment) -> Result<Vec<PendingChange>, Pending
     let mut tx = deployment.begin().await?;
     let mut changes = Vec::new();
     for stored in events::pending(&mut tx).await? {
-        let about = if stored.event.table == posts::TABLE {
-            posts::get_in(&mut tx, stored.event.row_id)
+        let about = match stored.event.table.as_str() {
+            posts::TABLE => posts::get_in(&mut tx, stored.event.row_id)
                 .await?
-                .map(|post| post.body.lines().next().unwrap_or_default().to_string())
-        } else {
-            None
+                .map(|post| post.body.lines().next().unwrap_or_default().to_string()),
+            files::TABLE => files::get_in(&mut tx, stored.event.row_id)
+                .await?
+                .map(|file| file.name),
+            _ => None,
         };
         changes.push(pending_change(stored, about));
     }

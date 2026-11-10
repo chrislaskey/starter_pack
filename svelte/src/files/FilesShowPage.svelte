@@ -15,7 +15,7 @@
     onSynced,
   } from "../lib/core/index.js";
   import { navigateToUrl, pathParams } from "../lib/router.js";
-  import { filesEditUrl, filesIndexUrl } from "../lib/routes.js";
+  import { conflictsIndexUrl, filesEditUrl, filesIndexUrl } from "../lib/routes.js";
   import { fileSize } from "./file_size.js";
 
   const id = pathParams().id;
@@ -74,6 +74,9 @@
     </p>
     {#if shown.error}
       <p class="error text-sm">{shown.error}</p>
+    {/if}
+    {#if shown.state === "refused"}
+      <p><a href={conflictsIndexUrl()} class="link">Try again or let it go</a></p>
     {/if}
 
     {#if shown.shown_as === "image"}

@@ -302,6 +302,14 @@ export function conflictsReapply(id) {
   return invoke("conflicts_reapply", { id });
 }
 
+/**
+ * Sends a refused change again as it was.
+ * @param {string} id
+ */
+export function conflictsTryAgain(id) {
+  return invoke("conflicts_try_again", { id });
+}
+
 /** @param {string} id */
 export function conflictsLetGo(id) {
   return invoke("conflicts_let_go", { id });

@@ -73,6 +73,7 @@ pub fn run() {
             sync::sync_set_offline,
             conflicts::conflicts_list,
             conflicts::conflicts_reapply,
+            conflicts::conflicts_try_again,
             conflicts::conflicts_let_go,
             pending_changes::pending_changes_list,
             device_accounts::device_accounts_list,

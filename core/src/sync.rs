@@ -1109,7 +1109,7 @@ pub async fn run<T: Transport>(
     let (user, token) = users::signed_in_with_token(deployment).await?;
     let token = Some(token.as_str());
     let mut waiting = files::ask_about_waiting(deployment, transport, token).await?;
-    let held_back = files::not_uploaded(&waiting);
+    let held_back = files::held_back(deployment, &waiting).await?;
     if let Err(error) =
         push_pending(deployment, transport, token, &user, &held_back, &mut report).await
     {
@@ -1120,7 +1120,7 @@ pub async fn run<T: Transport>(
     prune(deployment, &user, &mut report).await?;
     report.uploaded = files::upload_waiting(deployment, transport, token, &mut waiting).await?;
     if report.uploaded > 0 {
-        let held_back = files::not_uploaded(&waiting);
+        let held_back = files::held_back(deployment, &waiting).await?;
         if let Err(error) =
             push_pending(deployment, transport, token, &user, &held_back, &mut report).await
         {
@@ -1205,9 +1205,19 @@ async fn push_pending<T: Transport>(
                 match (event.kind, server.is_some()) {
                     // The server's row wins
                     (_, true) => events::delete(&mut tx, event.id).await?,
-                    // A file is the only copy of its bytes: it waits
+                    // A file is the only copy of its bytes, so it is never
+                    // dropped: it waits while the server only lacks the
+                    // bytes, and is kept for the person otherwise
                     (EventKind::Create, false) if event.table == files::TABLE => {
-                        events::mark_error(&mut tx, event.id, &reason).await?;
+                        let refused = if reason == files::FILE_NOT_UPLOADED {
+                            events::count_attempt(&mut tx, event.id, &reason).await?
+                        } else {
+                            events::refuse(&mut tx, event.id, &reason).await?;
+                            true
+                        };
+                        if refused {
+                            report.conflicts += 1;
+                        }
                         continue;
                     }
                     // The server will never have this row: drop it
@@ -1240,9 +1250,12 @@ async fn push_pending<T: Transport>(
                         report.conflicts += 1;
                         continue;
                     }
-                    // Kept pending with the reason, for a debugging screen
+                    // Kept pending with the reason, and tried again by the
+                    // next sync, up to the limit
                     (EventKind::Update, false) => {
-                        events::mark_error(&mut tx, event.id, &reason).await?;
+                        if events::count_attempt(&mut tx, event.id, &reason).await? {
+                            report.conflicts += 1;
+                        }
                         continue;
                     }
                 }
