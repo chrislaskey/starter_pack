@@ -110,6 +110,32 @@ impl Storage {
         }
     }
 
+    /// A URL that lets whoever holds it GET the file at the key until it
+    /// expires, for a bucket nobody reads without one. With a
+    /// `Content-Disposition`, the bucket answers the file with it, so a
+    /// browser saves the file under a name instead of showing it.
+    pub async fn download_url(
+        &self,
+        key: &str,
+        lifetime: Duration,
+        content_disposition: Option<&str>,
+    ) -> Result<String, StorageError> {
+        match self {
+            Storage::S3 { store, .. } => {
+                let mut options = SignedUrlOptions::new();
+                if let Some(content_disposition) = content_disposition {
+                    options =
+                        options.with_query([("response-content-disposition", content_disposition)]);
+                }
+                let url = store
+                    .signed_url_opts(Method::GET, &Path::from(key), lifetime, &options)
+                    .await?;
+                Ok(url.to_string())
+            }
+            Storage::Memory { .. } => Ok(format!("memory:///{key}")),
+        }
+    }
+
     /// The size of the file at the key, or none when there is no file.
     pub async fn size(&self, key: &str) -> Result<Option<u64>, StorageError> {
         match self.store().head(&Path::from(key)).await {
@@ -131,6 +157,13 @@ impl Storage {
             .get_range(&Path::from(key), 0..count.min(size))
             .await?;
         Ok(bytes.to_vec())
+    }
+
+    /// The whole file at the key: for a test, since a file is read from
+    /// the bucket by whoever holds its URL, never through the server.
+    pub async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        let result = self.store().get(&Path::from(key)).await?;
+        Ok(result.bytes().await?.to_vec())
     }
 
     pub async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<(), StorageError> {

@@ -1,5 +1,5 @@
 // app_core over the Tauri app's commands (../../../../tauri/src/).
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FormError } from "./form_error.js";
 
@@ -160,6 +160,56 @@ export function postsCreate(body, communityIds) {
  */
 export function postsUpdate(id, body, communityIds) {
   return invoke("posts_update", { id, body, communityIds });
+}
+
+/** The user's files on this device, each `{file, shown_as, state, error}`. */
+export function filesList() {
+  return invoke("files_list");
+}
+
+/** @param {string} id */
+export function filesGet(id) {
+  return invoke("files_get", { id });
+}
+
+/**
+ * @param {string} id
+ * @param {string} name
+ */
+export function filesUpdate(id, name) {
+  return invokeForm("files_update", { id, name });
+}
+
+/** @param {string} id */
+export function filesDelete(id) {
+  return invoke("files_delete", { id });
+}
+
+/**
+ * @param {File} _file
+ * @param {string} _name
+ * @param {(fraction: number) => void} [_onProgress]
+ */
+export function filesCreate(_file, _name, _onProgress) {
+  return Promise.reject(new Error("adding a file in the app is not built yet"));
+}
+
+export function filesDownloadSupported() {
+  return Promise.resolve(false);
+}
+
+/** @param {string} _id */
+export function filesDownload(_id) {
+  return Promise.reject(new Error("downloading in the app is not built yet"));
+}
+
+/**
+ * Where a page reads the file's bytes from: the app's `files` protocol,
+ * which serves the copy on this device.
+ * @param {string} id
+ */
+export function filesContentUrl(id) {
+  return convertFileSrc(id, "files");
 }
 
 /** Every community, each with the user's membership when they are in it. */

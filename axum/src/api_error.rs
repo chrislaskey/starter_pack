@@ -12,6 +12,7 @@ use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
 use app_core::credentials::CredentialError;
 use app_core::field_errors::FieldErrors;
+use app_core::files::FileError;
 use app_core::memberships::MembershipError;
 use app_core::posts::PostError;
 use app_core::posts_communities::PostCommunityError;
@@ -153,6 +154,23 @@ impl From<AvatarError> for ApiError {
     }
 }
 
+impl From<FileError> for ApiError {
+    fn from(error: FileError) -> Self {
+        let status = match error {
+            FileError::Invalid(field_errors) => return ApiError::from_field_errors(field_errors),
+            FileError::NotFound { .. } => StatusCode::NOT_FOUND,
+            FileError::NotOwner => StatusCode::FORBIDDEN,
+            FileError::NotUploaded | FileError::Rejected(_) | FileError::Malformed(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            FileError::NoFileStore => StatusCode::SERVICE_UNAVAILABLE,
+            FileError::Storage(_) => StatusCode::BAD_GATEWAY,
+            FileError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
 impl From<AccountError> for ApiError {
     fn from(error: AccountError) -> Self {
         let status = match error {
@@ -180,6 +198,7 @@ impl From<SyncError> for ApiError {
         match error {
             SyncError::Post(error) => error.into(),
             SyncError::PostCommunity(error) => error.into(),
+            SyncError::File(error) => error.into(),
             SyncError::Community(error) => error.into(),
             SyncError::Membership(error) => error.into(),
             SyncError::User(error) => error.into(),

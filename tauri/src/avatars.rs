@@ -22,13 +22,20 @@ pub struct FormError {
     errors: Option<FieldErrors>,
 }
 
+impl FormError {
+    /// The fields that were wrong.
+    pub fn of_fields(errors: FieldErrors) -> FormError {
+        FormError {
+            error: "Some fields need another look".to_string(),
+            errors: Some(errors),
+        }
+    }
+}
+
 impl From<AvatarError> for FormError {
     fn from(error: AvatarError) -> FormError {
         match error {
-            AvatarError::Invalid(errors) => FormError {
-                error: "Some fields need another look".to_string(),
-                errors: Some(errors),
-            },
+            AvatarError::Invalid(errors) => FormError::of_fields(errors),
             other => FormError::from(other.to_string()),
         }
     }

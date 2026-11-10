@@ -15,7 +15,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::rate_limits::{self, RateLimits};
-use crate::{accounts, avatars, communities, memberships, posts, sync, users};
+use crate::{accounts, avatars, communities, files, memberships, posts, sync, users};
 
 /// What every handler may take from the server: the database, where its
 /// email goes, the bucket uploads go to if any, and the rate limits; and
@@ -74,6 +74,13 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
             "/api/posts/{id}",
             get(posts::get).put(posts::update).delete(posts::delete),
         )
+        .route("/api/files", get(files::list).post(files::create))
+        .route("/api/files/upload", post(files::create_upload))
+        .route(
+            "/api/files/{id}",
+            get(files::get).put(files::update).delete(files::delete),
+        )
+        .route("/api/files/{id}/content", get(files::content))
         .route(
             "/api/communities",
             get(communities::list).post(communities::create),
@@ -126,7 +133,9 @@ mod tests {
         let database = app_core::database::Database::open_sqlite_in_memory()
             .await
             .expect("a database");
-        let deployment = Deployment::new(database, app_core::deployment::Role::Server);
+        let storage = Storage::memory();
+        let deployment = Deployment::new(database, app_core::deployment::Role::Server)
+            .with_file_store(app_core::deployment::FileStore::Bucket(storage.clone()));
         let mailer = Mailer::memory();
         let alice = signed_up(&deployment, &mailer, "alice@example.com").await;
         let post = app_core::posts::create(&deployment, &alice.user, "the first post", &[])
@@ -136,7 +145,6 @@ mod tests {
             .await
             .expect("the post");
         let post = serde_json::to_value(post).expect("json");
-        let storage = Storage::memory();
         let state = AppState {
             deployment,
             mailer: mailer.clone(),
@@ -890,6 +898,64 @@ mod tests {
         let (status, _) = get(&router, &path).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = send(&router, Method::DELETE, &path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn files_upload_create_show_rename_and_delete() {
+        let (router, _) = test_router().await;
+        let bytes = b"some notes".to_vec();
+        let picked = json!({ "content_type": "text/plain", "size": bytes.len() });
+        let (status, upload) = send(&router, Method::POST, "/api/files/upload", Some(picked)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upload["uploaded"], json!(false));
+        let id = upload["id"].as_str().expect("an id").to_string();
+        let new = json!({ "id": id, "name": "notes.txt", "content_type": "text/plain", "size": bytes.len() });
+
+        let (status, body) = send(&router, Method::POST, "/api/files", Some(new.clone())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], json!("the file did not arrive; try again"));
+
+        let (_, me) = get(&router, "/api/users/me").await;
+        let key = format!("files/{}/{id}", me["id"].as_str().expect("an id"));
+        router.storage.put(&key, bytes).await.expect("the upload");
+        let (status, file) = send(&router, Method::POST, "/api/files", Some(new)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(file["name"], json!("notes.txt"));
+
+        let (status, listed) = get(&router, "/api/files").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed[0]["file"], file);
+        assert_eq!(listed[0]["state"], json!("synced"));
+
+        let path = format!("/api/files/{id}");
+        let (status, headers, _) = send_with(
+            &router.router,
+            Some(&router.token),
+            None,
+            Method::GET,
+            &format!("{path}/content"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(headers[header::LOCATION], format!("memory:///{key}"));
+        assert_eq!(headers[header::CACHE_CONTROL], "private, max-age=3300");
+
+        let renamed = json!({ "name": "renamed.txt" });
+        let (status, file) = send(&router, Method::PUT, &path, Some(renamed)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(file["name"], json!("renamed.txt"));
+        let blank = json!({ "name": " " });
+        let (status, body) = send(&router, Method::PUT, &path, Some(blank)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"], json!({ "name": ["is blank"] }));
+
+        let (status, _) = send(&router, Method::DELETE, &path, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = get(&router, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get(&router, &format!("{path}/content")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

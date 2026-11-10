@@ -2,6 +2,7 @@
 // error answer, `{"error": "..."}`, is thrown with its message, as a
 // FormError with the fields' messages when it has `"errors"`.
 import { FormError } from "./form_error.js";
+import { putFile } from "./uploads.js";
 
 /**
  * @param {string} method
@@ -174,6 +175,67 @@ export function postsUpdate(id, body, communityIds) {
 /** @param {string} id */
 export function postsDelete(id) {
   return send("DELETE", postPath(id));
+}
+
+/** @param {string} id */
+const filePath = (id) => `/api/files/${encodeURIComponent(id)}`;
+
+/** The user's files, each `{file, shown_as, state, error}`. */
+export function filesList() {
+  return send("GET", "/api/files");
+}
+
+/** @param {string} id */
+export function filesGet(id) {
+  return send("GET", filePath(id));
+}
+
+/**
+ * Adds the file the person picked: its bytes go straight to object
+ * storage, then the server writes its row; answers the file.
+ * @param {File} file
+ * @param {string} name
+ * @param {(fraction: number) => void} [onProgress] from 0 to 1
+ */
+export async function filesCreate(file, name, onProgress) {
+  const upload = await send("POST", "/api/files/upload", { content_type: file.type, size: file.size });
+  if (!upload.uploaded) await putFile(upload, file, onProgress);
+  return send("POST", "/api/files", { id: upload.id, name, content_type: upload.content_type, size: file.size });
+}
+
+/**
+ * @param {string} id
+ * @param {string} name
+ */
+export function filesUpdate(id, name) {
+  return send("PUT", filePath(id), { name });
+}
+
+/** @param {string} id */
+export function filesDelete(id) {
+  return send("DELETE", filePath(id));
+}
+
+/**
+ * Where a page reads the file's bytes from, for an `<img>` or a frame.
+ * @param {string} id
+ */
+export function filesContentUrl(id) {
+  return `${filePath(id)}/content`;
+}
+
+export function filesDownloadSupported() {
+  return Promise.resolve(true);
+}
+
+/**
+ * Has the browser save the file under its name.
+ * @param {string} id
+ * @returns {Promise<string | null>} where it was saved, when known
+ */
+export function filesDownload(id) {
+  window.location.assign(`${filePath(id)}/content?download=1`);
+  return Promise.resolve(null);
 }
 
 /** Every community, each with the user's membership when they are in it. */

@@ -22,6 +22,7 @@ pub mod deployment;
 pub mod device_settings;
 pub mod events;
 pub mod field_errors;
+pub mod files;
 pub mod mailer;
 pub mod mails;
 pub mod memberships;

@@ -4,8 +4,8 @@
 //! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
 //! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
 //! beside this crate when unset, or a PostgreSQL database. The email it
-//! sends goes where `MAILER` says, see `mailer`, uploads go to the bucket
-//! `STORAGE_BUCKET` names, see `storage`, and its accounts routes are
+//! sends goes where `MAILER` says, see `mailer`, uploads and files' bytes
+//! go to the bucket `STORAGE_BUCKET` names, see `storage`, and its accounts routes are
 //! rate limited, see `rate_limits`.
 //!
 //! With arguments it runs a command on that database instead and exits:
@@ -18,6 +18,7 @@ mod avatars;
 mod communities;
 mod current_user;
 mod database;
+mod files;
 mod mailer;
 mod memberships;
 mod posts;
@@ -31,6 +32,8 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use app_core::deployment::FileStore;
 
 use crate::rate_limits::RateLimits;
 use crate::router::AppState;
@@ -75,6 +78,10 @@ async fn main() -> Result<(), String> {
     let deployment = database::open().await?;
     let mailer = mailer::open()?;
     let storage = storage::open()?;
+    let deployment = match &storage {
+        Some(storage) => deployment.with_file_store(FileStore::Bucket(storage.clone())),
+        None => deployment,
+    };
     let arguments: Vec<String> = env::args().skip(1).collect();
     if !arguments.is_empty() {
         return command(&deployment, &arguments).await;

@@ -1,0 +1,239 @@
+# Offline files
+
+A file a person adds with the network off: kept on the device, tracked
+by a row that syncs like a post, and uploaded to object storage when the
+device is next online. The example resource is `files`, generic like
+`posts`: a person adds a file, renames it, deletes it.
+
+This is a second pattern beside `uploads.md`, which stays as it is: a
+user's picture is online only, a column on its row, sent by the page.
+Which pattern a file follows is the application's choice. How these
+decisions were reached, with the alternatives, is `offline-files.md`.
+
+## Decisions
+
+- **A file is a row, `app_files`, and its bytes.** The row syncs like a
+  post, through events and versions. The bytes never change: create
+  fixes them, update changes `name` only, replacing content is adding a
+  new file. So a copy on a device is never out of date.
+- **Only its owner sees a file.** Communities come later, by the join
+  table posts use.
+- **Any type, up to 25 MB**, one constant. The server checks the size
+  and nothing else; the content type is the device's word.
+- **Private in the bucket**, at `files/<owner id>/<file id>`, a key
+  worked out from the row and never stored. Reading is through a
+  download URL the server signs for a user who sees the row.
+- **On a device, one folder per account holds every file's bytes**,
+  uploaded or not, each under its bare id. In the app's data directory,
+  never the OS cache: a file not yet uploaded is the only copy.
+- **The device stores nothing about uploads.** A file needs uploading
+  exactly when its create event is still pending. Whether its bytes are
+  on this disk is whether the file exists at its path.
+- **The server never holds a row whose file it does not have.** It looks
+  in the bucket before it applies a create.
+- **A device keeps the bytes**: the one that added a file after the
+  upload, another from the first time it shows the file. Nothing is
+  removed to save space yet.
+- **A file is waiting, refused or synced**, and never stuck: waiting
+  retries on its own, refused waits for the person, and removing a file
+  in either state needs nothing from the server.
+- **An event is tried 30 times**, every event, a post's too, counting
+  only the server's no to that event.
+
+## The row
+
+`app_files`, with the sync columns of every synced table:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | UUIDv7 from the device that added it; the server's on the web |
+| `owner_id` | the owner, as on a post |
+| `name` | what the person sees, editable |
+| `content_type` | from the file picked, fixed |
+| `size` | bytes, fixed |
+
+An event may set `name`, `content_type` and `size` on create, and
+change `name` and `deleted_at` on update. A name edited on two devices
+merges as a post's body does.
+
+## On a device
+
+```
+<data directory>/
+  device.db
+  accounts/
+    <user_id>/
+      app.db
+      files/
+        <file id>
+```
+
+Removing an account removes its folder. A sign-out keeps it, as it
+keeps the database.
+
+**Adding a file.** The page's `<input type="file">`, the same on the
+web and in the app, where a command takes the bytes as its raw body:
+
+1. Rust checks the size and the name by the rules the server runs.
+2. Rust writes the bytes into the account's folder under a new id.
+3. `files::create` writes the row and queues the create event, in one
+   transaction.
+
+Bytes before row, so a crash in between leaves a file without a row,
+which the cleanup removes, and never a row without a file.
+
+## The exchange, in `sync::run`
+
+| Step | Who | What |
+| --- | --- | --- |
+| 1 | device | for each pending create on `app_files`, asks `POST /api/files/upload` with `{id, content_type, size}` |
+| 2 | server | checks the size; looks at `files/<owner id>/<file id>`. There, of that size: `uploaded`. Otherwise a signed PUT URL, good for 10 minutes |
+| 3 | device | pushes every pending event except those of a file not answered `uploaded`; a rename waits with its create |
+| 4 | device | pulls, backfills, prunes, as ever |
+| 5 | device, `files::upload_waiting` | sends each waiting file's bytes from disk to its URL, as a stream, with a longer timeout than the sync's requests |
+| 6 | device | pushes the events of the files just sent |
+| 7 | server, `files::apply_event` | on create, looks in the bucket again: there, the row is written; not there, `file_not_uploaded`, and the event stays pending for the next sync |
+
+- What to hold back is worked out in each sync and kept nowhere.
+- Every step can run again: a sync cut off after step 5 hears
+  `uploaded` next time and pushes.
+- A file that fails holds back only its own events.
+- The bytes go last, so a sync's posts and pulled rows never wait on
+  them. The sync lock is held while they go; an application with large
+  files moves `files::upload_waiting` to a task of its own, which
+  changes who calls it and no data.
+- One PUT per file, started over if cut off. No checksum.
+- The file has no row on the server when its upload is asked for, so
+  the server holds the user to the key's prefix, their own.
+- The `Transport` trait carries the asking and the sending, so tests
+  run the exchange in one process against the in-memory bucket.
+- On the web there is no queue: the page asks for an upload without an
+  id, the server makes one, the page sends the bytes and creates the
+  row.
+
+## Waiting, refused, synced
+
+| State | Gets there | On its own | The person can |
+| --- | --- | --- | --- |
+| Waiting | added; the create is pending | every sync tries again | delete it |
+| Refused | the server will not take it, or 30 tries | nothing | Try again, Let it go |
+| Synced | the create was applied | syncs like a post | rename, delete |
+
+- **Refused keeps everything.** A post's rejected create is dropped
+  with its row; a file's is kept as a conflict with nothing on the
+  server's side, with its row and its bytes, and the file still shows
+  on that device. Reasons: over the limit, a name not valid, the bytes
+  gone from the disk, the limit of tries.
+- **Try again** makes the create pending and sets its tries to 0.
+  **Let it go** removes the event, the row and the bytes.
+- **Deleting a waiting file is local**: the row, its events and the
+  bytes go, and nothing is pushed, since nothing reached the server.
+- The files index shows each file's state, and under a waiting one the
+  last error. A refused file is also on the conflicts page, by its
+  name, with the reason. The conflicts page and the pending changes
+  list read posts only today and learn this second table.
+
+**What counts as a try**, `app_events.attempts`:
+
+| What happened | Counts |
+| --- | --- |
+| no network, a timeout, working offline | no |
+| the server or the bucket failing, a 5xx | no |
+| the server rejected the event and it stays pending | yes |
+| the bucket refused the PUT, a 4xx | yes |
+
+An outage counts nothing however long, so the limit is not sized
+against one.
+
+## Showing a file
+
+One URL per file, `filesContentUrl(id)`, put straight into `<img src>`
+or a frame:
+
+- **In the app**, a custom protocol handled in Rust: it serves the local
+  copy with the row's content type, and when there is none fetches the
+  file first, written under a temporary name and renamed when whole. A
+  file that cannot be had is a 404 and the page shows a placeholder.
+- **On the web**, `GET /api/files/:id/content` redirects to a signed
+  download URL good for an hour, the redirect cacheable in that browser
+  for a little less.
+
+The index lists the files; a click opens the show page, which renders
+by type, the same on every platform:
+
+| Type | Shown with |
+| --- | --- |
+| image, animated or not | `FileImage` |
+| plain text, PDF | a sandboxed frame |
+| anything else | its name and size |
+
+Only these types are rendered, and every answer says `nosniff`: an HTML
+or SVG file is a program and is never loaded as a document. More types
+are an application's to add.
+
+**Animations.** `FileImage` shows the `<img>`, or a still of its first
+frame drawn on a canvas. The choice is kept as the theme is, in
+`localStorage` as `app:animations`: follow the system to start, which
+is off when it asks for reduced motion, then on or off as the person
+sets it, whatever the system says.
+
+**Download** is a button on the show page only: on the web the content
+URL asking for an attachment; in the desktop app a copy into the
+Downloads folder; absent on phones.
+
+## Deleting
+
+A delete is the soft delete, synced like any edit.
+
+- **On a device**, a cleanup at the end of each sync, over the
+  account's folder: a file whose row is deleted is removed; a file with
+  no row is removed once it is a day old. The day is for a file being
+  added, whose bytes are on disk a moment before its row.
+- **In the bucket**, `files/` joins `avatars/` in the server's sweep: a
+  file with no row, a day old, is deleted. A deleted row keeps its file
+  for the purge's 90 days. Deleting an account deletes its prefix at
+  once.
+
+**A gap accepted.** A file uploaded whose push never came is swept
+after a day and uploaded again when the device returns. If the device
+returns in the seconds a sweep is running, the row can be written just
+before the sweep deletes the file: the file then shows on the device
+that added it and not on others, and the person adds it again. Closing
+this needs a new key per upload and a stored key; not worth it. The
+cheap first step, if it ever shows, is the sweep looking for a row
+again before each delete.
+
+## To verify while building
+
+- A PDF in a frame from the custom protocol, on each platform's
+  webview; where it does not render, the page shows the name and size.
+- The canvas still of an image served by the custom protocol.
+- That `object_store` can sign a download URL asking for an attachment
+  under a given name.
+- 25 MB through the page's file input and a command's raw body on a
+  phone.
+
+## Left for later
+
+Communities for files; replacing content; multipart and resumable
+uploads; uploads while the app is in the background; audio and video,
+which need the protocol to answer ranges; download on phones, through
+the share sheet; the size of the cached files with a "Remove cached
+files" button, which leaves waiting and refused files; copying an image
+to the clipboard on a click, the quick search popup on the branch
+`v2-elixir-and-rust` being the pattern; thumbnails; checksums; a file
+attached to a post. See `docs/suggestions/files.md`.
+
+## Build order
+
+Each phase ends in a state that works, is tested and is worth keeping.
+
+| Phase | Builds | Proves |
+| --- | --- | --- |
+| 1 | the migration `files_create`; `files` in core with its events and SQL; `app_files` in the push and the pull; signed download URLs; the routes; the web's pages, with `FileImage`, the animation choice and Download | on the web a file is added, shown, renamed, deleted and downloaded; a create without its file in the bucket is refused; another user neither lists it nor gets its content |
+| 2 | a folder per account: `accounts/<user_id>/app.db`, `bin/reset` | the account tests pass on the new layout; removing an account removes its folder |
+| 3 | adding a file on a device; the custom protocol serving the local copy; the commands; the desktop's Download | a file added offline is listed as waiting and shows with the network off; deleting it leaves nothing behind |
+| 4 | the exchange: the transport, `files::upload_waiting`, events held back, the second push | a file added offline reaches the bucket and the web; a failed upload holds back only its own events; a sync cut off finishes on the next; `file_not_uploaded` is tried again |
+| 5 | fetching on first use | a file added on one device shows on another, then with the network off |
+| 6 | the migration `events_add_attempts`; what counts; refused; the conflicts page and the pending changes for files | 30 rejections refuse an event and an outage counts nothing; Try again starts over; Let it go removes the bytes; a refused file is not lost; a name edited on two devices is a conflict |
+| 7 | the device's cleanup; `files/` in the server's sweep; `offline-sync.md` and `uploads.md` brought up to date; `docs/suggestions/files.md` | after a day no file is without a row on either side; a deleted row's bytes leave the device |

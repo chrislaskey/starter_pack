@@ -115,6 +115,19 @@ pub async fn list_by_status(
     rows.into_iter().map(StoredEvent::try_from).collect()
 }
 
+/// The events of the table's rows, in the order they were made: on a
+/// device, the ones waiting and the ones the person has not resolved.
+pub async fn list_by_table(
+    connection: &mut PgConnection,
+    table: &str,
+) -> Result<Vec<StoredEvent>, sqlx::Error> {
+    let rows: Vec<EventRow> = sqlx::query_as(select!("WHERE table_name = $1 ORDER BY made_at, id"))
+        .bind(table)
+        .fetch_all(connection)
+        .await?;
+    rows.into_iter().map(StoredEvent::try_from).collect()
+}
+
 pub async fn count_by_status(
     connection: &mut PgConnection,
     status: EventStatus,
@@ -194,6 +207,7 @@ pub async fn delete_of_missing_rows(connection: &mut PgConnection) -> Result<u64
     let result = sqlx::query(
         "DELETE FROM app_events WHERE
            (table_name = 'app_posts' AND row_id NOT IN (SELECT id FROM app_posts))
+           OR (table_name = 'app_files' AND row_id NOT IN (SELECT id FROM app_files))
            OR (table_name = 'app_posts_communities' AND row_id NOT IN (SELECT id FROM app_posts_communities))
            OR (table_name = 'app_users_communities' AND row_id NOT IN (SELECT id FROM app_users_communities))
            OR (table_name = 'app_communities' AND row_id NOT IN (SELECT id FROM app_communities))

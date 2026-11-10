@@ -13,6 +13,7 @@ mod avatars;
 mod communities;
 mod conflicts;
 mod device_accounts;
+mod files;
 mod memberships;
 mod pending_changes;
 mod posts;
@@ -54,6 +55,10 @@ pub fn run() {
             posts::posts_create,
             posts::posts_update,
             posts::posts_delete,
+            files::files_list,
+            files::files_get,
+            files::files_update,
+            files::files_delete,
             sync::sync_run,
             sync::sync_status,
             sync::sync_set_offline,

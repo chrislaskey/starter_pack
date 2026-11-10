@@ -12,6 +12,7 @@
     accountsSignInUrl,
     accountsSignUpUrl,
     communitiesIndexUrl,
+    filesIndexUrl,
     homeUrl,
     postsIndexUrl,
     profileEditUrl,
@@ -46,6 +47,7 @@
   <a href={homeUrl()} class="link">Home</a>
   {#if me}
     <a href={postsIndexUrl()} class="link">Posts</a>
+    <a href={filesIndexUrl()} class="link">Files</a>
     <a href={communitiesIndexUrl()} class="link">Communities</a>
     <a href={profileEditUrl()} class="link">Profile</a>
   {/if}

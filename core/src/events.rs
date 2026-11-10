@@ -338,6 +338,14 @@ pub async fn conflicts(tx: &mut Transaction) -> Result<Vec<StoredEvent>, sqlx::E
     Ok(conflicts)
 }
 
+/// The events of the table's rows, in the order they were made.
+pub async fn list_of_table(
+    tx: &mut Transaction,
+    table: &str,
+) -> Result<Vec<StoredEvent>, sqlx::Error> {
+    sql!(tx, events::list_by_table(table))
+}
+
 pub async fn count(tx: &mut Transaction, status: EventStatus) -> Result<i64, sqlx::Error> {
     sql!(tx, events::count_by_status(status))
 }

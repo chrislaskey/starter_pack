@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::database::sql;
 use crate::deployment::{Deployment, Role};
-use crate::{communities, memberships, posts, posts_communities, tokens, users};
+use crate::{communities, files, memberships, posts, posts_communities, tokens, users};
 
 /// How long a deleted row is kept, and how long a device may stay away.
 pub const RETENTION_DAYS: i64 = 90;
@@ -33,6 +33,7 @@ pub const UNCONFIRMED_DAYS: i64 = 1;
 const TABLES: &[&str] = &[
     posts_communities::TABLE,
     posts::TABLE,
+    files::TABLE,
     memberships::TABLE,
     communities::TABLE,
     users::TABLE,

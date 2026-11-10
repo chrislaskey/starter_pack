@@ -29,6 +29,7 @@ use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, now};
 use crate::device_settings::{self, DeviceSettingsError, WORK_OFFLINE};
 use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus};
+use crate::files::{self, File, FileError};
 use crate::memberships::{self, Membership, MembershipError};
 use crate::posts::{self, Post, PostError};
 use crate::posts_communities::{self, PostCommunity, PostCommunityError};
@@ -150,6 +151,8 @@ pub enum SyncError {
     #[error(transparent)]
     PostCommunity(#[from] PostCommunityError),
     #[error(transparent)]
+    File(#[from] FileError),
+    #[error(transparent)]
     Community(#[from] CommunityError),
     #[error(transparent)]
     Membership(#[from] MembershipError),
@@ -191,6 +194,7 @@ pub async fn push(
             communities::TABLE => communities::apply_event(deployment, user, event).await?,
             memberships::TABLE => memberships::apply_event(deployment, user, event).await?,
             posts::TABLE => posts::apply_event(deployment, user, event).await?,
+            files::TABLE => files::apply_event(deployment, user, event).await?,
             posts_communities::TABLE => {
                 posts_communities::apply_event(deployment, user, event).await?
             }
@@ -263,6 +267,12 @@ pub async fn pull(
             .into_iter()
             .map(SyncedRow::PostCommunity),
     );
+    rows.extend(
+        files::list_synced_after(&mut tx, user, &after, limit)
+            .await?
+            .into_iter()
+            .map(SyncedRow::File),
+    );
     let mut page = page_of(&mut tx, rows, limit).await?;
     tx.commit().await?;
     page.purge_horizon = purge_horizon;
@@ -318,6 +328,7 @@ enum SyncedRow {
     Membership(Membership),
     Post(Post),
     PostCommunity(PostCommunity),
+    File(File),
 }
 
 impl SyncedRow {
@@ -328,6 +339,7 @@ impl SyncedRow {
             SyncedRow::Membership(row) => (row.last_synced_at, row.id),
             SyncedRow::Post(row) => (row.last_synced_at, row.id),
             SyncedRow::PostCommunity(row) => (row.last_synced_at, row.id),
+            SyncedRow::File(row) => (row.last_synced_at, row.id),
         };
         Cursor {
             last_synced_at: last_synced_at.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
@@ -342,6 +354,7 @@ impl SyncedRow {
             SyncedRow::Membership(row) => memberships::table_row(row)?,
             SyncedRow::Post(row) => posts::table_row(row)?,
             SyncedRow::PostCommunity(row) => posts_communities::table_row(row)?,
+            SyncedRow::File(row) => files::table_row(row)?,
         })
     }
 }
@@ -386,6 +399,9 @@ async fn with_parents(
             SyncedRow::Post(post) => {
                 send_user(tx, &mut out, &mut sent, post.owner_id).await?;
             }
+            SyncedRow::File(file) => {
+                send_user(tx, &mut out, &mut sent, file.owner_id).await?;
+            }
             SyncedRow::PostCommunity(row) => {
                 if let Some(post) = posts::get_in(tx, row.post_id).await? {
                     send_user(tx, &mut out, &mut sent, post.owner_id).await?;
@@ -417,6 +433,7 @@ async fn with_parents(
             SyncedRow::Membership(membership) => (memberships::TABLE, membership.id),
             SyncedRow::Post(post) => (posts::TABLE, post.id),
             SyncedRow::PostCommunity(row) => (posts_communities::TABLE, row.id),
+            SyncedRow::File(file) => (files::TABLE, file.id),
         };
         send(&mut out, &mut sent, table, id, row)?;
     }
@@ -480,7 +497,8 @@ fn table_rank(table: &str) -> usize {
         memberships::TABLE => 2,
         posts::TABLE => 3,
         posts_communities::TABLE => 4,
-        _ => 5,
+        files::TABLE => 5,
+        _ => 6,
     }
 }
 
@@ -1083,6 +1101,7 @@ async fn apply_row(tx: &mut Transaction, user: &User, row: &TableRow) -> Result<
         }
         posts::TABLE => Ok(posts::apply_server_row(tx, &row.row).await?),
         posts_communities::TABLE => Ok(posts_communities::apply_server_row(tx, &row.row).await?),
+        files::TABLE => Ok(files::apply_server_row(tx, &row.row).await?),
         other => Err(SyncError::Malformed(format!(
             "a row of an unknown table '{other}'"
         ))),
@@ -1095,6 +1114,7 @@ async fn delete_row(tx: &mut Transaction, table: &str, id: Uuid) -> Result<(), S
         memberships::TABLE => Ok(memberships::delete_row(tx, id).await?),
         posts::TABLE => Ok(posts::delete_row(tx, id).await?),
         posts_communities::TABLE => Ok(posts_communities::delete_row(tx, id).await?),
+        files::TABLE => Ok(files::delete_row(tx, id).await?),
         other => Err(SyncError::Malformed(format!(
             "a row of an unknown table '{other}'"
         ))),
