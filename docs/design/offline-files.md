@@ -183,7 +183,7 @@ Open:
 | Column | Meaning |
 | --- | --- |
 | `id` | UUIDv7 from the device that added it |
-| `owner_id` | the owner, as on a post |
+| `user_id` | the owner, as on a post |
 | `name` | the name the person sees, editable |
 | `content_type` | from the file picked, fixed |
 | `size` | in bytes, fixed |

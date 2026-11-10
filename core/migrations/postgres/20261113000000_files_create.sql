@@ -3,7 +3,7 @@
 -- and in the account's folder on a device. Only the name changes.
 CREATE TABLE app_files (
   id uuid PRIMARY KEY,
-  owner_id uuid NOT NULL REFERENCES app_users (id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES app_users (id) ON DELETE CASCADE,
   name text NOT NULL,
   content_type text NOT NULL,
   size bigint NOT NULL,
@@ -15,5 +15,5 @@ CREATE TABLE app_files (
   deleted_by_id uuid
 );
 
-CREATE INDEX app_files_owner_id ON app_files (owner_id);
+CREATE INDEX app_files_user_id ON app_files (user_id);
 CREATE INDEX app_files_last_synced_at ON app_files (last_synced_at, id);

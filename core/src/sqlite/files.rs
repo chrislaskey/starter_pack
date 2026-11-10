@@ -13,7 +13,7 @@ use crate::sync::Cursor;
 #[derive(FromRow)]
 struct FileRow {
     id: Hyphenated,
-    owner_id: Hyphenated,
+    user_id: Hyphenated,
     name: String,
     content_type: String,
     size: i64,
@@ -29,7 +29,7 @@ impl From<FileRow> for File {
     fn from(row: FileRow) -> File {
         File {
             id: row.id.into_uuid(),
-            owner_id: row.owner_id.into_uuid(),
+            user_id: row.user_id.into_uuid(),
             name: row.name,
             content_type: row.content_type,
             size: u64::try_from(row.size).unwrap_or_default(),
@@ -46,7 +46,7 @@ impl From<FileRow> for File {
 macro_rules! select {
     ($rest:literal) => {
         concat!(
-            "SELECT id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_files ",
+            "SELECT id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_files ",
             $rest
         )
     };
@@ -62,7 +62,7 @@ pub async fn list_owned(
     user_id: Uuid,
 ) -> Result<Vec<File>, sqlx::Error> {
     let rows: Vec<FileRow> = sqlx::query_as(select!(
-        "WHERE deleted_at IS NULL AND owner_id = $1 ORDER BY inserted_at DESC, id DESC"
+        "WHERE deleted_at IS NULL AND user_id = $1 ORDER BY inserted_at DESC, id DESC"
     ))
     .bind(user_id.hyphenated())
     .fetch_all(connection)
@@ -85,12 +85,12 @@ pub async fn list_ids(
     connection: &mut SqliteConnection,
 ) -> Result<Vec<(Uuid, Uuid, bool)>, sqlx::Error> {
     let rows: Vec<(Hyphenated, Hyphenated, bool)> =
-        sqlx::query_as("SELECT id, owner_id, deleted_at IS NOT NULL FROM app_files")
+        sqlx::query_as("SELECT id, user_id, deleted_at IS NOT NULL FROM app_files")
             .fetch_all(connection)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, owner_id, deleted)| (id.into_uuid(), owner_id.into_uuid(), deleted))
+        .map(|(id, user_id, deleted)| (id.into_uuid(), user_id.into_uuid(), deleted))
         .collect())
 }
 
@@ -103,7 +103,7 @@ pub async fn list_synced_after(
     limit: usize,
 ) -> Result<Vec<File>, sqlx::Error> {
     let rows: Vec<FileRow> = sqlx::query_as(select!(
-        "WHERE last_synced_at IS NOT NULL AND (last_synced_at, id) > ($2, $3) AND owner_id = $1
+        "WHERE last_synced_at IS NOT NULL AND (last_synced_at, id) > ($2, $3) AND user_id = $1
          ORDER BY last_synced_at, id LIMIT $4"
     ))
     .bind(user_id.hyphenated())
@@ -117,11 +117,11 @@ pub async fn list_synced_after(
 
 pub async fn insert(connection: &mut SqliteConnection, file: &File) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_files (id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_files (id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(file.id.hyphenated())
-    .bind(file.owner_id.hyphenated())
+    .bind(file.user_id.hyphenated())
     .bind(&file.name)
     .bind(&file.content_type)
     .bind(size_of(file))
@@ -157,16 +157,16 @@ pub async fn update(connection: &mut SqliteConnection, file: &File) -> Result<bo
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(connection: &mut SqliteConnection, file: &File) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_files (id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_files (id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (id) DO UPDATE SET
-           owner_id = excluded.owner_id, name = excluded.name, content_type = excluded.content_type,
+           user_id = excluded.user_id, name = excluded.name, content_type = excluded.content_type,
            size = excluded.size, inserted_at = excluded.inserted_at, updated_at = excluded.updated_at,
            version = excluded.version, last_synced_at = excluded.last_synced_at,
            deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id",
     )
     .bind(file.id.hyphenated())
-    .bind(file.owner_id.hyphenated())
+    .bind(file.user_id.hyphenated())
     .bind(&file.name)
     .bind(&file.content_type)
     .bind(size_of(file))

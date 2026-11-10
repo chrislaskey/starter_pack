@@ -211,6 +211,32 @@ export async function filesCreate(file, name, _onProgress) {
   }
 }
 
+/**
+ * The copies this device keeps of files the server holds too.
+ * @returns {Promise<{count: number, bytes: number} | null>}
+ */
+export function filesCacheGet() {
+  return invoke("files_cache_get");
+}
+
+/** Removes those copies; each is fetched again when next shown. */
+export function filesCacheDelete() {
+  return invoke("files_cache_delete");
+}
+
+/** Whether this device copies an image to the clipboard. */
+export function filesCopySupported() {
+  return invoke("files_copy_supported");
+}
+
+/**
+ * Copies the image to the clipboard.
+ * @param {string} id
+ */
+export function filesCopy(id) {
+  return invoke("files_copy", { id });
+}
+
 /** Whether this device saves a copy of a file outside the app. */
 export function filesDownloadSupported() {
   return invoke("files_download_supported");

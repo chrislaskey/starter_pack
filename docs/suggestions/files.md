@@ -7,12 +7,6 @@ device the first time it shows the file, with a limit of tries, refused
 files kept for the person, and the cleanups on both sides. Left for
 later, on purpose:
 
-- **A bucket of its own for files.** Files are read through signed
-  URLs, but they share the avatars' bucket, which dev's Garage serves
-  to anyone by its web endpoint, so a file's key, were it known, reads
-  the file there. Before real use: a second bucket nobody reads without
-  a signature, or a public read that covers `avatars/` only, which S3
-  and R2 policies can say and Garage's web endpoint cannot.
 - **Scheduling the sweep.** `files::delete_unreferenced` waits for a
   scheduler beside `avatars::delete_unreferenced`, to run daily after
   `app_web purge`.
@@ -34,12 +28,14 @@ later, on purpose:
   text and PDF.
 - **Download on phones**, through the system's share sheet, which
   needs a plugin.
-- **The size of the cached files, with "Remove cached files".** It
-  must leave the waiting and the refused files, which are the only
-  copy of their bytes.
-- **Copying an image to the clipboard on a click.** The quick search
-  popup on the branch `v2-elixir-and-rust` is the pattern to start
-  from.
+- **Copying an image on the other platforms.** macOS is built, as one
+  clipboard item with the file, its bytes, a PNG and a TIFF. In a
+  browser, `navigator.clipboard.write` with a PNG drawn from the image,
+  which loses a GIF's animation. On Windows and Linux,
+  `tauri-plugin-clipboard-manager`'s `write_image`, a still, or the
+  platform's own formats for an animation. On iOS, `UIPasteboard` with
+  the GIF's bytes, by `objc2-ui-kit`. On Android, a `content://` URI
+  from a FileProvider, in a small Kotlin plugin.
 - **Thumbnails.** The index shows each image whole, scaled down by the
   page, so it fetches every image's full bytes.
 - **A checksum.** The server checks a file's size only.

@@ -14,6 +14,8 @@ mod communities;
 mod conflicts;
 mod device_accounts;
 mod files;
+#[cfg(target_os = "macos")]
+mod macos;
 mod memberships;
 mod pending_changes;
 mod posts;
@@ -66,6 +68,10 @@ pub fn run() {
             files::files_create,
             files::files_update,
             files::files_delete,
+            files::files_cache_get,
+            files::files_cache_delete,
+            files::files_copy_supported,
+            files::files_copy,
             files::files_download_supported,
             files::files_download,
             sync::sync_run,

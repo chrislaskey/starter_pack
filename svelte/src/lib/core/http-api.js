@@ -224,6 +224,25 @@ export function filesContentUrl(id) {
   return `${filePath(id)}/content`;
 }
 
+/** A browser keeps no copies of its own: null. */
+export function filesCacheGet() {
+  return Promise.resolve(null);
+}
+
+export function filesCacheDelete() {
+  return Promise.resolve(null);
+}
+
+/** Not in a browser yet, see docs/suggestions/files.md. */
+export function filesCopySupported() {
+  return Promise.resolve(false);
+}
+
+/** @param {string} _id */
+export function filesCopy(_id) {
+  return Promise.reject(new Error("Copying is not available in a browser yet"));
+}
+
 export function filesDownloadSupported() {
   return Promise.resolve(true);
 }

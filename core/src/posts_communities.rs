@@ -322,7 +322,7 @@ async fn own_live_post(
     post_id: Uuid,
 ) -> Result<Post, PostCommunityError> {
     match sql!(&mut *tx, posts::get(post_id))? {
-        Some(post) if post.deleted_at.is_none() && post.owner_id == user.id => Ok(post),
+        Some(post) if post.deleted_at.is_none() && post.user_id == user.id => Ok(post),
         Some(post) if post.deleted_at.is_none() => {
             let _ = post;
             Err(PostCommunityError::NotOwner)
@@ -437,7 +437,7 @@ async fn apply_in(
                 return rejected(event, "unknown_row", None);
             };
             let post = match sql!(&mut *tx, posts::get(row.post_id))? {
-                Some(post) if post.owner_id == user.id => post,
+                Some(post) if post.user_id == user.id => post,
                 Some(_) => return rejected(event, "not_owner", Some(row)),
                 None => return rejected(event, "unknown_post", Some(row)),
             };

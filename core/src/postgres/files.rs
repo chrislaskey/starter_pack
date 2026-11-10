@@ -11,7 +11,7 @@ use crate::sync::Cursor;
 #[derive(FromRow)]
 struct FileRow {
     id: Uuid,
-    owner_id: Uuid,
+    user_id: Uuid,
     name: String,
     content_type: String,
     size: i64,
@@ -27,7 +27,7 @@ impl From<FileRow> for File {
     fn from(row: FileRow) -> File {
         File {
             id: row.id,
-            owner_id: row.owner_id,
+            user_id: row.user_id,
             name: row.name,
             content_type: row.content_type,
             size: u64::try_from(row.size).unwrap_or_default(),
@@ -44,7 +44,7 @@ impl From<FileRow> for File {
 macro_rules! select {
     ($rest:literal) => {
         concat!(
-            "SELECT id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_files ",
+            "SELECT id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_files ",
             $rest
         )
     };
@@ -60,7 +60,7 @@ pub async fn list_owned(
     user_id: Uuid,
 ) -> Result<Vec<File>, sqlx::Error> {
     let rows: Vec<FileRow> = sqlx::query_as(select!(
-        "WHERE deleted_at IS NULL AND owner_id = $1 ORDER BY inserted_at DESC, id DESC"
+        "WHERE deleted_at IS NULL AND user_id = $1 ORDER BY inserted_at DESC, id DESC"
     ))
     .bind(user_id)
     .fetch_all(connection)
@@ -82,7 +82,7 @@ pub async fn get(connection: &mut PgConnection, id: Uuid) -> Result<Option<File>
 pub async fn list_ids(
     connection: &mut PgConnection,
 ) -> Result<Vec<(Uuid, Uuid, bool)>, sqlx::Error> {
-    sqlx::query_as("SELECT id, owner_id, deleted_at IS NOT NULL FROM app_files")
+    sqlx::query_as("SELECT id, user_id, deleted_at IS NOT NULL FROM app_files")
         .fetch_all(connection)
         .await
 }
@@ -96,7 +96,7 @@ pub async fn list_synced_after(
     limit: usize,
 ) -> Result<Vec<File>, sqlx::Error> {
     let rows: Vec<FileRow> = sqlx::query_as(select!(
-        "WHERE last_synced_at IS NOT NULL AND (last_synced_at, id) > ($2, $3) AND owner_id = $1
+        "WHERE last_synced_at IS NOT NULL AND (last_synced_at, id) > ($2, $3) AND user_id = $1
          ORDER BY last_synced_at, id LIMIT $4"
     ))
     .bind(user_id)
@@ -110,11 +110,11 @@ pub async fn list_synced_after(
 
 pub async fn insert(connection: &mut PgConnection, file: &File) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_files (id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_files (id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(file.id)
-    .bind(file.owner_id)
+    .bind(file.user_id)
     .bind(&file.name)
     .bind(&file.content_type)
     .bind(size_of(file))
@@ -150,16 +150,16 @@ pub async fn update(connection: &mut PgConnection, file: &File) -> Result<bool, 
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(connection: &mut PgConnection, file: &File) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_files (id, owner_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_files (id, user_id, name, content_type, size, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (id) DO UPDATE SET
-           owner_id = excluded.owner_id, name = excluded.name, content_type = excluded.content_type,
+           user_id = excluded.user_id, name = excluded.name, content_type = excluded.content_type,
            size = excluded.size, inserted_at = excluded.inserted_at, updated_at = excluded.updated_at,
            version = excluded.version, last_synced_at = excluded.last_synced_at,
            deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id",
     )
     .bind(file.id)
-    .bind(file.owner_id)
+    .bind(file.user_id)
     .bind(&file.name)
     .bind(&file.content_type)
     .bind(size_of(file))

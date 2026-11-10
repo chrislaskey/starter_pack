@@ -155,8 +155,9 @@ points at, which the sweep deletes.
 `bin/storage start` runs one Garage node under `axum/data/garage/`, set
 up on its first start: the bucket `starter-pack`, readable by anyone
 through Garage's web endpoint at `http://starter-pack.web.localhost:<port>`,
-CORS open to every origin for the pages' PUTs, and a key for the
-server, kept there, never committed. `bin/dev` starts it with the web
+the bucket `starter-pack-private` for files, read through signed URLs
+only (`offline-files-decisions.md`), CORS open to every origin for the
+pages' PUTs, and a key for the server, kept there, never committed. `bin/dev` starts it with the web
 server and passes the server `bin/storage env`. Production's bucket
 allows only the web's origin and the app's (`tauri://localhost`,
 `http://tauri.localhost`).

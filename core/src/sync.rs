@@ -401,14 +401,14 @@ async fn with_parents(
                 send_community(tx, &mut out, &mut sent, membership.community_id).await?;
             }
             SyncedRow::Post(post) => {
-                send_user(tx, &mut out, &mut sent, post.owner_id).await?;
+                send_user(tx, &mut out, &mut sent, post.user_id).await?;
             }
             SyncedRow::File(file) => {
-                send_user(tx, &mut out, &mut sent, file.owner_id).await?;
+                send_user(tx, &mut out, &mut sent, file.user_id).await?;
             }
             SyncedRow::PostCommunity(row) => {
                 if let Some(post) = posts::get_in(tx, row.post_id).await? {
-                    send_user(tx, &mut out, &mut sent, post.owner_id).await?;
+                    send_user(tx, &mut out, &mut sent, post.user_id).await?;
                     send(
                         &mut out,
                         &mut sent,
@@ -659,7 +659,7 @@ impl Transport for InProcess<'_> {
             .map_err(refused_file)?;
         let bytes = files::bucket(self.server)
             .map_err(refused_file)?
-            .get(&files::storage_key(shown.file.owner_id, id))
+            .get(&files::storage_key(shown.file.user_id, id))
             .await
             .map_err(|error| SyncError::Transport(error.to_string()))?;
         tokio::fs::write(path, bytes)

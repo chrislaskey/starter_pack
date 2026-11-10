@@ -44,15 +44,16 @@ pub struct S3Settings {
     pub access_key_id: String,
     pub secret_access_key: SecretString,
     /// Where the bucket's objects are read from by anyone, such as a CDN,
-    /// without a trailing slash.
-    pub public_url: String,
+    /// without a trailing slash. None for a private bucket, read through
+    /// signed URLs only.
+    pub public_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Storage {
     S3 {
         store: Arc<AmazonS3>,
-        public_url: String,
+        public_url: Option<String>,
     },
     /// For tests: the server's half works, and a test puts the files
     /// where a device's upload would have.
@@ -73,7 +74,9 @@ impl Storage {
         }
         Ok(Storage::S3 {
             store: Arc::new(builder.build()?),
-            public_url: settings.public_url.trim_end_matches('/').to_string(),
+            public_url: settings
+                .public_url
+                .map(|url| url.trim_end_matches('/').to_string()),
         })
     }
 
@@ -192,11 +195,17 @@ impl Storage {
         Ok(())
     }
 
-    /// Where anyone reads the file at the key.
-    pub fn public_url(&self, key: &str) -> String {
+    /// Where anyone reads the file at the key, in a public bucket.
+    pub fn public_url(&self, key: &str) -> Result<String, StorageError> {
         match self {
-            Storage::S3 { public_url, .. } => format!("{public_url}/{key}"),
-            Storage::Memory { .. } => format!("memory:///{key}"),
+            Storage::S3 {
+                public_url: Some(public_url),
+                ..
+            } => Ok(format!("{public_url}/{key}")),
+            Storage::S3 {
+                public_url: None, ..
+            } => Err(StorageError("a private bucket has no public URL".into())),
+            Storage::Memory { .. } => Ok(format!("memory:///{key}")),
         }
     }
 

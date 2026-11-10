@@ -36,7 +36,7 @@ const UPDATE_FIELDS: &[&str] = &["body", "deleted_at"];
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Post {
     pub id: Uuid,
-    pub owner_id: Uuid,
+    pub user_id: Uuid,
     pub body: String,
     pub inserted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -229,8 +229,8 @@ async fn with_owners_and_communities(
     tx: &mut Transaction,
     posts: Vec<Post>,
 ) -> Result<Vec<PostWithOwnerAndCommunities>, PostError> {
-    let owner_ids: Vec<Uuid> = posts.iter().map(|post| post.owner_id).collect();
-    let owners = users::list_by_ids(tx, &owner_ids)
+    let user_ids: Vec<Uuid> = posts.iter().map(|post| post.user_id).collect();
+    let owners = users::list_by_ids(tx, &user_ids)
         .await
         .map_err(|error| PostError::Invalid(error.to_string()))?;
     let post_ids: Vec<Uuid> = posts.iter().map(|post| post.id).collect();
@@ -244,7 +244,7 @@ async fn with_owners_and_communities(
         .map(|post| {
             let owner = owners
                 .iter()
-                .find(|owner| owner.id == post.owner_id)
+                .find(|owner| owner.id == post.user_id)
                 .cloned()
                 .ok_or(PostError::Invalid(format!("post {} has no owner", post.id)))?;
             let communities = rows
@@ -294,7 +294,7 @@ async fn get_live(tx: &mut Transaction, user: &User, id: Uuid) -> Result<Post, P
 /// The live post, if the user owns it.
 async fn get_own(tx: &mut Transaction, user: &User, id: Uuid) -> Result<Post, PostError> {
     let post = get_live(tx, user, id).await?;
-    if post.owner_id != user.id {
+    if post.user_id != user.id {
         return Err(PostError::NotOwner);
     }
     Ok(post)
@@ -360,7 +360,7 @@ pub(crate) async fn apply_in(
             };
             let blank = Post {
                 id: event.row_id,
-                owner_id: user.id,
+                user_id: user.id,
                 body: String::new(),
                 inserted_at: now,
                 updated_at: now,
@@ -380,7 +380,7 @@ pub(crate) async fn apply_in(
             let Some(post) = get_in(tx, event.row_id).await? else {
                 return rejected(event, "unknown_post", None);
             };
-            if post.owner_id != user.id {
+            if post.user_id != user.id {
                 return rejected(event, "not_owner", Some(post));
             }
             let (changes, conflicts) = events::merge(
@@ -539,7 +539,7 @@ mod tests {
             let post = create(&deployment, &alice, "alice's", &[])
                 .await
                 .expect("a post");
-            assert_eq!(post.owner_id, alice.id);
+            assert_eq!(post.user_id, alice.id);
 
             assert!(list(&deployment, &bob).await.expect("the posts").is_empty());
             let error = get(&deployment, &bob, post.id)
@@ -625,7 +625,7 @@ mod tests {
             .expect("a post");
         assert_eq!(post.version, 0);
         assert_eq!(post.last_synced_at, None);
-        assert_eq!(post.owner_id, alice.id);
+        assert_eq!(post.user_id, alice.id);
         assert_eq!(
             events_with_status(&deployment, EventStatus::Pending).await,
             1
@@ -765,7 +765,7 @@ mod tests {
                 post.id,
                 1,
                 fields(json!({})),
-                fields(json!({ "owner_id": Uuid::now_v7(), "body": "x" })),
+                fields(json!({ "user_id": Uuid::now_v7(), "body": "x" })),
                 now(),
             );
 
@@ -773,7 +773,7 @@ mod tests {
                 .await
                 .expect("answered");
             assert_eq!(answer.status, AnswerStatus::Rejected);
-            assert_eq!(answer.reason.as_deref(), Some("not_editable: owner_id"));
+            assert_eq!(answer.reason.as_deref(), Some("not_editable: user_id"));
             assert_eq!(
                 get(&deployment, &alice, post.id)
                     .await

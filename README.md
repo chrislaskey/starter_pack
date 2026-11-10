@@ -49,6 +49,8 @@ Inside the Tauri app each is a command of the same name
 | `filesDelete(id)` | `DELETE /api/files/:id`, 204 |
 | `filesContentUrl(id)` | `/api/files/:id/content`, a redirect to the bytes for an `<img>`; in the app the `files` protocol, serving the device's copy |
 | `filesDownload(id)`, `filesDownloadSupported()` | the same URL with `?download=1`; in the desktop app a copy into Downloads |
+| `filesCopy(id)`, `filesCopySupported()` | the app only, macOS so far: the image onto the clipboard |
+| `filesCacheGet()`, `filesCacheDelete()` | the app only: the copies of synced files kept on the device, and removing them |
 | `conflictsList()`, `conflictsReapply(id)`, `conflictsTryAgain(id)`, `conflictsLetGo(id)` | none: the web has nothing to resolve |
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
@@ -85,7 +87,7 @@ converge is under "Sync".
 ## Who the user is
 
 Every core function takes the `users::User` acting (`core/src/users.rs`):
-what they write is theirs, `owner_id` on a post, and what they read is
+what they write is theirs, `user_id` on a post, and what they read is
 what they own or what is in a community of theirs, see
 [Communities](#communities). `app_users` is the app's view of each account, one row
 per person with their email, written by the server at sign-up and
@@ -472,7 +474,8 @@ cargo run -p app_web                        # http://localhost:4000, serving sve
 
 The web server reads `PORT`, `DATABASE_URL`, `SVELTE_DIST` (default
 `svelte/dist`), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`,
-`STORAGE_BUCKET` with `STORAGE_ENDPOINT`, `STORAGE_REGION`,
+`STORAGE_BUCKET` (public, for pictures) and `STORAGE_PRIVATE_BUCKET`
+(for files) with `STORAGE_ENDPOINT`, `STORAGE_REGION`,
 `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` and
 `STORAGE_PUBLIC_URL` (`bin/storage env` prints Garage's), and
 `TRUST_PROXY_HEADERS`, and logs with `RUST_LOG` (default

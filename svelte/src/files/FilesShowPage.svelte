@@ -1,13 +1,16 @@
 <!-- One file, at /files/:id: its bytes shown as the server says its
      type is shown, an image in place, a text or PDF file in a frame,
      anything else by its name and size; with Download, Rename and
-     Delete. -->
+     Delete. A click on an image copies it to the clipboard, where the
+     device can. -->
 <script>
   import AnimationsToggle from "../lib/AnimationsToggle.svelte";
   import AppNav from "../lib/AppNav.svelte";
   import FileImage from "../lib/FileImage.svelte";
   import {
     filesContentUrl,
+    filesCopy,
+    filesCopySupported,
     filesDelete,
     filesDownload,
     filesDownloadSupported,
@@ -21,12 +24,25 @@
   const id = pathParams().id;
   let shown = $state();
   let canDownload = $state(false);
+  let canCopy = $state(false);
+  let copied = $state(false);
   let saved = $state("");
   let error = $state("");
 
   async function load() {
     try {
-      [shown, canDownload] = await Promise.all([filesGet(id), filesDownloadSupported()]);
+      [shown, canDownload, canCopy] = await Promise.all([filesGet(id), filesDownloadSupported(), filesCopySupported()]);
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  async function copy() {
+    error = "";
+    try {
+      await filesCopy(id);
+      copied = true;
+      setTimeout(() => (copied = false), 2000);
     } catch (problem) {
       error = String(problem);
     }
@@ -81,9 +97,16 @@
 
     {#if shown.shown_as === "image"}
       <AnimationsToggle />
-      <div>
-        <FileImage src={filesContentUrl(id)} alt={shown.file.name} class="file-shown" />
-      </div>
+      {#if canCopy}
+        <button type="button" class="cursor-copy self-start text-left" title="Copy to the clipboard" onclick={copy}>
+          <FileImage src={filesContentUrl(id)} alt={shown.file.name} class="file-shown" />
+        </button>
+        <p class="muted">{copied ? "Copied" : "Click the image to copy it"}</p>
+      {:else}
+        <div>
+          <FileImage src={filesContentUrl(id)} alt={shown.file.name} class="file-shown" />
+        </div>
+      {/if}
     {:else if shown.shown_as === "text"}
       <iframe src={filesContentUrl(id)} title={shown.file.name} class="file-shown" sandbox=""></iframe>
     {:else if shown.shown_as === "pdf"}

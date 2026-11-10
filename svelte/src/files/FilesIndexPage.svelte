@@ -1,20 +1,34 @@
 <!-- The person's files, newest first, at /files: each with a small
      picture when it is an image, its name, its size, and where it
-     stands when it is not on the server yet. A click opens its page. -->
+     stands when it is not on the server yet. A click opens its page. At
+     the bottom in the app, the copies kept on this device and a button
+     that removes them. -->
 <script>
   import AnimationsToggle from "../lib/AnimationsToggle.svelte";
   import AppNav from "../lib/AppNav.svelte";
   import FileImage from "../lib/FileImage.svelte";
-  import { filesContentUrl, filesList, onSynced } from "../lib/core/index.js";
+  import { filesCacheDelete, filesCacheGet, filesContentUrl, filesList, onSynced } from "../lib/core/index.js";
   import { filesNewUrl, filesShowUrl } from "../lib/routes.js";
   import { fileSize } from "./file_size.js";
 
   let files = $state([]);
   let error = $state("");
+  /** @type {{count: number, bytes: number} | null} */
+  let cache = $state(null);
 
   async function load() {
     try {
       files = await filesList();
+      cache = await filesCacheGet();
+    } catch (problem) {
+      error = String(problem);
+    }
+  }
+
+  async function removeCached() {
+    try {
+      await filesCacheDelete();
+      cache = await filesCacheGet();
     } catch (problem) {
       error = String(problem);
     }
@@ -64,4 +78,15 @@
       </li>
     {/each}
   </ul>
+
+  {#if cache}
+    <div class="flex items-center justify-between gap-3">
+      <p class="muted">
+        {cache.count}
+        {cache.count === 1 ? "file" : "files"} kept on this device, {fileSize(cache.bytes)}. Removing them frees the space;
+        each is fetched again when it is next shown.
+      </p>
+      <button class="btn btn-sm shrink-0" disabled={cache.count === 0} onclick={removeCached}>Remove cached files</button>
+    </div>
+  {/if}
 </main>

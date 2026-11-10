@@ -4,9 +4,10 @@
 //! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
 //! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
 //! beside this crate when unset, or a PostgreSQL database. The email it
-//! sends goes where `MAILER` says, see `mailer`, uploads and files' bytes
-//! go to the bucket `STORAGE_BUCKET` names, see `storage`, and its accounts routes are
-//! rate limited, see `rate_limits`.
+//! sends goes where `MAILER` says, see `mailer`, pictures go to the bucket
+//! `STORAGE_BUCKET` names and files' bytes to `STORAGE_PRIVATE_BUCKET`'s,
+//! see `storage`, and its accounts routes are rate limited, see
+//! `rate_limits`.
 //!
 //! With arguments it runs a command on that database instead and exits:
 //! `purge` removes what was deleted longer ago than the retention
@@ -77,9 +78,9 @@ async fn main() -> Result<(), String> {
 
     let deployment = database::open().await?;
     let mailer = mailer::open()?;
-    let storage = storage::open()?;
-    let deployment = match &storage {
-        Some(storage) => deployment.with_file_store(FileStore::Bucket(storage.clone())),
+    let storage = storage::open_public()?;
+    let deployment = match storage::open_private()? {
+        Some(private) => deployment.with_file_store(FileStore::Bucket(private)),
         None => deployment,
     };
     let arguments: Vec<String> = env::args().skip(1).collect();

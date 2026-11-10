@@ -16,7 +16,7 @@ use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use app_core::files::{self, File, FileError, FileWithState};
+use app_core::files::{self, File, FileError, FileWithState, FilesCache};
 
 use crate::avatars::FormError;
 use crate::device_accounts::DeviceAccounts;
@@ -116,6 +116,86 @@ pub async fn files_delete(
         .map_err(|error| error.to_string())?;
     sync::spawn(app);
     Ok(())
+}
+
+/// The copies this device keeps of files the server holds too.
+#[tauri::command]
+pub async fn files_cache_get(device: State<'_, DeviceAccounts>) -> Result<FilesCache, String> {
+    let (deployment, user) = signed_in(&device).await?;
+    files::cache_get(&deployment, &user)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Removes those copies, and answers what went.
+#[tauri::command]
+pub async fn files_cache_delete(device: State<'_, DeviceAccounts>) -> Result<FilesCache, String> {
+    let (deployment, user) = signed_in(&device).await?;
+    files::cache_delete(&deployment, &user)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Whether this build copies an image to the clipboard: macOS does.
+#[tauri::command]
+pub fn files_copy_supported() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Copies the image to the clipboard, from this device's copy of it,
+/// fetched first when there is none.
+#[tauri::command]
+pub async fn files_copy(
+    app: AppHandle,
+    device: State<'_, DeviceAccounts>,
+    server: State<'_, SyncServer>,
+    id: Uuid,
+) -> Result<(), String> {
+    let (deployment, user) = signed_in(&device).await?;
+    let shown = files::get(&deployment, &user, id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let path = files::local_copy(&deployment, server.transport(), &user, id)
+        .await
+        .map_err(|error| error.to_string())?;
+    copy_image(&app, &shown.file.content_type, path).await
+}
+
+/// AppKit's pasteboard and images are the main thread's.
+#[cfg(target_os = "macos")]
+async fn copy_image(
+    app: &AppHandle,
+    content_type: &str,
+    path: std::path::PathBuf,
+) -> Result<(), String> {
+    use crate::macos::pasteboard::{self, ClipboardImage};
+
+    let uniform_type = pasteboard::uniform_type_of(content_type)
+        .ok_or("This kind of image cannot be copied yet")?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (copied, result) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let image = ClipboardImage {
+            bytes: &bytes,
+            uniform_type,
+            file: &path,
+        };
+        // The command stopped waiting if this fails; nothing to tell
+        let _ = copied.send(pasteboard::copy_image(image).map(|_types| ()));
+    })
+    .map_err(|error| error.to_string())?;
+    result.await.map_err(|error| error.to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn copy_image(
+    _app: &AppHandle,
+    _content_type: &str,
+    _path: std::path::PathBuf,
+) -> Result<(), String> {
+    Err("Copying is not available on this device yet".to_string())
 }
 
 /// Whether this build saves a copy of a file outside the app: the

@@ -76,7 +76,7 @@ pub const DOWNLOAD_URL_LIFETIME: std::time::Duration = std::time::Duration::from
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct File {
     pub id: Uuid,
-    pub owner_id: Uuid,
+    pub user_id: Uuid,
     pub name: String,
     pub content_type: String,
     /// In bytes.
@@ -140,6 +140,15 @@ pub struct FileWithState {
     pub shown_as: ShownAs,
     pub state: FileState,
     pub error: Option<String>,
+}
+
+/// The copies a device keeps of files the server holds too: how many,
+/// and their size. Removing them loses nothing; each is fetched again
+/// the next time it is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesCache {
+    pub count: usize,
+    pub bytes: u64,
 }
 
 /// A file to add: what the person picked, under the id its bytes are
@@ -414,7 +423,7 @@ pub async fn content_url(
     let content_disposition = as_attachment.then(|| attachment_named(&file.name));
     Ok(storage
         .download_url(
-            &storage_key(file.owner_id, file.id),
+            &storage_key(file.user_id, file.id),
             DOWNLOAD_URL_LIFETIME,
             content_disposition.as_deref(),
         )
@@ -594,7 +603,7 @@ pub async fn delete_unreferenced(
     let mut tx = deployment.begin().await?;
     let referenced: BTreeSet<String> = sql!(&mut tx, files::list_ids())?
         .into_iter()
-        .map(|(id, owner_id, _deleted)| storage_key(owner_id, id))
+        .map(|(id, user_id, _deleted)| storage_key(user_id, id))
         .collect();
     tx.commit().await?;
 
@@ -653,6 +662,47 @@ pub async fn delete_unreferenced_on_device(
     Ok(removed)
 }
 
+/// The copies on this device of the user's synced files.
+pub async fn cache_get(deployment: &Deployment, user: &User) -> Result<FilesCache, FileError> {
+    let mut cache = FilesCache::default();
+    for (_path, size) in cached(deployment, user).await? {
+        cache.count += 1;
+        cache.bytes += size;
+    }
+    Ok(cache)
+}
+
+/// Removes the copies on this device of the user's synced files, and
+/// answers what went. A waiting or refused file stays: its bytes are
+/// nowhere else.
+pub async fn cache_delete(deployment: &Deployment, user: &User) -> Result<FilesCache, FileError> {
+    let mut removed = FilesCache::default();
+    for (path, size) in cached(deployment, user).await? {
+        delete_local(&path).await?;
+        removed.count += 1;
+        removed.bytes += size;
+    }
+    Ok(removed)
+}
+
+/// Where each synced file of the user's is on this device, with its
+/// size, for those that are.
+async fn cached(deployment: &Deployment, user: &User) -> Result<Vec<(PathBuf, u64)>, FileError> {
+    let mut cached = Vec::new();
+    for shown in list(deployment, user).await? {
+        if shown.state != FileState::Synced {
+            continue;
+        }
+        let path = local_path(deployment, shown.file.id)?;
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) => cached.push((path, metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(cached)
+}
+
 /// The file as it travels on the wire.
 pub fn table_row(file: &File) -> Result<TableRow, FileError> {
     Ok(TableRow {
@@ -662,8 +712,8 @@ pub fn table_row(file: &File) -> Result<TableRow, FileError> {
 }
 
 /// Where a file's bytes are in the bucket.
-pub fn storage_key(owner_id: Uuid, id: Uuid) -> String {
-    format!("{KEY_PREFIX}/{owner_id}/{id}")
+pub fn storage_key(user_id: Uuid, id: Uuid) -> String {
+    format!("{KEY_PREFIX}/{user_id}/{id}")
 }
 
 /// Writes the server's row over the device's, unless an event of the
@@ -805,7 +855,7 @@ async fn create_of(tx: &mut Transaction, id: Uuid) -> Result<Option<StoredEvent>
 /// if it were not there.
 async fn get_own(tx: &mut Transaction, user: &User, id: Uuid) -> Result<File, FileError> {
     match get_in(tx, id).await? {
-        Some(file) if file.deleted_at.is_none() && file.owner_id == user.id => Ok(file),
+        Some(file) if file.deleted_at.is_none() && file.user_id == user.id => Ok(file),
         _ => Err(FileError::NotFound { id }),
     }
 }
@@ -946,7 +996,7 @@ pub(crate) async fn apply_in(
         EventKind::Create => {
             if let Some(existing) = get_in(tx, event.row_id).await? {
                 // Another user's row is none of this user's business
-                let existing = (existing.owner_id == user.id).then_some(existing);
+                let existing = (existing.user_id == user.id).then_some(existing);
                 return rejected(event, "exists", existing);
             }
             let (version, last_synced_at) = match role {
@@ -955,7 +1005,7 @@ pub(crate) async fn apply_in(
             };
             let blank = File {
                 id: event.row_id,
-                owner_id: user.id,
+                user_id: user.id,
                 name: String::new(),
                 content_type: String::new(),
                 size: 0,
@@ -980,7 +1030,7 @@ pub(crate) async fn apply_in(
             let Some(file) = get_in(tx, event.row_id).await? else {
                 return rejected(event, "unknown_file", None);
             };
-            if file.owner_id != user.id {
+            if file.user_id != user.id {
                 return rejected(event, "not_owner", None);
             }
             let (changes, conflicts) = events::merge(
@@ -1499,6 +1549,43 @@ pub(crate) mod tests {
                 .await
                 .expect_err("not bob's");
             assert!(matches!(error, FileError::NotFound { .. }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_cache_delete_removes_synced_copies_and_leaves_waiting_files() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (device, _folder) = device_with_folder(&alice, &token).await;
+            let transport = InProcess { server: &server };
+            let synced = create_with_bytes(&device, &alice, "notes.txt", "text/plain", b"notes")
+                .await
+                .expect("a file");
+            sync::run(&device, &transport).await.expect("a sync");
+            let waiting = create_with_bytes(&device, &alice, "more.txt", "text/plain", b"more")
+                .await
+                .expect("a file");
+
+            let cache = cache_get(&device, &alice).await.expect("the cache");
+            assert_eq!(cache, FilesCache { count: 1, bytes: 5 });
+            let removed = cache_delete(&device, &alice).await.expect("removed");
+            assert_eq!(removed, cache);
+            assert!(!local_path(&device, synced.id).expect("a path").exists());
+            assert!(
+                local_path(&device, waiting.id).expect("a path").exists(),
+                "a waiting file is the only copy"
+            );
+            assert_eq!(
+                cache_get(&device, &alice).await.expect("the cache"),
+                FilesCache::default()
+            );
+
+            let path = local_copy(&device, &transport, &alice, synced.id)
+                .await
+                .expect("fetched again");
+            assert_eq!(std::fs::read(&path).expect("the bytes"), b"notes");
         })
         .await;
     }
@@ -2047,7 +2134,7 @@ pub(crate) mod tests {
                 .expect("the upload");
             let file = create(&deployment, &alice, &new).await.expect("a file");
             assert_eq!(file.id, new.id);
-            assert_eq!(file.owner_id, alice.id);
+            assert_eq!(file.user_id, alice.id);
             assert_eq!(file.size, 10);
             assert_eq!(file.version, 1);
             let listed = list(&deployment, &alice).await.expect("the files");

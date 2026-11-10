@@ -22,12 +22,12 @@ Built as written, in `core/src/files.rs`; what was left out is
   table posts use.
 - **Any type, up to 25 MB**, one constant. The server checks the size
   and nothing else; the content type is the device's word.
-- **Private in the bucket**, at `files/<owner id>/<file id>`, a key
-  worked out from the row and never stored. Reading is through a
-  download URL the server signs for a user who sees the row. The
-  bucket must not answer `files/` without a signature: dev's shares
-  the avatars' bucket, which Garage serves whole by its web endpoint,
-  see `docs/suggestions/files.md`.
+- **Private, in a bucket of their own**, `STORAGE_PRIVATE_BUCKET`, at
+  `files/<owner id>/<file id>`, a key worked out from the row and never
+  stored. Reading is through a download URL the server signs for a
+  user who sees the row. Pictures stay in the public bucket,
+  `STORAGE_BUCKET`: public or private is a whole bucket's on most
+  stores.
 - **On a device, one folder per account holds every file's bytes**,
   uploaded or not, each under its bare id. In the app's data directory,
   never the OS cache: a file not yet uploaded is the only copy.
@@ -38,7 +38,10 @@ Built as written, in `core/src/files.rs`; what was left out is
   in the bucket before it applies a create.
 - **A device keeps the bytes**: the one that added a file after the
   upload, another from the first time it shows the file. Nothing is
-  removed to save space yet.
+  removed on its own; "Remove cached files" at the foot of the files
+  index, `files::cache_delete`, removes the copies of synced files,
+  each fetched again when next shown, and leaves waiting and refused
+  files, whose bytes are nowhere else.
 - **A file is waiting, refused or synced**, and never stuck: waiting
   retries on its own, refused waits for the person, and removing a file
   in either state needs nothing from the server.
@@ -52,7 +55,7 @@ Built as written, in `core/src/files.rs`; what was left out is
 | Column | Meaning |
 | --- | --- |
 | `id` | UUIDv7 from the device that added it; the server's on the web |
-| `owner_id` | the owner, as on a post |
+| `user_id` | the owner, as on a post |
 | `name` | what the person sees, editable |
 | `content_type` | from the file picked, fixed |
 | `size` | bytes, fixed |
@@ -194,6 +197,12 @@ frame drawn on a canvas. The choice is kept as the theme is, in
 is off when it asks for reduced motion, then on or off as the person
 sets it, whatever the system says.
 
+**Copy.** On the show page a click on an image copies it to the
+clipboard, in the macOS app only so far (`tauri/src/macos/pasteboard.rs`):
+one clipboard item holding the file, its own bytes, a PNG and a TIFF,
+so an animated GIF pastes animated where GIFs are taken and as a still
+elsewhere. The other platforms are in `docs/suggestions/files.md`.
+
 **Download** is a button on the show page only: on the web the content
 URL asking for an attachment; in the desktop app a copy into the
 Downloads folder; absent on phones.
@@ -238,10 +247,8 @@ again before each delete.
 Communities for files; replacing content; multipart and resumable
 uploads; uploads while the app is in the background; audio and video,
 which need the protocol to answer ranges; download on phones, through
-the share sheet; the size of the cached files with a "Remove cached
-files" button, which leaves waiting and refused files; copying an image
-to the clipboard on a click, the quick search popup on the branch
-`v2-elixir-and-rust` being the pattern; thumbnails; checksums; a file
+the share sheet; copying an image on the platforms other than macOS;
+thumbnails; checksums; a file
 attached to a post. See `docs/suggestions/files.md`.
 
 ## Build order

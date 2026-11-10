@@ -49,7 +49,7 @@
       </p>
       <p class="whitespace-pre-wrap">{shown.post.body}</p>
     </article>
-    {#if me && shown.post.owner_id === me.id}
+    {#if me && shown.post.user_id === me.id}
       <div class="flex gap-2">
         <a href={postsEditUrl(shown.post.id)} class="btn btn-sm">Edit</a>
         <button type="button" class="btn btn-sm btn-ghost" onclick={remove}>Delete</button>

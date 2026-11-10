@@ -12,7 +12,7 @@ use crate::sync::Cursor;
 #[derive(FromRow)]
 struct PostRow {
     id: Uuid,
-    owner_id: Uuid,
+    user_id: Uuid,
     body: String,
     inserted_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -26,7 +26,7 @@ impl From<PostRow> for Post {
     fn from(row: PostRow) -> Post {
         Post {
             id: row.id,
-            owner_id: row.owner_id,
+            user_id: row.user_id,
             body: row.body,
             inserted_at: row.inserted_at,
             updated_at: row.updated_at,
@@ -41,7 +41,7 @@ impl From<PostRow> for Post {
 macro_rules! select {
     ($($rest:expr),+ $(,)?) => {
         concat!(
-            "SELECT id, owner_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_posts ",
+            "SELECT id, user_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id FROM app_posts ",
             $($rest),+
         )
     };
@@ -51,7 +51,7 @@ macro_rules! select {
 /// community they are a live member of.
 macro_rules! visible_to {
     () => {
-        "(owner_id = $1 OR id IN (
+        "(user_id = $1 OR id IN (
             SELECT pc.post_id FROM app_posts_communities pc
             WHERE pc.deleted_at IS NULL AND pc.community_id IN (SELECT community_id FROM app_users_communities WHERE user_id = $1 AND deleted_at IS NULL)))"
     };
@@ -81,7 +81,7 @@ pub async fn delete_unreachable(
     user_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(concat!(
-        "DELETE FROM app_posts WHERE owner_id != $1 AND NOT ",
+        "DELETE FROM app_posts WHERE user_id != $1 AND NOT ",
         visible_to!()
     ))
     .bind(user_id)
@@ -137,11 +137,11 @@ pub async fn list_synced_after(
 
 pub async fn insert(connection: &mut PgConnection, post: &Post) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_posts (id, owner_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_posts (id, user_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(post.id)
-    .bind(post.owner_id)
+    .bind(post.user_id)
     .bind(&post.body)
     .bind(post.inserted_at)
     .bind(post.updated_at)
@@ -175,15 +175,15 @@ pub async fn update(connection: &mut PgConnection, post: &Post) -> Result<bool, 
 /// Writes the server's row over the device's, or inserts it.
 pub async fn upsert(connection: &mut PgConnection, post: &Post) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO app_posts (id, owner_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
+        "INSERT INTO app_posts (id, user_id, body, inserted_at, updated_at, version, last_synced_at, deleted_at, deleted_by_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (id) DO UPDATE SET
-           owner_id = excluded.owner_id, body = excluded.body, inserted_at = excluded.inserted_at,
+           user_id = excluded.user_id, body = excluded.body, inserted_at = excluded.inserted_at,
            updated_at = excluded.updated_at, version = excluded.version, last_synced_at = excluded.last_synced_at,
            deleted_at = excluded.deleted_at, deleted_by_id = excluded.deleted_by_id",
     )
     .bind(post.id)
-    .bind(post.owner_id)
+    .bind(post.user_id)
     .bind(&post.body)
     .bind(post.inserted_at)
     .bind(post.updated_at)

@@ -54,7 +54,7 @@ macro_rules! select {
 /// one in a community they are a live member of.
 macro_rules! visible_to {
     () => {
-        "(community_id IN (SELECT community_id FROM app_users_communities WHERE user_id = $1 AND deleted_at IS NULL) OR post_id IN (SELECT id FROM app_posts WHERE owner_id = $1))"
+        "(community_id IN (SELECT community_id FROM app_users_communities WHERE user_id = $1 AND deleted_at IS NULL) OR post_id IN (SELECT id FROM app_posts WHERE user_id = $1))"
     };
 }
 

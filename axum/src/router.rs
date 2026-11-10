@@ -801,7 +801,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(created["owner_id"], body["user"]["id"]);
+        assert_eq!(created["user_id"], body["user"]["id"]);
         let (_, bobs) = send_as(&router.router, Some(token), Method::GET, "/api/posts", None).await;
         assert_eq!(bobs[0]["post"], created);
         let (_, alices) = get(&router, "/api/posts").await;

@@ -198,7 +198,7 @@ pub async fn update(
     }
     let mut tx = deployment.begin().await?;
     let user =
-        users::update_avatar_url_in(&mut tx, user.id, &storage.public_url(&request.key)).await?;
+        users::update_avatar_url_in(&mut tx, user.id, &storage.public_url(&request.key)?).await?;
     tx.commit().await?;
     Ok(user)
 }
