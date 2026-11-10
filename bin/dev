@@ -97,11 +97,15 @@ list_port_listeners() {
 }
 
 # The ports this run listens on that another program holds, with the
-# programs, one per line. The web port only when the web target runs: the
-# apps alone send to a web server started elsewhere.
+# programs, one per line. The web port and Garage's only when the web
+# target runs: the apps alone send to a web server started elsewhere.
 list_taken_ports() {
-  local port listeners ports=("$vite_port")
-  [ "$starts_web" = true ] && ports+=("$web_port")
+  local port listeners storage_port=$((web_port + 2000)) ports=("$vite_port")
+  if [ "$starts_web" = true ]; then
+    ports+=("$web_port")
+    command -v garage > /dev/null &&
+      ports+=("$storage_port" $((storage_port + 1)) $((storage_port + 2)) $((storage_port + 3)))
+  fi
   for port in "${ports[@]}"; do
     listeners=$(list_port_listeners "$port")
     [ -z "$listeners" ] || echo "  $port, held by ${listeners% }"
@@ -183,12 +187,16 @@ print(sorted(found)[-1][1] if found else "")' "$name")
 
 pids=()
 # Stops every target and the dev server when one of them is closed, or this
-# script is interrupted.
+# script is interrupted, and waits for them, so a run started right after
+# finds the ports free.
 stop_all() {
   trap - EXIT INT TERM
-  for pid in "${pids[@]}"; do
+  for pid in ${pids[@]+"${pids[@]}"}; do
     pkill -P "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
+  done
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    wait "$pid" 2>/dev/null || true
   done
 }
 trap stop_all EXIT INT TERM
@@ -213,18 +221,29 @@ sign_in_url="http://localhost:$vite_port/accounts/sign-in"
 # from here (tauri/src/server_urls.rs).
 tauri_config="{\"build\":{\"devUrl\":\"http://localhost:$vite_port\",\"beforeDevCommand\":\"\"},\"plugins\":{\"starter-pack\":{\"syncServerUrl\":\"http://localhost:$web_port\",\"browserSignInUrl\":\"$sign_in_url\"}}}"
 
+# Up once set up, its key written, and its S3 API answering; a failure
+# when bin/storage exits first or is not up in 30 seconds.
+wait_for_storage() {
+  local pid=$1 tries=0
+  until STORAGE_PORT="$storage_port" "$ROOT/bin/storage" env > /dev/null 2>&1 &&
+    curl -s -o /dev/null "http://127.0.0.1:$storage_port/"; do
+    kill -0 "$pid" 2>/dev/null || fail "bin/storage stopped before Garage was up; see its output above"
+    tries=$((tries + 1))
+    [ "$tries" -lt 150 ] || fail "Garage was not up after 30 seconds; see its output above"
+    sleep 0.2
+  done
+}
+
 # Garage, the web server's bucket, when it is installed; without it the
 # server runs with uploads off. Its STORAGE_* variables go to the server
-# once the first start has set it up.
+# once it is set up and answering.
 storage_env=()
 if [ "$starts_web" = true ]; then
   if command -v garage > /dev/null; then
     (STORAGE_PORT="$storage_port" exec "$ROOT/bin/storage" start) &
-    pids+=($!)
-    for _ in $(seq 1 50); do
-      STORAGE_PORT="$storage_port" "$ROOT/bin/storage" env > /dev/null 2>&1 && break
-      sleep 0.2
-    done
+    storage_pid=$!
+    pids+=("$storage_pid")
+    wait_for_storage "$storage_pid"
     while IFS= read -r line; do
       storage_env+=("$line")
     done < <(STORAGE_PORT="$storage_port" "$ROOT/bin/storage" env)

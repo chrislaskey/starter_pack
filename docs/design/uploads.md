@@ -153,7 +153,8 @@ points at, which the sweep deletes.
 ## Dev
 
 `bin/storage start` runs one Garage node under `axum/data/garage/`, set
-up on its first start: the bucket `starter-pack`, readable by anyone
+up on every start, each step only when it is missing, so a setup that
+stopped part way is finished on the next: the bucket `starter-pack`, readable by anyone
 through Garage's web endpoint at `http://starter-pack.web.localhost:<port>`,
 the bucket `starter-pack-private` for files, read through signed URLs
 only (`offline-files-decisions.md`), CORS open to every origin for the
