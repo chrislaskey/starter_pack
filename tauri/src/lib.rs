@@ -4,7 +4,7 @@
 //! `posts_list`, since the commands are one namespace. The app keeps a
 //! SQLite file per account signed in on it and one of them active, see
 //! `device_accounts`; the other commands read and write the active one
-//! as its user, see `users` and `accounts`, and it syncs with the web
+//! as its user, see `current_user` and `accounts`, and it syncs with the web
 //! server, see `sync`. A sign-in happens in the system browser, see
 //! `accounts`. On macOS ⌃⌘T anywhere opens the quick picker, a second
 //! window, see `quick_picker`.
@@ -15,6 +15,8 @@ mod avatars;
 mod clipboard;
 mod communities;
 mod conflicts;
+mod current_community;
+mod current_user;
 mod device_accounts;
 mod files;
 #[cfg(target_os = "macos")]
@@ -25,7 +27,6 @@ mod posts;
 mod quick_picker;
 mod server_urls;
 mod sync;
-mod users;
 
 use tauri::{Manager, WindowEvent};
 
@@ -53,7 +54,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            users::users_me,
+            current_user::current_user_get,
+            current_community::current_community_get,
+            current_community::current_community_update,
             avatars::avatars_create_upload,
             avatars::avatars_update,
             accounts::accounts_sign_in_start,

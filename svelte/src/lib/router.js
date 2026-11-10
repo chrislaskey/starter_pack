@@ -5,11 +5,14 @@
 // Before a page that needs someone signed in, the router asks who is,
 // and sends a visitor to the sign-in page instead when nobody is, or in
 // the app to the accounts on the device, where sign-in is reached from;
-// the app never shows the sign-in pages themselves.
-import { createRouter } from "sv-router";
+// the app never shows the sign-in pages themselves. When it cannot tell,
+// or a page's code does not load, the page says so above it rather than
+// going nowhere (page_load_error.svelte.js).
+import { Navigation, createRouter } from "sv-router";
 import RemountPageOnNavigation from "./RemountPageOnNavigation.svelte";
 import { hasDeviceAccounts } from "./core/index.js";
-import { currentUser } from "./current_user.js";
+import { currentUserLoad } from "./current_user.js";
+import { pageLoadErrorClear, pageLoadErrorShow } from "./page_load_error.svelte.js";
 import {
   ACCOUNTS_INDEX_PATH,
   ACCOUNTS_SIGN_IN_PATH,
@@ -38,16 +41,25 @@ const { navigate, route } = createRouter({
   layout: RemountPageOnNavigation,
   hooks: {
     async beforeLoad({ pathname }) {
+      pageLoadErrorClear();
       // In the app a sign-in happens in the browser, from the accounts page
       if (hasDeviceAccounts && (pathname === ACCOUNTS_SIGN_IN_PATH || pathname === ACCOUNTS_SIGN_UP_PATH)) {
         throw navigateToUrl(accountsIndexUrl());
       }
       if (OPEN_PATHS.includes(pathname)) return;
+      let user;
       try {
-        await currentUser();
-      } catch {
-        throw navigateToUrl(hasDeviceAccounts ? accountsIndexUrl() : accountsSignInUrl());
+        user = await currentUserLoad();
+      } catch (problem) {
+        pageLoadErrorShow(`Could not check who is signed in: ${problem instanceof Error ? problem.message : problem}`);
+        return;
       }
+      if (!user) throw navigateToUrl(hasDeviceAccounts ? accountsIndexUrl() : accountsSignInUrl());
+    },
+    onError(problem) {
+      // A redirect from beforeLoad arrives here too
+      if (problem instanceof Navigation || problem instanceof Promise) return;
+      pageLoadErrorShow(`This page could not load: ${problem instanceof Error ? problem.message : problem}`);
     },
   },
   [HOME_PATH]: () => import("../HomePage.svelte"),

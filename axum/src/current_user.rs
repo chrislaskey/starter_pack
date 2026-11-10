@@ -65,3 +65,8 @@ fn token_of(parts: &Parts) -> Result<String, ApiError> {
         .map(|cookie| cookie.value().to_string())
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Sign in first"))
 }
+
+/// `GET /api/current-user`: the user the request is from.
+pub async fn get(CurrentUser(user): CurrentUser) -> axum::Json<User> {
+    axum::Json(user)
+}

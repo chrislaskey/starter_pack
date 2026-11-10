@@ -158,7 +158,7 @@ fn token_cookie(token: &str, headers: &HeaderMap) -> Cookie<'static> {
         .build()
 }
 
-fn is_localhost(headers: &HeaderMap) -> bool {
+pub(crate) fn is_localhost(headers: &HeaderMap) -> bool {
     let host = headers
         .get(HOST)
         .and_then(|host| host.to_str().ok())

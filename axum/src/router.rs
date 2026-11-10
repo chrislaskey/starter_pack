@@ -9,12 +9,17 @@ use app_core::deployment::Deployment;
 use app_core::mailer::Mailer;
 use axum::Router;
 use axum::extract::FromRef;
-use axum::routing::{delete, get, post, put};
+use axum::http::{Method, StatusCode, Uri};
+use axum::routing::{any, delete, get, post, put};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+use crate::api_error::ApiError;
 use crate::rate_limits::{self, RateLimits};
-use crate::{accounts, avatars, communities, files, memberships, posts, sync, users};
+use crate::{
+    accounts, avatars, communities, current_community, current_user, files, memberships, posts,
+    sync,
+};
 
 /// What every handler may take from the server: the database with its
 /// buckets, where its email goes, and the rate limits; and whether the
@@ -58,7 +63,11 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
 
     Router::new()
         .merge(accounts)
-        .route("/api/users/me", get(users::me))
+        .route("/api/current-user", get(current_user::get))
+        .route(
+            "/api/current-community",
+            get(current_community::get).put(current_community::update),
+        )
         .route("/api/avatars", put(avatars::update))
         .route("/api/avatars/uploads", post(avatars::create_upload))
         .route("/api/posts", get(posts::list).post(posts::create))
@@ -90,9 +99,20 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
         .route("/api/sync/push", post(sync::push))
         .route("/api/sync/pull", post(sync::pull))
         .route("/api/sync/backfill", post(sync::backfill))
+        .route("/api", any(api_not_found))
+        .route("/api/{*path}", any(api_not_found))
         .with_state(state)
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
+}
+
+/// An API path no route has: a JSON 404, so a page asking a server that
+/// lacks the route sees an error and not the pages' HTML.
+async fn api_not_found(method: Method, uri: Uri) -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        format!("The server has no API route {method} {}", uri.path()),
+    )
 }
 
 #[cfg(test)]
@@ -254,14 +274,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn users_me_is_the_tokens_user_and_nobody_without_one() {
+    async fn current_user_is_the_tokens_user_and_nobody_without_one() {
         let (router, _) = test_router().await;
-        let (status, body) = get(&router, "/api/users/me").await;
+        let (status, body) = get(&router, "/api/current-user").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["email"], json!("alice@example.com"));
 
         let (status, body) =
-            send_as(&router.router, None, Method::GET, "/api/users/me", None).await;
+            send_as(&router.router, None, Method::GET, "/api/current-user", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, json!({ "error": "Sign in first" }));
         let (status, _) = send_as(&router.router, None, Method::GET, "/api/posts", None).await;
@@ -300,7 +320,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(user["avatar_url"], json!(format!("memory:///{key}")));
-        let (_, me) = get(&router, "/api/users/me").await;
+        let (_, me) = get(&router, "/api/current-user").await;
         assert_eq!(me["avatar_url"], user["avatar_url"]);
     }
 
@@ -371,7 +391,7 @@ mod tests {
             None,
             Some(&cookie),
             Method::GET,
-            "/api/users/me",
+            "/api/current-user",
             None,
         )
         .await;
@@ -405,7 +425,7 @@ mod tests {
             None,
             Some(&cookie),
             Method::GET,
-            "/api/users/me",
+            "/api/current-user",
             None,
         )
         .await;
@@ -599,7 +619,8 @@ mod tests {
             body,
             json!({ "error": "Too many attempts; try again in a few minutes" })
         );
-        let (status, _) = send_as(&router.router, None, Method::GET, "/api/users/me", None).await;
+        let (status, _) =
+            send_as(&router.router, None, Method::GET, "/api/current-user", None).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -664,7 +685,7 @@ mod tests {
             &router.router,
             Some(token),
             Method::GET,
-            "/api/users/me",
+            "/api/current-user",
             None,
         )
         .await;
@@ -748,6 +769,97 @@ mod tests {
             &router,
             Method::POST,
             "/api/sync/backfill",
+            Some(json!({ "community_id": MISSING_ID })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn current_community_settles_on_the_first_and_keeps_a_choice_in_its_cookie() {
+        let (router, _) = test_router().await;
+        let token = Some(router.token.as_str());
+        let (status, _, none) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::GET,
+            "/api/current-community",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(none, Value::Null, "in no community yet");
+
+        let (_, weeding) = send(
+            &router,
+            Method::POST,
+            "/api/communities",
+            Some(json!({ "name": "Weeding" })),
+        )
+        .await;
+        let (_, baking) = send(
+            &router,
+            Method::POST,
+            "/api/communities",
+            Some(json!({ "name": "Baking" })),
+        )
+        .await;
+        let (_, headers, first) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::GET,
+            "/api/current-community",
+            None,
+        )
+        .await;
+        assert_eq!(first, baking, "the first by name");
+        let set = headers[header::SET_COOKIE].to_str().unwrap();
+        assert!(set.starts_with(&format!(
+            "current_community_id={}",
+            baking["id"].as_str().unwrap()
+        )));
+
+        let (status, headers, chosen) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::PUT,
+            "/api/current-community",
+            Some(json!({ "community_id": weeding["id"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(chosen, weeding);
+        let cookie = headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (_, headers, kept) = send_with(
+            &router.router,
+            token,
+            Some(&cookie),
+            Method::GET,
+            "/api/current-community",
+            None,
+        )
+        .await;
+        assert_eq!(kept, weeding);
+        assert!(
+            headers.get(header::SET_COOKIE).is_none(),
+            "nothing to store"
+        );
+
+        let (status, _, _) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::PUT,
+            "/api/current-community",
             Some(json!({ "community_id": MISSING_ID })),
         )
         .await;
@@ -871,6 +983,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_path_without_a_route_is_a_json_404_not_the_pages() {
+        let (router, _) = test_router().await;
+        let (status, body) = get(&router, "/api/no-such-thing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body,
+            json!({ "error": "The server has no API route GET /api/no-such-thing" })
+        );
+        let (status, _) = send(&router, Method::POST, "/api", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, body) = get(&router, "/posts").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!("<html>pages</html>"),
+            "a page path is still a page"
+        );
+    }
+
+    #[tokio::test]
     async fn posts_get_rejects_an_id_that_is_not_a_uuid() {
         let (router, _) = test_router().await;
         let (status, _) = get(&router, "/api/posts/not-a-uuid").await;
@@ -955,7 +1088,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"], json!("the file did not arrive; try again"));
 
-        let (_, me) = get(&router, "/api/users/me").await;
+        let (_, me) = get(&router, "/api/current-user").await;
         let key = format!("files/{}/{id}", me["id"].as_str().expect("an id"));
         router.storage.put(&key, bytes).await.expect("the upload");
         let (status, file) = send(&router, Method::POST, "/api/files", Some(new)).await;

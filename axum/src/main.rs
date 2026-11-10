@@ -17,6 +17,7 @@ mod accounts;
 mod api_error;
 mod avatars;
 mod communities;
+mod current_community;
 mod current_user;
 mod database;
 mod files;
@@ -28,7 +29,6 @@ mod rate_limits;
 mod router;
 mod storage;
 mod sync;
-mod users;
 
 use std::env;
 use std::net::SocketAddr;

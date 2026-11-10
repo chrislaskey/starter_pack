@@ -19,12 +19,19 @@ pub const WORK_OFFLINE: &str = "work_offline";
 /// server for them, a `users::SignedIn`, or null when nobody is: written
 /// by a sign-in and cleared by a sign-out, see `accounts`.
 pub const SIGNED_IN: &str = "signed_in";
+/// The community the person works in on this device, an id, or null
+/// for none chosen yet, see `current_community`.
+pub const CURRENT_COMMUNITY: &str = "current_community_id";
 
 /// Every setting, with the value a device starts with. Add a setting
 /// here, with its key as a constant above, and read it from the module
 /// that owns it.
 pub fn defaults() -> Vec<(&'static str, Value)> {
-    vec![(WORK_OFFLINE, Value::Bool(false)), (SIGNED_IN, Value::Null)]
+    vec![
+        (WORK_OFFLINE, Value::Bool(false)),
+        (SIGNED_IN, Value::Null),
+        (CURRENT_COMMUNITY, Value::Null),
+    ]
 }
 
 #[derive(Debug, Error)]

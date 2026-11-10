@@ -12,7 +12,9 @@ export { FormError } from "./form_error.js";
 
 const core = isTauri() ? tauriCommands : httpApi;
 
-export const usersMe = core.usersMe;
+export const currentUserGet = core.currentUserGet;
+export const currentCommunityGet = core.currentCommunityGet;
+export const currentCommunityUpdate = core.currentCommunityUpdate;
 export const avatarsCreateUpload = core.avatarsCreateUpload;
 export const avatarsUpdate = core.avatarsUpdate;
 export const accountsSignUp = core.accountsSignUp;

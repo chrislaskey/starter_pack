@@ -19,9 +19,9 @@ use uuid::Uuid;
 use app_core::files::{self, File, FileError, FileWithState, FilesCache};
 
 use crate::avatars::FormError;
+use crate::current_user::signed_in;
 use crate::device_accounts::DeviceAccounts;
 use crate::sync::{self, SyncServer};
-use crate::users::signed_in;
 
 /// How many names a download tries before giving up.
 const FREE_NAME_TRIES: u32 = 1000;

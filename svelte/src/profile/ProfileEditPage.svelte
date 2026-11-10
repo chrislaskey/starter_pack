@@ -4,11 +4,11 @@
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import FieldErrors from "../lib/FieldErrors.svelte";
-  import { FormError, avatarsUpload, usersMe } from "../lib/core/index.js";
-  import { forgetCurrentUser } from "../lib/current_user.js";
+  import { FormError, avatarsUpload, currentUserGet } from "../lib/core/index.js";
+  import { currentUserForget } from "../lib/current_user.js";
 
   /** @type {{email: string, avatar_url: string | null} | null} */
-  let me = $state(null);
+  let currentUser = $state(null);
   /** @type {File | null} */
   let file = $state(null);
   /** @type {Record<string, string[]>} */
@@ -20,7 +20,7 @@
 
   async function load() {
     try {
-      me = await usersMe();
+      currentUser = await currentUserGet();
     } catch (problem) {
       error = String(problem);
     }
@@ -41,8 +41,8 @@
     errors = {};
     error = "";
     try {
-      me = await avatarsUpload(file, (fraction) => (progress = fraction));
-      forgetCurrentUser();
+      currentUser = await avatarsUpload(file, (fraction) => (progress = fraction));
+      currentUserForget();
     } catch (problem) {
       if (problem instanceof FormError) errors = problem.errors;
       error = problem instanceof Error ? problem.message : String(problem);
@@ -58,16 +58,16 @@
 <main class="page">
   <AppNav />
   <h1>Profile</h1>
-  {#if me}
+  {#if currentUser}
     <div class="flex items-center gap-4">
-      {#if me.avatar_url}
-        <img src={me.avatar_url} alt={me.email} class="size-20 rounded-full object-cover" />
+      {#if currentUser.avatar_url}
+        <img src={currentUser.avatar_url} alt={currentUser.email} class="size-20 rounded-full object-cover" />
       {:else}
         <div class="bg-base-300 flex size-20 items-center justify-center rounded-full text-2xl uppercase">
-          {me.email.slice(0, 1)}
+          {currentUser.email.slice(0, 1)}
         </div>
       {/if}
-      <span class="muted">{me.email}</span>
+      <span class="muted">{currentUser.email}</span>
     </div>
     <form onsubmit={save} class="flex flex-col gap-3">
       <label class="flex flex-col gap-1">

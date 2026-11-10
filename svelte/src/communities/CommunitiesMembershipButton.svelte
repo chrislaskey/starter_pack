@@ -2,6 +2,7 @@
      `onchange` runs once the membership changed. -->
 <script>
   import { membershipsJoin, membershipsLeave } from "../lib/core/index.js";
+  import { currentCommunityChanged } from "../lib/current_community.js";
 
   /**
    * @typedef {Object} Props
@@ -20,6 +21,7 @@
     busy = true;
     try {
       await (membership ? membershipsLeave(communityId) : membershipsJoin(communityId));
+      currentCommunityChanged();
       onchange();
     } catch (problem) {
       onerror(String(problem));

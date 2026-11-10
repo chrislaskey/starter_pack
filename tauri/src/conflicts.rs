@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use app_core::conflicts::{self, Conflict};
 
+use crate::current_user::signed_in;
 use crate::device_accounts::DeviceAccounts;
 use crate::sync;
-use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn conflicts_list(device: State<'_, DeviceAccounts>) -> Result<Vec<Conflict>, String> {

@@ -15,12 +15,12 @@ use app_core::posts;
 
 use crate::MAIN_WINDOW;
 use crate::clipboard;
+use crate::current_user::signed_in;
 use crate::device_accounts::DeviceAccounts;
 use crate::files;
 use crate::macos::ScreenRect;
 use crate::macos::running_app::{self, RunningApp};
 use crate::macos::{accessibility, keyboard};
-use crate::users::signed_in;
 
 use super::placement::{self, Placement, TextPlacement};
 use super::{Item, ItemKind, items, panel};

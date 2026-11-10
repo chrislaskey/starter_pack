@@ -17,6 +17,7 @@ pub mod avatars;
 pub mod communities;
 pub mod conflicts;
 pub mod credentials;
+pub mod current_community;
 pub mod database;
 pub mod deployment;
 pub mod device_settings;

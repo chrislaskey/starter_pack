@@ -55,7 +55,9 @@ Inside the Tauri app each is a command of the same name
 | `filesCopy(id)`, `filesCopySupported()` | the image onto the clipboard: on the web as a PNG, in the macOS and iOS apps with its own bytes too |
 | `filesCacheGet()`, `filesCacheDelete()` | the app only: the copies of synced files kept on the device, and removing them |
 | `conflictsList()`, `conflictsReapply(id)`, `conflictsTryAgain(id)`, `conflictsLetGo(id)` | none: the web has nothing to resolve |
-| `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
+| `currentUserGet()` | `GET /api/current-user`; null when nobody is signed in, which the server answers 401 |
+| `currentCommunityGet()` | `GET /api/current-community`, the community the person works in, or null when they are in none |
+| `currentCommunityUpdate(communityId)` | `PUT /api/current-community` with `{"community_id": "..."}`; a member only, else 403 |
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
 | `avatarsUpdate(key)` | `PUT /api/avatars` with `{"key": "..."}`, the user with their `avatar_url` |
 | `avatarsUpload(file, onProgress?)` | both, with the file PUT straight to the bucket between them, see [Forms and uploads](#forms-and-uploads) |
@@ -379,9 +381,20 @@ The New and Edit pages share `posts/PostsForm.svelte`, the body and a
 checkbox per community the person is in. A write that worked navigates
 to the post, or the list after a delete, through `navigateToUrl` in
 `router.js`. The post page shows Edit and Delete to the owner, which it
-tells by `usersMe()`, asked once per visit and kept in
-`svelte/src/lib/current_user.js`; the nav shows who is signed in with
-Sign out, or Sign in and Sign up.
+tells by the current user, `currentUserLoad()`, asked once per visit
+and kept in `svelte/src/lib/current_user.js`; the nav shows who is
+signed in with Sign out, or Sign in and Sign up.
+
+The nav also shows the current community, the one community the person
+works in (`core/src/current_community.rs`), and a click opens a dialog
+of their communities to switch to, which reloads the page. Any page
+asks for it with `currentCommunityLoad()` from
+`svelte/src/lib/current_community.js`; none filters by it yet. It is
+the chosen one while the person is a member of it, else their first by
+name, which is then stored, or null when they are in none. The app
+keeps the choice as the device setting `current_community_id` of the
+signed-in account; the web in the browser's `current_community_id`
+cookie.
 
 ### Accounts on a device
 
@@ -414,7 +427,10 @@ The web has none of this: one browser session, sign in and sign out.
 
 The paths are real paths, named once in `svelte/src/lib/routes.js`, which
 pages link through. Every path is reloadable: the dev server, the web
-server and the Tauri app all answer an unknown path with `index.html`.
+server and the Tauri app all answer an unknown path with `index.html`,
+except under `/api/`, where the web server answers a JSON 404. When the
+router cannot tell who is signed in, or a page's code does not load,
+the page shows why in a banner above it (`svelte/src/lib/page_load_error.svelte.js`).
 
 ### Theme and font
 

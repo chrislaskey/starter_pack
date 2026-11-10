@@ -6,7 +6,7 @@
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import { accountsCode, accountsCodeResend, accountsSignIn } from "../lib/core/index.js";
-  import { forgetCurrentUser } from "../lib/current_user.js";
+  import { currentUserForget } from "../lib/current_user.js";
   import { navigateToUrl } from "../lib/router.js";
   import { accountsSignUpUrl, postsIndexUrl } from "../lib/routes.js";
   import AccountsCodeForm from "./AccountsCodeForm.svelte";
@@ -54,7 +54,7 @@
         deviceCode = answer.code;
         return;
       }
-      forgetCurrentUser();
+      currentUserForget();
       await navigateToUrl(postsIndexUrl());
     });
   }

@@ -7,6 +7,7 @@
   import { tick } from "svelte";
   import FileImage from "../lib/FileImage.svelte";
   import {
+    currentUserGet,
     filesContentUrl,
     onQuickPickerOpened,
     quickPickerAccessibilityRequest,
@@ -14,7 +15,6 @@
     quickPickerList,
     quickPickerOpenApp,
     quickPickerPaste,
-    usersMe,
   } from "../lib/core/index.js";
   import { fileSize } from "../files/file_size.js";
 
@@ -44,9 +44,13 @@
     message = "";
     accessibilityTrusted = opened?.accessibility_trusted ?? true;
     focus();
+    let user = null;
     try {
-      await usersMe();
-    } catch {
+      user = await currentUserGet();
+    } catch (problem) {
+      message = String(problem);
+    }
+    if (!user) {
       signedIn = false;
       items = [];
       focus();

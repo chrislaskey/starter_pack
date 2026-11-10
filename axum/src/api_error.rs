@@ -11,6 +11,7 @@ use app_core::accounts::AccountError;
 use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
 use app_core::credentials::CredentialError;
+use app_core::current_community::CurrentCommunityError;
 use app_core::field_errors::FieldErrors;
 use app_core::files::FileError;
 use app_core::memberships::MembershipError;
@@ -120,6 +121,19 @@ impl ApiError {
 impl From<MembershipError> for ApiError {
     fn from(error: MembershipError) -> Self {
         ApiError::from_membership(&error)
+    }
+}
+
+impl From<CurrentCommunityError> for ApiError {
+    fn from(error: CurrentCommunityError) -> Self {
+        let status = match error {
+            CurrentCommunityError::Community(error) => return error.into(),
+            CurrentCommunityError::NotAMember => StatusCode::FORBIDDEN,
+            CurrentCommunityError::DeviceOnly
+            | CurrentCommunityError::DeviceSettings(_)
+            | CurrentCommunityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
     }
 }
 

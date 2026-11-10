@@ -15,7 +15,7 @@
     deviceAccountsRemove,
     deviceAccountsSwitch,
   } from "../lib/core/index.js";
-  import { forgetCurrentUser } from "../lib/current_user.js";
+  import { currentUserForget } from "../lib/current_user.js";
   import { navigateToUrl } from "../lib/router.js";
   import { postsIndexUrl } from "../lib/routes.js";
   import AccountsRemoveDialog from "./AccountsRemoveDialog.svelte";
@@ -61,7 +61,7 @@
   function switchTo(account) {
     return doThen(async () => {
       await deviceAccountsSwitch(account.user_id);
-      forgetCurrentUser();
+      currentUserForget();
       await navigateToUrl(postsIndexUrl());
     });
   }
@@ -74,7 +74,7 @@
   function openBrowser(email) {
     return doThen(async () => {
       await deviceAccountsDeactivate();
-      forgetCurrentUser();
+      currentUserForget();
       signInError = "";
       await accountsSignInStart(email ?? undefined);
       signingIn = { email };
@@ -93,7 +93,7 @@
         return;
       }
       signingIn = null;
-      forgetCurrentUser();
+      currentUserForget();
       await navigateToUrl(postsIndexUrl());
     });
   }
@@ -118,7 +118,7 @@
       }
       removing = null;
       loss = null;
-      if (account.active) forgetCurrentUser();
+      if (account.active) currentUserForget();
       await load();
     });
   }

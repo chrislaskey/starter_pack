@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use app_core::memberships::{self, Membership};
 
+use crate::current_user::signed_in;
 use crate::device_accounts::DeviceAccounts;
 use crate::sync;
-use crate::users::signed_in;
 
 #[tauri::command]
 pub async fn memberships_join(

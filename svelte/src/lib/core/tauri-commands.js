@@ -3,9 +3,19 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FormError } from "./form_error.js";
 
-/** The user signed in on this device; an error when nobody is. */
-export function usersMe() {
-  return invoke("users_me");
+/** The user signed in on this device; null when nobody is. */
+export function currentUserGet() {
+  return invoke("current_user_get");
+}
+
+/** The community the person works in on this device; null when they are in none. */
+export function currentCommunityGet() {
+  return invoke("current_community_get");
+}
+
+/** @param {string} communityId one the person is a member of */
+export function currentCommunityUpdate(communityId) {
+  return invoke("current_community_update", { communityId });
 }
 
 /**

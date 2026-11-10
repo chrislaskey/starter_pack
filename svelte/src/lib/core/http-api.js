@@ -1,6 +1,8 @@
 // app_core over the web server's JSON API (../../../../axum/src/). An
-// error answer, `{"error": "..."}`, is thrown with its message, as a
-// FormError with the fields' messages when it has `"errors"`.
+// error answer, `{"error": "..."}`, is thrown with its message and its
+// `status`, as a FormError with the fields' messages when it has
+// `"errors"`. An answer that is not JSON is thrown too, naming the
+// request, so a server without the route never passes for one with it.
 import { FormError } from "./form_error.js";
 import { putFile } from "./uploads.js";
 
@@ -17,11 +19,20 @@ async function send(method, path, body) {
   });
   if (!response.ok) throw await errorOf(response);
   if (response.status === 204) return undefined;
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(`The server answered ${method} ${path} with ${contentType || "nothing"}, not JSON`);
+  }
   return response.json();
 }
 
 /** @param {Response} response */
 async function errorOf(response) {
+  return Object.assign(await errorWithMessageOf(response), { status: response.status });
+}
+
+/** @param {Response} response */
+async function errorWithMessageOf(response) {
   try {
     const { error, errors } = await response.json();
     if (errors) return new FormError(error, errors);
@@ -35,9 +46,24 @@ async function errorOf(response) {
 /** @param {string} id */
 const postPath = (id) => `/api/posts/${encodeURIComponent(id)}`;
 
-/** The user signed in, whom the server takes the request to be from; an error when nobody is. */
-export function usersMe() {
-  return send("GET", "/api/users/me");
+/** The user signed in, whom the server takes the request to be from; null when nobody is. */
+export async function currentUserGet() {
+  try {
+    return await send("GET", "/api/current-user");
+  } catch (problem) {
+    if (/** @type {{status?: number}} */ (problem).status === 401) return null;
+    throw problem;
+  }
+}
+
+/** The community the person works in, kept by this browser; null when they are in none. */
+export function currentCommunityGet() {
+  return send("GET", "/api/current-community");
+}
+
+/** @param {string} communityId one the person is a member of */
+export function currentCommunityUpdate(communityId) {
+  return send("PUT", "/api/current-community", { community_id: communityId });
 }
 
 /**

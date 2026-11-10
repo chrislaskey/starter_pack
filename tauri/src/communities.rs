@@ -8,9 +8,9 @@ use uuid::Uuid;
 use app_core::communities::{self, Community, CommunityAndMembership, CommunityError};
 
 use crate::avatars::FormError;
+use crate::current_user::signed_in;
 use crate::device_accounts::DeviceAccounts;
 use crate::sync;
-use crate::users::signed_in;
 
 impl From<CommunityError> for FormError {
     fn from(error: CommunityError) -> FormError {
