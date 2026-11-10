@@ -1,5 +1,6 @@
 //! A deployment: the database this web server or app opened, its role,
-//! and where it keeps the bytes of files, see `files`. The web server is
+//! where it keeps the bytes of files, see `files`, and on the server the
+//! bucket of users' pictures, see `avatars`. The web server is
 //! the system of record; a desktop or mobile app is a device with a copy
 //! that syncs with it, see `docs/design/offline-sync.md`. Reads are the
 //! same in both roles. A write differs in two places: the server
@@ -40,20 +41,34 @@ pub struct Deployment {
     pub database: Database,
     pub role: Role,
     pub file_store: FileStore,
+    /// The public bucket users' pictures go to, on a server that has one.
+    #[cfg(feature = "object-storage")]
+    pub avatar_bucket: Option<Storage>,
 }
 
 impl Deployment {
-    /// A deployment that keeps no files' bytes, until `with_file_store`.
+    /// A deployment that keeps no files' bytes, until `with_file_store`,
+    /// and no pictures, until `with_avatar_bucket`.
     pub fn new(database: Database, role: Role) -> Deployment {
         Deployment {
             database,
             role,
             file_store: FileStore::None,
+            #[cfg(feature = "object-storage")]
+            avatar_bucket: None,
         }
     }
 
     pub fn with_file_store(self, file_store: FileStore) -> Deployment {
         Deployment { file_store, ..self }
+    }
+
+    #[cfg(feature = "object-storage")]
+    pub fn with_avatar_bucket(self, avatar_bucket: Storage) -> Deployment {
+        Deployment {
+            avatar_bucket: Some(avatar_bucket),
+            ..self
+        }
     }
 
     /// Begins the one transaction a core function runs in.

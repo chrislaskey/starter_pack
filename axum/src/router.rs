@@ -7,7 +7,6 @@ use std::path::Path;
 
 use app_core::deployment::Deployment;
 use app_core::mailer::Mailer;
-use app_core::storage::Storage;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{delete, get, post, put};
@@ -17,14 +16,13 @@ use tower_http::trace::TraceLayer;
 use crate::rate_limits::{self, RateLimits};
 use crate::{accounts, avatars, communities, files, memberships, posts, sync, users};
 
-/// What every handler may take from the server: the database, where its
-/// email goes, the bucket uploads go to if any, and the rate limits; and
-/// whether the client IP is the proxy's header, see `rate_limits`.
+/// What every handler may take from the server: the database with its
+/// buckets, where its email goes, and the rate limits; and whether the
+/// client IP is the proxy's header, see `rate_limits`.
 #[derive(Clone)]
 pub struct AppState {
     pub deployment: Deployment,
     pub mailer: Mailer,
-    pub storage: Option<Storage>,
     pub rate_limits: RateLimits,
     pub trust_proxy_headers: bool,
 }
@@ -38,12 +36,6 @@ impl FromRef<AppState> for Deployment {
 impl FromRef<AppState> for Mailer {
     fn from_ref(state: &AppState) -> Mailer {
         state.mailer.clone()
-    }
-}
-
-impl FromRef<AppState> for Option<Storage> {
-    fn from_ref(state: &AppState) -> Option<Storage> {
-        state.storage.clone()
     }
 }
 
@@ -108,6 +100,7 @@ mod tests {
     use tower::ServiceExt;
 
     use app_core::accounts::Session;
+    use app_core::storage::Storage;
 
     use super::*;
 
@@ -135,7 +128,8 @@ mod tests {
             .expect("a database");
         let storage = Storage::memory();
         let deployment = Deployment::new(database, app_core::deployment::Role::Server)
-            .with_file_store(app_core::deployment::FileStore::Bucket(storage.clone()));
+            .with_file_store(app_core::deployment::FileStore::Bucket(storage.clone()))
+            .with_avatar_bucket(storage.clone());
         let mailer = Mailer::memory();
         let alice = signed_up(&deployment, &mailer, "alice@example.com").await;
         let post = app_core::posts::create(&deployment, &alice.user, "the first post", &[])
@@ -148,7 +142,6 @@ mod tests {
         let state = AppState {
             deployment,
             mailer: mailer.clone(),
-            storage: Some(storage.clone()),
             rate_limits: RateLimits::new(),
             trust_proxy_headers: false,
         };

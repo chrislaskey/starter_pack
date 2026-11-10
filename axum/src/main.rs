@@ -9,9 +9,9 @@
 //! see `storage`, and its accounts routes are rate limited, see
 //! `rate_limits`.
 //!
-//! With arguments it runs a command on that database instead and exits:
-//! `purge` removes what was deleted longer ago than the retention
-//! window, for a daily cron job, and prints what went.
+//! It runs the recurring jobs as they come due, see `jobs`. With
+//! arguments it runs a command on that database instead and exits:
+//! `jobs run` runs the jobs due, and `jobs run <name>` that job now.
 
 mod accounts;
 mod api_error;
@@ -20,6 +20,7 @@ mod communities;
 mod current_user;
 mod database;
 mod files;
+mod jobs;
 mod mailer;
 mod memberships;
 mod posts;
@@ -78,7 +79,10 @@ async fn main() -> Result<(), String> {
 
     let deployment = database::open().await?;
     let mailer = mailer::open()?;
-    let storage = storage::open_public()?;
+    let deployment = match storage::open_public()? {
+        Some(public) => deployment.with_avatar_bucket(public),
+        None => deployment,
+    };
     let deployment = match storage::open_private()? {
         Some(private) => deployment.with_file_store(FileStore::Bucket(private)),
         None => deployment,
@@ -96,10 +100,10 @@ async fn main() -> Result<(), String> {
             forgetting.forget_old();
         }
     });
+    jobs::spawn(deployment.clone());
     let state = AppState {
         deployment,
         mailer,
-        storage,
         rate_limits,
         trust_proxy_headers: trust_proxy_headers(),
     };
@@ -126,16 +130,7 @@ async fn command(
 ) -> Result<(), String> {
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
-        ["purge"] => {
-            let report = app_core::purge::run(deployment, app_core::deployment::now())
-                .await
-                .map_err(|error| error.to_string())?;
-            println!("purged up to {}", report.horizon);
-            for (table, count) in &report.removed {
-                println!("{table} {count}");
-            }
-            Ok(())
-        }
-        _ => Err("commands: purge".to_string()),
+        ["jobs", rest @ ..] => jobs::command(deployment, rest).await,
+        _ => Err("commands: jobs run, jobs run <name>".to_string()),
     }
 }

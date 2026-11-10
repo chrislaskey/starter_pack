@@ -142,6 +142,7 @@ impl From<AvatarError> for ApiError {
             AvatarError::User(error) => return error.into(),
             AvatarError::Sync(error) => return error.into(),
             AvatarError::NotYours => StatusCode::FORBIDDEN,
+            AvatarError::NoAvatarBucket => StatusCode::SERVICE_UNAVAILABLE,
             AvatarError::UploadMissing
             | AvatarError::UploadExpired
             | AvatarError::NotTheImageType

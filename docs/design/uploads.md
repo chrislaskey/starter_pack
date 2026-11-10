@@ -85,11 +85,8 @@ first, and files after, by reconciliation rather than bookkeeping:
   file the sweep may take can never become someone's picture after the
   sweep read the rows. A row's URL is matched by the key at its end, so
   moving the bucket behind a CDN never makes a picture look unused.
-- **It runs daily, after the purge, once there is a scheduler.** Today
-  the purge is `app_web purge`, a command for a cron job outside the
-  app, and there is no scheduler or job queue in the app; the sweep is a
-  function waiting for whichever comes, which then runs the purge and
-  the sweep in that order.
+- **It runs daily, after the purge**, as a job, see
+  `docs/design/jobs.md`.
 - **Every kind of leftover is the same case.** An upload never
   confirmed, a write that failed, a picture replaced, a row purged: the
   sweep looks at what the rows point at now, not at what happened, so

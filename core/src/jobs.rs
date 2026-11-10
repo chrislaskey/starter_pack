@@ -1,0 +1,384 @@
+//! Recurring jobs: what runs, on which role, how often and in what order,
+//! decided here once for every app, see `docs/design/jobs.md`. An app
+//! only wakes them up, as often as it can, by calling `run_due`: a job
+//! not yet due does nothing, and one missed runs at the next call.
+//!
+//! Each run is recorded in `app_jobs`, one row per job. Starting a run
+//! is a conditional write, so of several servers calling at once only
+//! one runs it. A job that fails is recorded with its error and tried
+//! again once it is due; every job may be run again safely.
+
+use chrono::{DateTime, Duration, Utc};
+use serde_json::Value;
+use thiserror::Error;
+
+use crate::avatars::AvatarError;
+use crate::database::sql;
+use crate::deployment::{Deployment, Role};
+use crate::files::FileError;
+use crate::purge::{self, PurgeError};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// `purge::run`, before the sweeps, so the files of the rows it
+    /// removes go in the same day.
+    Purge,
+    /// `avatars::delete_unreferenced`.
+    AvatarsDeleteUnreferenced,
+    /// `files::delete_unreferenced`.
+    FilesDeleteUnreferenced,
+}
+
+impl Job {
+    /// Every job, in the order `run_due` runs them.
+    pub const ALL: [Job; 3] = [
+        Job::Purge,
+        Job::AvatarsDeleteUnreferenced,
+        Job::FilesDeleteUnreferenced,
+    ];
+
+    /// Its name in `app_jobs` and on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Job::Purge => "purge",
+            Job::AvatarsDeleteUnreferenced => "avatars_delete_unreferenced",
+            Job::FilesDeleteUnreferenced => "files_delete_unreferenced",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Job> {
+        Job::ALL.into_iter().find(|job| job.name() == name)
+    }
+
+    /// The role of the deployments it runs on.
+    pub fn role(self) -> Role {
+        match self {
+            Job::Purge | Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
+                Role::Server
+            }
+        }
+    }
+
+    /// How long after a run starts the next is due.
+    pub fn interval(self) -> Duration {
+        match self {
+            Job::Purge | Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
+                Duration::days(1)
+            }
+        }
+    }
+
+    /// Whether the deployment has what the job works on: a sweep needs
+    /// its bucket.
+    fn is_set_up(self, deployment: &Deployment) -> bool {
+        match self {
+            Job::Purge => true,
+            #[cfg(feature = "object-storage")]
+            Job::AvatarsDeleteUnreferenced => deployment.avatar_bucket.is_some(),
+            #[cfg(feature = "object-storage")]
+            Job::FilesDeleteUnreferenced => matches!(
+                deployment.file_store,
+                crate::deployment::FileStore::Bucket(_)
+            ),
+            #[cfg(not(feature = "object-storage"))]
+            Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
+                let _ = deployment;
+                false
+            }
+        }
+    }
+}
+
+/// A job's last run, as `app_jobs` keeps it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobRecord {
+    pub job: Job,
+    pub started_at: DateTime<Utc>,
+    /// None while it runs, or when it stopped before recording its end.
+    pub finished_at: Option<DateTime<Utc>>,
+    pub last_report: Option<Value>,
+    pub last_error: Option<String>,
+}
+
+/// One run by `run_due`: the job's report, or its error.
+#[derive(Debug)]
+pub struct JobRun {
+    pub job: Job,
+    pub result: Result<Value, JobError>,
+}
+
+#[derive(Debug, Error)]
+pub enum JobError {
+    #[error("the {} job does not run on this deployment", .0.name())]
+    NotForThisRole(Job),
+    #[error("the {} job has no bucket to work on here", .0.name())]
+    NotSetUp(Job),
+    #[error(transparent)]
+    Purge(#[from] PurgeError),
+    #[error(transparent)]
+    Avatar(#[from] AvatarError),
+    #[error(transparent)]
+    File(#[from] FileError),
+    #[error("could not record the report: {0}")]
+    Report(#[from] serde_json::Error),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+/// Runs, in order, every job of this deployment's role that is set up
+/// here and due at `now`, and records each run. One failing does not
+/// stop the next; only failing to record a run stops them all.
+pub async fn run_due(deployment: &Deployment, now: DateTime<Utc>) -> Result<Vec<JobRun>, JobError> {
+    let mut runs = Vec::new();
+    for job in Job::ALL {
+        if job.role() != deployment.role || !job.is_set_up(deployment) {
+            continue;
+        }
+        let mut tx = deployment.begin().await?;
+        let claimed = sql!(&mut tx, jobs::claim_if_due(job, now, now - job.interval()))?;
+        tx.commit().await?;
+        if !claimed {
+            continue;
+        }
+        let result = perform(deployment, job, now).await;
+        finish(deployment, job, &result).await?;
+        runs.push(JobRun { job, result });
+    }
+    Ok(runs)
+}
+
+/// Runs the job at `now`, due or not, and records the run.
+pub async fn run(deployment: &Deployment, job: Job, now: DateTime<Utc>) -> Result<Value, JobError> {
+    if job.role() != deployment.role {
+        return Err(JobError::NotForThisRole(job));
+    }
+    if !job.is_set_up(deployment) {
+        return Err(JobError::NotSetUp(job));
+    }
+    let mut tx = deployment.begin().await?;
+    sql!(&mut tx, jobs::claim(job, now))?;
+    tx.commit().await?;
+    let result = perform(deployment, job, now).await;
+    finish(deployment, job, &result).await?;
+    result
+}
+
+/// The job's last run, or none before its first.
+pub async fn get(deployment: &Deployment, job: Job) -> Result<Option<JobRecord>, JobError> {
+    let mut tx = deployment.begin().await?;
+    let record = sql!(&mut tx, jobs::get(job))?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+async fn perform(deployment: &Deployment, job: Job, now: DateTime<Utc>) -> Result<Value, JobError> {
+    match job {
+        Job::Purge => Ok(serde_json::to_value(purge::run(deployment, now).await?)?),
+        #[cfg(feature = "object-storage")]
+        Job::AvatarsDeleteUnreferenced => Ok(serde_json::to_value(
+            crate::avatars::delete_unreferenced(deployment, now).await?,
+        )?),
+        #[cfg(feature = "object-storage")]
+        Job::FilesDeleteUnreferenced => Ok(serde_json::to_value(
+            crate::files::delete_unreferenced(deployment, now).await?,
+        )?),
+        #[cfg(not(feature = "object-storage"))]
+        Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
+            Err(JobError::NotSetUp(job))
+        }
+    }
+}
+
+/// Records the end of the run, on this deployment's clock.
+async fn finish(
+    deployment: &Deployment,
+    job: Job,
+    result: &Result<Value, JobError>,
+) -> Result<(), JobError> {
+    let (report, error) = match result {
+        Ok(report) => (Some(report), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let finished_at = crate::deployment::now();
+    let mut tx = deployment.begin().await?;
+    sql!(
+        &mut tx,
+        jobs::finish(job, finished_at, report, error.as_deref())
+    )?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{Database, with_each_database};
+
+    fn server(database: Database) -> Deployment {
+        Deployment::new(database, Role::Server)
+    }
+
+    fn jobs_of(runs: &[JobRun]) -> Vec<Job> {
+        runs.iter().map(|run| run.job).collect()
+    }
+
+    #[tokio::test]
+    async fn jobs_run_due_runs_the_purge_once_a_day_and_records_it() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let now = crate::deployment::now();
+
+            let runs = run_due(&deployment, now).await.expect("the jobs");
+            assert_eq!(jobs_of(&runs), [Job::Purge], "no buckets, no sweeps");
+            assert!(runs[0].result.is_ok());
+            let record = get(&deployment, Job::Purge)
+                .await
+                .expect("a record")
+                .expect("the purge's");
+            assert_eq!(record.started_at, now);
+            assert!(record.finished_at.is_some());
+            assert_eq!(record.last_error, None);
+            assert!(record.last_report.expect("a report")["horizon"].is_string());
+
+            let almost_a_day = now + Duration::hours(23);
+            let runs = run_due(&deployment, almost_a_day).await.expect("the jobs");
+            assert!(runs.is_empty(), "not due yet");
+
+            let a_day_later = now + Duration::days(1);
+            let runs = run_due(&deployment, a_day_later).await.expect("the jobs");
+            assert_eq!(jobs_of(&runs), [Job::Purge]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn jobs_claim_if_due_lets_one_of_two_servers_at_once() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let now = crate::deployment::now();
+            let a_day_ago = now - Duration::days(1);
+            let mut tx = deployment.begin().await.expect("a transaction");
+            let first = sql!(&mut tx, jobs::claim_if_due(Job::Purge, now, a_day_ago));
+            let second = sql!(&mut tx, jobs::claim_if_due(Job::Purge, now, a_day_ago));
+            tx.commit().await.expect("committed");
+            assert!(first.expect("a claim"));
+            assert!(!second.expect("a claim"), "the first one runs it");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn jobs_run_runs_a_job_not_yet_due() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let now = crate::deployment::now();
+            run_due(&deployment, now).await.expect("the jobs");
+
+            let later = now + Duration::minutes(5);
+            run(&deployment, Job::Purge, later)
+                .await
+                .expect("the purge");
+            let record = get(&deployment, Job::Purge)
+                .await
+                .expect("a record")
+                .expect("the purge's");
+            assert_eq!(record.started_at, later);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn jobs_run_refuses_a_job_of_another_role_or_without_its_bucket() {
+        let device = crate::users::tests::device().await;
+        let error = run(&device, Job::Purge, crate::deployment::now())
+            .await
+            .expect_err("a device");
+        assert!(matches!(error, JobError::NotForThisRole(Job::Purge)));
+        let runs = run_due(&device, crate::deployment::now())
+            .await
+            .expect("the jobs");
+        assert!(runs.is_empty(), "a device has no jobs yet");
+
+        let database = Database::open_sqlite_in_memory().await.expect("a database");
+        let error = run(
+            &server(database),
+            Job::FilesDeleteUnreferenced,
+            crate::deployment::now(),
+        )
+        .await
+        .expect_err("no bucket");
+        assert!(matches!(
+            error,
+            JobError::NotSetUp(Job::FilesDeleteUnreferenced)
+        ));
+    }
+
+    #[test]
+    fn jobs_from_name_knows_every_job() {
+        for job in Job::ALL {
+            assert_eq!(Job::from_name(job.name()), Some(job));
+        }
+        assert_eq!(Job::from_name("nothing"), None);
+    }
+
+    #[cfg(feature = "object-storage")]
+    mod with_buckets {
+        use super::*;
+        use crate::deployment::FileStore;
+        use crate::storage::Storage;
+
+        fn server_with_buckets(database: Database) -> Deployment {
+            server(database)
+                .with_avatar_bucket(Storage::memory())
+                .with_file_store(FileStore::Bucket(Storage::memory()))
+        }
+
+        #[tokio::test]
+        async fn jobs_run_due_runs_the_purge_and_then_the_sweeps() {
+            with_each_database(|database| async move {
+                let deployment = server_with_buckets(database);
+                let runs = run_due(&deployment, crate::deployment::now())
+                    .await
+                    .expect("the jobs");
+                assert_eq!(jobs_of(&runs), Job::ALL);
+                assert!(runs.iter().all(|run| run.result.is_ok()), "{runs:?}");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn jobs_run_due_records_an_error_and_runs_the_next() {
+            with_each_database(|database| async move {
+                let deployment = server_with_buckets(database);
+                drop_purges_table(&deployment).await;
+
+                let runs = run_due(&deployment, crate::deployment::now())
+                    .await
+                    .expect("the jobs");
+                assert_eq!(jobs_of(&runs), Job::ALL);
+                assert!(runs[0].result.is_err(), "the purge has no table");
+                assert!(runs[1].result.is_ok() && runs[2].result.is_ok());
+                let record = get(&deployment, Job::Purge)
+                    .await
+                    .expect("a record")
+                    .expect("the purge's");
+                assert!(record.last_error.is_some());
+                assert_eq!(record.last_report, None);
+            })
+            .await;
+        }
+
+        async fn drop_purges_table(deployment: &Deployment) {
+            let statement = "DROP TABLE app_purges";
+            match &deployment.database {
+                Database::Sqlite(pool) => {
+                    sqlx::query(statement).execute(pool).await.expect("dropped");
+                }
+                #[cfg(feature = "postgres")]
+                Database::Postgres(pool) => {
+                    sqlx::query(statement).execute(pool).await.expect("dropped");
+                }
+            }
+        }
+    }
+}

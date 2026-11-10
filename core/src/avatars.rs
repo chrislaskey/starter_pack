@@ -125,6 +125,8 @@ pub enum AvatarError {
     TooLarge,
     #[error("only the server sets a picture")]
     ServerOnly,
+    #[error("uploads are not set up on this server")]
+    NoAvatarBucket,
     #[cfg(feature = "object-storage")]
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -140,11 +142,12 @@ pub enum AvatarError {
 /// picture this app takes: on the server, which holds the bucket's keys.
 #[cfg(feature = "object-storage")]
 pub async fn create_upload(
-    storage: &Storage,
+    deployment: &Deployment,
     user: &User,
     request: &AvatarUploadNew,
 ) -> Result<AvatarUpload, AvatarError> {
     FieldErrors::check(request).map_err(AvatarError::Invalid)?;
+    let storage = bucket(deployment)?;
     let image_type = image_type_of(&request.content_type).ok_or_else(|| {
         AvatarError::Invalid(FieldErrors::one("content_type", "is not a picture"))
     })?;
@@ -171,13 +174,13 @@ pub async fn create_upload(
 #[cfg(feature = "object-storage")]
 pub async fn update(
     deployment: &Deployment,
-    storage: &Storage,
     user: &User,
     request: &AvatarUpdate,
 ) -> Result<User, AvatarError> {
     if deployment.role != Role::Server {
         return Err(AvatarError::ServerOnly);
     }
+    let storage = bucket(deployment)?;
     let (image_type, key_made_at) =
         image_type_of_key(user, &request.key).ok_or(AvatarError::NotYours)?;
     if crate::deployment::now() - key_made_at > CONFIRM_WITHIN {
@@ -216,17 +219,16 @@ pub struct DeleteUnreferencedReport {
 /// picture replaced, the picture of a user the purge removed. Rows go
 /// first and their files after, so whatever removed a row, a cascade
 /// included, its file goes on the next run; a run cut short is finished
-/// by the next. On the server, daily, beside `purge::run`, once there is
-/// a scheduler, see `docs/design/uploads.md`.
+/// by the next. On the server, daily after `purge::run`, see `jobs`.
 #[cfg(feature = "object-storage")]
 pub async fn delete_unreferenced(
     deployment: &Deployment,
-    storage: &Storage,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<DeleteUnreferencedReport, AvatarError> {
     if deployment.role != Role::Server {
         return Err(AvatarError::ServerOnly);
     }
+    let storage = bucket(deployment)?;
     let mut tx = deployment.begin().await?;
     let referenced: std::collections::HashSet<String> = users::list_avatar_urls_in(&mut tx)
         .await?
@@ -302,6 +304,15 @@ fn image_type_of_key(
     Some((image_type, made_at))
 }
 
+/// The deployment's bucket of pictures, or `NoAvatarBucket`.
+#[cfg(feature = "object-storage")]
+fn bucket(deployment: &Deployment) -> Result<&Storage, AvatarError> {
+    deployment
+        .avatar_bucket
+        .as_ref()
+        .ok_or(AvatarError::NoAvatarBucket)
+}
+
 /// The key in a picture's URL, whatever the public URL in front of it,
 /// so a bucket moved behind a CDN never makes a picture look unused.
 #[cfg(feature = "object-storage")]
@@ -344,19 +355,29 @@ mod tests {
         }
     }
 
-    async fn server_with_alice(database: Database) -> (Deployment, User) {
-        let deployment = Deployment::new(database, Role::Server);
+    /// A server with a bucket of pictures in memory, the bucket, and Alice.
+    async fn server_with_alice(database: Database) -> (Deployment, Storage, User) {
+        let storage = Storage::memory();
+        let deployment =
+            Deployment::new(database, Role::Server).with_avatar_bucket(storage.clone());
         let alice = users::create(&deployment, "alice@example.com")
             .await
             .expect("alice");
-        (deployment, alice)
+        (deployment, storage, alice)
+    }
+
+    /// A server with a bucket of pictures in memory, for the checks that
+    /// read no rows.
+    async fn server() -> Deployment {
+        let database = Database::open_sqlite_in_memory().await.expect("a database");
+        Deployment::new(database, Role::Server).with_avatar_bucket(Storage::memory())
     }
 
     #[tokio::test]
     async fn avatars_create_upload_answers_field_errors_for_a_wrong_file() {
-        let storage = Storage::memory();
+        let deployment = server().await;
         let alice = users::tests::alice();
-        let error = create_upload(&storage, &alice, &upload("text/html", MAX_BYTES + 1))
+        let error = create_upload(&deployment, &alice, &upload("text/html", MAX_BYTES + 1))
             .await
             .expect_err("neither field is right");
         let AvatarError::Invalid(errors) = error else {
@@ -368,7 +389,7 @@ mod tests {
         );
         assert_eq!(errors.0["size"], ["must be 5 MB or smaller"]);
 
-        let error = create_upload(&storage, &alice, &upload("image/png", 0))
+        let error = create_upload(&deployment, &alice, &upload("image/png", 0))
             .await
             .expect_err("empty");
         assert!(matches!(error, AvatarError::Invalid(errors) if errors.0["size"] == ["is empty"]));
@@ -376,9 +397,9 @@ mod tests {
 
     #[tokio::test]
     async fn avatars_create_upload_signs_a_key_under_the_users_prefix() {
-        let storage = Storage::memory();
+        let deployment = server().await;
         let alice = users::tests::alice();
-        let answer = create_upload(&storage, &alice, &upload("image/jpeg", 1000))
+        let answer = create_upload(&deployment, &alice, &upload("image/jpeg", 1000))
             .await
             .expect("an upload");
         assert!(
@@ -394,16 +415,15 @@ mod tests {
     #[tokio::test]
     async fn avatars_update_sets_the_url_as_an_event_once_the_file_is_there() {
         with_each_database(|database| async move {
-            let (deployment, alice) = server_with_alice(database).await;
-            let storage = Storage::memory();
-            let answer = create_upload(&storage, &alice, &upload("image/png", PNG.len() as u64))
+            let (deployment, storage, alice) = server_with_alice(database).await;
+            let answer = create_upload(&deployment, &alice, &upload("image/png", PNG.len() as u64))
                 .await
                 .expect("an upload");
             let request = AvatarUpdate {
                 key: answer.key.clone(),
             };
 
-            let error = update(&deployment, &storage, &alice, &request)
+            let error = update(&deployment, &alice, &request)
                 .await
                 .expect_err("not uploaded yet");
             assert!(matches!(error, AvatarError::UploadMissing));
@@ -412,7 +432,7 @@ mod tests {
                 .put(&answer.key, PNG.to_vec())
                 .await
                 .expect("the upload");
-            let updated = update(&deployment, &storage, &alice, &request)
+            let updated = update(&deployment, &alice, &request)
                 .await
                 .expect("the picture");
             assert_eq!(
@@ -437,27 +457,21 @@ mod tests {
     async fn avatars_update_refuses_another_users_key_and_deletes_a_file_too_large_or_not_its_type()
     {
         with_each_database(|database| async move {
-            let (deployment, alice) = server_with_alice(database).await;
+            let (deployment, storage, alice) = server_with_alice(database).await;
             let bob = users::create(&deployment, "bob@example.com")
                 .await
                 .expect("bob");
-            let storage = Storage::memory();
 
-            let bobs = create_upload(&storage, &bob, &upload("image/png", PNG.len() as u64))
+            let bobs = create_upload(&deployment, &bob, &upload("image/png", PNG.len() as u64))
                 .await
                 .expect("bob's upload");
             storage.put(&bobs.key, PNG.to_vec()).await.expect("put");
-            let error = update(
-                &deployment,
-                &storage,
-                &alice,
-                &AvatarUpdate { key: bobs.key },
-            )
-            .await
-            .expect_err("bob's");
+            let error = update(&deployment, &alice, &AvatarUpdate { key: bobs.key })
+                .await
+                .expect_err("bob's");
             assert!(matches!(error, AvatarError::NotYours));
 
-            let answer = create_upload(&storage, &alice, &upload("image/png", PNG.len() as u64))
+            let answer = create_upload(&deployment, &alice, &upload("image/png", PNG.len() as u64))
                 .await
                 .expect("an upload");
             let mut huge = PNG.to_vec();
@@ -466,21 +480,22 @@ mod tests {
             let request = AvatarUpdate {
                 key: answer.key.clone(),
             };
-            let error = update(&deployment, &storage, &alice, &request)
+            let error = update(&deployment, &alice, &request)
                 .await
                 .expect_err("larger than it said");
             assert!(matches!(error, AvatarError::TooLarge));
             assert_eq!(storage.size(&answer.key).await.expect("a head"), None);
 
             let html = b"<html><script>alert(1)</script></html>".to_vec();
-            let answer = create_upload(&storage, &alice, &upload("image/png", html.len() as u64))
-                .await
-                .expect("an upload");
+            let answer =
+                create_upload(&deployment, &alice, &upload("image/png", html.len() as u64))
+                    .await
+                    .expect("an upload");
             storage.put(&answer.key, html).await.expect("put");
             let request = AvatarUpdate {
                 key: answer.key.clone(),
             };
-            let error = update(&deployment, &storage, &alice, &request)
+            let error = update(&deployment, &alice, &request)
                 .await
                 .expect_err("not a PNG");
             assert!(matches!(error, AvatarError::NotTheImageType));
@@ -494,8 +509,7 @@ mod tests {
     #[tokio::test]
     async fn avatars_update_refuses_an_upload_older_than_an_hour() {
         with_each_database(|database| async move {
-            let (deployment, alice) = server_with_alice(database).await;
-            let storage = Storage::memory();
+            let (deployment, storage, alice) = server_with_alice(database).await;
             let two_hours_ago = (crate::deployment::now() - chrono::Duration::hours(2)).timestamp();
             let old_id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
                 uuid::NoContext,
@@ -504,7 +518,7 @@ mod tests {
             ));
             let key = format!("avatars/{}/{old_id}.png", alice.id);
             storage.put(&key, PNG.to_vec()).await.expect("put");
-            let error = update(&deployment, &storage, &alice, &AvatarUpdate { key })
+            let error = update(&deployment, &alice, &AvatarUpdate { key })
                 .await
                 .expect_err("too old");
             assert!(matches!(error, AvatarError::UploadExpired));
@@ -519,7 +533,7 @@ mod tests {
         alice: &User,
         confirmed: bool,
     ) -> String {
-        let answer = create_upload(storage, alice, &upload("image/png", PNG.len() as u64))
+        let answer = create_upload(deployment, alice, &upload("image/png", PNG.len() as u64))
             .await
             .expect("an upload");
         storage.put(&answer.key, PNG.to_vec()).await.expect("put");
@@ -527,7 +541,7 @@ mod tests {
             let request = AvatarUpdate {
                 key: answer.key.clone(),
             };
-            update(deployment, storage, alice, &request)
+            update(deployment, alice, &request)
                 .await
                 .expect("her picture");
         }
@@ -537,8 +551,7 @@ mod tests {
     #[tokio::test]
     async fn avatars_delete_unreferenced_deletes_old_files_nobody_points_at() {
         with_each_database(|database| async move {
-            let (deployment, alice) = server_with_alice(database).await;
-            let storage = Storage::memory();
+            let (deployment, storage, alice) = server_with_alice(database).await;
             let never_confirmed = uploaded(&deployment, &storage, &alice, false).await;
             let replaced = uploaded(&deployment, &storage, &alice, true).await;
             let current = uploaded(&deployment, &storage, &alice, true).await;
@@ -548,7 +561,7 @@ mod tests {
                 .expect("put");
 
             let now = crate::deployment::now();
-            let report = delete_unreferenced(&deployment, &storage, now)
+            let report = delete_unreferenced(&deployment, now)
                 .await
                 .expect("a sweep");
             assert_eq!(
@@ -562,7 +575,7 @@ mod tests {
 
             let tomorrow =
                 now + chrono::Duration::days(UNREFERENCED_DAYS) + chrono::Duration::seconds(1);
-            let report = delete_unreferenced(&deployment, &storage, tomorrow)
+            let report = delete_unreferenced(&deployment, tomorrow)
                 .await
                 .expect("a sweep");
             assert_eq!(
@@ -590,8 +603,7 @@ mod tests {
     #[tokio::test]
     async fn avatars_delete_unreferenced_keeps_a_deleted_users_picture_until_the_purge() {
         with_each_database(|database| async move {
-            let (deployment, alice) = server_with_alice(database).await;
-            let storage = Storage::memory();
+            let (deployment, storage, alice) = server_with_alice(database).await;
             let key = uploaded(&deployment, &storage, &alice, true).await;
             let now = crate::deployment::now();
 
@@ -604,17 +616,16 @@ mod tests {
                 .await
                 .expect("soft deleted");
             tx.commit().await.expect("committed");
-            let report =
-                delete_unreferenced(&deployment, &storage, now + chrono::Duration::days(2))
-                    .await
-                    .expect("a sweep");
+            let report = delete_unreferenced(&deployment, now + chrono::Duration::days(2))
+                .await
+                .expect("a sweep");
             assert_eq!(report.deleted, 0, "a soft-deleted row still points at it");
 
             let after_the_window = now + chrono::Duration::days(crate::purge::RETENTION_DAYS + 1);
             crate::purge::run(&deployment, after_the_window)
                 .await
                 .expect("the purge");
-            let report = delete_unreferenced(&deployment, &storage, after_the_window)
+            let report = delete_unreferenced(&deployment, after_the_window)
                 .await
                 .expect("a sweep");
             assert_eq!(
@@ -645,7 +656,6 @@ mod tests {
         let device = users::tests::device_of(&alice, "a token").await;
         let error = update(
             &device,
-            &Storage::memory(),
             &alice,
             &AvatarUpdate {
                 key: format!("avatars/{}/x.png", alice.id),

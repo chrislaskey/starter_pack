@@ -11,7 +11,7 @@
 //! its horizon, and a device whose cursor is older than the latest one
 //! may have missed a deletion, so the pull tells it to start over.
 //!
-//! Run it on a schedule, `app_web purge` from a daily cron job.
+//! It runs daily, before the sweeps, see `jobs`.
 
 use std::collections::BTreeMap;
 

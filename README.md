@@ -299,8 +299,13 @@ design, carried over from the Phoenix version, is
   `POST /api/sync/backfill` for everything in each community the user
   just joined; then prunes the posts the user no longer sees. A row from
   the server never replaces a row with an event still pending.
-* The **purge** (`core/src/purge.rs`, `cargo run -p app_web -- purge`,
-  for a daily cron job) hard-deletes what was deleted more than 90 days
+* **Recurring jobs** (`core/src/jobs.rs`, `docs/design/jobs.md`): the
+  purge, then the sweeps of both buckets, daily on the server. The
+  server runs those due every 15 minutes; `cargo run -p app_web -- jobs
+  run` does the same once, for a scheduler outside it, and `jobs run
+  purge` runs one job now. Each run is recorded in `app_jobs`.
+* The **purge** (`core/src/purge.rs`, a daily job, see below)
+  hard-deletes what was deleted more than 90 days
   ago and records the horizon; a device away longer than that is told to
   start over on its next pull, and does, keeping its pending changes.
 * Conflicts are decided by versions, never clocks, field by field. A

@@ -9,6 +9,7 @@ pub mod credentials;
 pub mod device_settings;
 pub mod events;
 pub mod files;
+pub mod jobs;
 pub mod memberships;
 pub mod posts;
 pub mod posts_communities;

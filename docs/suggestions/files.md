@@ -7,9 +7,6 @@ device the first time it shows the file, with a limit of tries, refused
 files kept for the person, and the cleanups on both sides. Left for
 later, on purpose:
 
-- **Scheduling the sweep.** `files::delete_unreferenced` waits for a
-  scheduler beside `avatars::delete_unreferenced`, to run daily after
-  `app_web purge`.
 - **Communities for files**, by the join table posts use, with the
   backfill and the prune that come with visibility.
 - **Replacing a file's content.** The bytes are fixed today; replacing

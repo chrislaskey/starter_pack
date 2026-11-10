@@ -227,7 +227,8 @@ A delete is the soft delete, synced like any edit.
   `files::delete_unreferenced`: a file with no row, a day old, is
   deleted. A deleted row keeps its file for the purge's 90 days.
   Deleting an account, once there is such a thing, deletes its prefix
-  at once. The sweep waits for a scheduler, as the avatars' does.
+  at once. The sweep runs daily after the avatars', see
+  `docs/design/jobs.md`.
 
 **A gap accepted.** A file uploaded whose push never came is swept
 after a day and uploaded again when the device returns. If the device

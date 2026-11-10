@@ -436,7 +436,7 @@ as it was, **Let it go** removes the file from the device.
 ## Purge and resync
 
 Soft-deleted rows would otherwise accumulate forever. `purge::run`, on
-the server, `app_web purge` from a daily cron job, hard-deletes every row
+the server, a daily job, see `docs/design/jobs.md`, hard-deletes every row
 whose delete and whose last write are both older than the horizon, 90
 days before now, so every device that pulled within the window has seen
 it go; children first, so a deleted post's community rows, deleted at

@@ -586,9 +586,8 @@ async fn note_error(
 /// deleted rows included, once they are older than `UNREFERENCED_DAYS`:
 /// an upload whose push never came, a refused file let go, a row the
 /// purge removed. A deleted row keeps its bytes until the purge takes
-/// it. On the server, daily, after `purge::run` and beside
-/// `avatars::delete_unreferenced`, once there is a scheduler, see
-/// `docs/design/uploads.md`.
+/// it. On the server, daily after `purge::run` and
+/// `avatars::delete_unreferenced`, see `jobs`.
 ///
 /// A device that comes back in the moment between this reading the rows
 /// and deleting a file can have its row written just before the bytes
