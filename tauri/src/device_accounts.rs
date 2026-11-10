@@ -1,10 +1,12 @@
 //! The accounts on this device, see `docs/design/device-accounts.md`:
-//! each with a SQLite database of its own under `accounts/`, listed in
-//! `device.db`, and at most one active, whose deployment every account
-//! command takes from here. This is the only code that opens, closes,
-//! chooses or deletes a database file; `app_core` never learns there is
-//! more than one. The app data directory, `DATA_DIR` in dev, holds them
-//! all. At start the list is swept of orphans, every file is brought up
+//! each with a folder of its own, `accounts/<user id>/`, holding its
+//! SQLite database, `app.db`, and the bytes of its files, `files/`, see
+//! `docs/design/offline-files-decisions.md`; listed in `device.db`, and
+//! at most one active, whose deployment every account command takes
+//! from here. This is the only code that opens, closes, chooses or
+//! deletes an account's folder; `app_core` never learns there is more
+//! than one. The app data directory, `DATA_DIR` in dev, holds them all.
+//! At start the list is swept of orphans, every database is brought up
 //! to date, and the last active account is opened again if it is still
 //! signed in.
 
@@ -23,7 +25,7 @@ use uuid::fmt::Hyphenated;
 
 use app_core::accounts::{self, AccountError, Session};
 use app_core::database::{Database, DatabaseError};
-use app_core::deployment::{Deployment, Role, now};
+use app_core::deployment::{Deployment, FileStore, Role, now};
 use app_core::device_settings::{self, DeviceSettingsError};
 use app_core::sync::{self, SyncError, Transport};
 use app_core::users::{self, User, UserError};
@@ -36,6 +38,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations/device");
 pub const MAX_ACCOUNTS: i64 = 100;
 const LIST_FILE: &str = "device.db";
 const ACCOUNTS_DIRECTORY: &str = "accounts";
+const DATABASE_FILE: &str = "app.db";
+const FILES_DIRECTORY: &str = "files";
 
 /// An account on this device, as the accounts page lists it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -91,8 +95,8 @@ pub enum DeviceAccountsError {
     Io(#[from] std::io::Error),
 }
 
-/// The list in `device.db`, the files under `accounts/`, and the active
-/// account's open deployment, if any.
+/// The list in `device.db`, the folders under `accounts/`, and the
+/// active account's open deployment, if any.
 pub struct DeviceAccounts {
     directory: PathBuf,
     list: SqlitePool,
@@ -277,7 +281,8 @@ impl DeviceAccounts {
     }
 
     /// Removes an account from the device: signs it out when it is
-    /// signed in, then deletes its file and its row. Answers the counts
+    /// signed in, then deletes its folder, the database and the files'
+    /// bytes, and its row. Answers the counts
     /// instead while a change would be lost, unless `losing_changes`.
     pub async fn remove<T: Transport>(
         &self,
@@ -311,7 +316,7 @@ impl DeviceAccounts {
                 .bind(user_id.hyphenated())
                 .execute(&self.list)
                 .await?;
-            delete_file(&self.path_of(user_id))?;
+            delete_folder(&self.folder_of(user_id))?;
         }
         outcome
     }
@@ -388,23 +393,32 @@ impl DeviceAccounts {
         Ok(())
     }
 
-    fn path_of(&self, user_id: Uuid) -> PathBuf {
+    /// The account's folder: its database and its files' bytes.
+    fn folder_of(&self, user_id: Uuid) -> PathBuf {
         self.directory
             .join(ACCOUNTS_DIRECTORY)
-            .join(file_name(user_id))
+            .join(user_id.hyphenated().to_string())
     }
 
-    /// Opens an account's file as a device, bringing it and its settings
-    /// up to date.
+    fn path_of(&self, user_id: Uuid) -> PathBuf {
+        self.folder_of(user_id).join(DATABASE_FILE)
+    }
+
+    /// Opens an account's database as a device, bringing it and its
+    /// settings up to date, with the folder its files' bytes are in.
     async fn open_file(&self, user_id: Uuid) -> Result<Deployment, DeviceAccountsError> {
+        let files = self.folder_of(user_id).join(FILES_DIRECTORY);
+        std::fs::create_dir_all(&files)?;
         let database = Database::open_sqlite_file(&self.path_of(user_id)).await?;
-        let deployment = Deployment::new(database, Role::Device);
+        let deployment =
+            Deployment::new(database, Role::Device).with_file_store(FileStore::Folder(files));
         device_settings::upgrade(&deployment).await?;
         Ok(deployment)
     }
 
-    /// Deletes a row whose file is missing, a half-finished sign-in, and
-    /// a file no row names, a half-finished removal.
+    /// Deletes a row whose database is missing, a half-finished sign-in,
+    /// and whatever under `accounts/` no row names, a half-finished
+    /// removal.
     async fn sweep(&self) -> Result<(), DeviceAccountsError> {
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT user_id, email, file, signed_in, active, last_active_at FROM device_accounts",
@@ -414,23 +428,23 @@ impl DeviceAccounts {
         let accounts_directory = self.directory.join(ACCOUNTS_DIRECTORY);
         let mut named = Vec::new();
         for row in rows {
-            if accounts_directory.join(&row.file).exists() {
-                named.push(row.file);
+            let user_id = row.user_id.into_uuid();
+            if row.file == file_name(user_id) && accounts_directory.join(&row.file).exists() {
+                named.push(user_id.hyphenated().to_string());
             } else {
                 log::warn!("account {} has no file; removed from the list", row.email);
                 sqlx::query("DELETE FROM device_accounts WHERE user_id = $1")
-                    .bind(row.user_id)
+                    .bind(user_id.hyphenated())
                     .execute(&self.list)
                     .await?;
             }
         }
         for entry in std::fs::read_dir(&accounts_directory)? {
             let path = entry?.path();
-            let is_database = path.extension().is_some_and(|extension| extension == "db");
             let name = path.file_name().and_then(|name| name.to_str());
-            if is_database && name.is_some_and(|name| !named.iter().any(|file| file == name)) {
-                log::warn!("{} is no account's file; deleted", path.display());
-                delete_file(&path)?;
+            if name.is_some_and(|name| !named.iter().any(|folder| folder == name)) {
+                log::warn!("{} is no account's; deleted", path.display());
+                delete_folder(&path)?;
             }
         }
         Ok(())
@@ -463,26 +477,22 @@ impl DeviceAccounts {
     }
 }
 
+/// The account's database, as its row names it: under `accounts/`.
 fn file_name(user_id: Uuid) -> String {
-    format!("{}.db", user_id.hyphenated())
+    format!("{}/{DATABASE_FILE}", user_id.hyphenated())
 }
 
-/// Deletes a SQLite file with the -wal and -shm files beside it.
-fn delete_file(path: &Path) -> std::io::Result<()> {
-    let mut paths = vec![path.to_path_buf()];
-    for suffix in ["-wal", "-shm"] {
-        let mut beside = path.as_os_str().to_owned();
-        beside.push(suffix);
-        paths.push(PathBuf::from(beside));
+/// Deletes an account's folder with everything in it, or a stray file.
+fn delete_folder(path: &Path) -> std::io::Result<()> {
+    let deleted = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match deleted {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
-    for path in paths {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -655,6 +665,11 @@ mod tests {
             .expect("removed");
         assert_eq!(removed, Removal::Removed);
         assert!(!file_exists(&device, bob.id));
+        assert!(
+            !device.folder_of(bob.id).exists(),
+            "his folder went, the files' bytes with it"
+        );
+        assert!(device.folder_of(alice.id).join(FILES_DIRECTORY).is_dir());
         assert_eq!(device.list().await.expect("listed").len(), 1);
         let error = device
             .remove(&transport, bob.id, false)
@@ -738,7 +753,7 @@ mod tests {
                 .await
                 .expect("bob kept");
             device.activate(alice.id).await.expect("alice active");
-            // A row without a file, and a file without a row
+            // A row without a database, and a folder without a row
             sqlx::query(
                 "INSERT INTO device_accounts (user_id, email, file, signed_in, last_active_at)
                  VALUES ($1, 'carol@example.com', 'carol.db', 1, $2)",
@@ -748,7 +763,9 @@ mod tests {
             .execute(&device.list)
             .await
             .expect("a stray row");
-            std::fs::write(directory.path().join("accounts/stray.db"), b"").expect("a stray file");
+            let stray = directory.path().join("accounts/stray/files");
+            std::fs::create_dir_all(&stray).expect("a stray folder");
+            std::fs::write(stray.join("a-file"), b"bytes").expect("a stray file");
             device.deactivate().await.expect("closed");
             device.activate(alice.id).await.expect("alice active again");
             alice.id
@@ -760,7 +777,7 @@ mod tests {
         assert_eq!(device.active_user_id().await, Some(alice_id));
         let listed = device.list().await.expect("listed");
         assert_eq!(listed.len(), 2, "the stray row is gone");
-        assert!(!directory.path().join("accounts/stray.db").exists());
+        assert!(!directory.path().join("accounts/stray").exists());
         assert!(file_exists(&device, alice_id));
     }
 

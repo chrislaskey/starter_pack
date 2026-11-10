@@ -217,7 +217,8 @@ Where each deployment's file is:
   `DATABASE_URL=postgres://postgres@localhost/starter_pack bin/dev` runs
   the web on PostgreSQL while the apps keep their SQLite files, the
   mix the sync will face.
-* The Tauri app: a file per account under `accounts/`, listed in
+* The Tauri app: a folder per account under `accounts/`, holding its
+  database, `app.db`, and the bytes of its files, `files/`, listed in
   `device.db`, in `DATA_DIR` when set, else the app data directory Tauri
   gives it, under `~/Library/Application Support` on macOS and inside the
   app's sandbox on a phone. Set `DATA_DIR` in dev to keep worktrees
@@ -337,7 +338,7 @@ Sign out, or Sign in and Sign up.
 ### Accounts on a device
 
 The app keeps the accounts signed in on it, each in a SQLite file of
-its own under `accounts/`, listed in `device.db`, and one of them
+its own, `accounts/<user id>/app.db`, listed in `device.db`, and one of them
 active, whose file every command reads and writes (`tauri/src/device_accounts.rs`,
 the design in `docs/design/device-accounts.md`). The accounts page,
 `/accounts`, lists them: the active one, the others to switch to at once

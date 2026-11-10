@@ -97,7 +97,7 @@ A SQLite file next to the account files, with one table:
 | --- | --- |
 | `user_id` | the user's id on the server, the primary key |
 | `email` | shown in the account menu |
-| `file` | the account's database file name, `accounts/<user_id>.db` |
+| `file` | the account's database, under `accounts/`: `<user_id>/app.db`, in the account's folder, beside `files/`, the bytes of its files, see `offline-files-decisions.md` |
 | `signed_in` | whether the file holds a token, so the menu knows which accounts switch at once and which ask for the password |
 | `last_active_at` | for ordering the menu and picking the account to open at start |
 | `active` | the one account open now, at most one row |
@@ -169,7 +169,7 @@ answer into the deployment's file, the user's row and the `signed_in`
 setting. There is one file, so the deployment is known before the call.
 
 With a file per account, the second step has to go into that user's
-file, `accounts/<user_id>.db`, and the user id is only known once the
+file, `accounts/<user_id>/app.db`, and the user id is only known once the
 first step has answered. So the Tauri command needs to run the first
 step, then open or make the file, then run the second step. Core
 already has the two steps as separate pieces, `transport.sign_in` and
