@@ -2840,6 +2840,78 @@ pub(crate) mod tests {
             .expect("exchanged over HTTP")
     }
 
+    /// A file added on one device reaches a running web server's bucket
+    /// and is fetched by another, over HTTP and the bucket's signed
+    /// URLs, as the apps do; run as `sync_two_devices_over_http` is,
+    /// with the server's bucket set up:
+    ///
+    /// ```sh
+    /// SYNC_SERVER_URL=http://localhost:4010 TEST_SERVER_DATABASE_URL=sqlite:../axum/data/app.db \
+    ///   cargo test -p app_core --features sync-http a_file_over_http -- --ignored
+    /// ```
+    #[cfg(feature = "sync-http")]
+    #[tokio::test]
+    #[ignore]
+    async fn sync_a_file_over_http() {
+        use crate::deployment::FileStore;
+        use crate::files::FileState;
+
+        let url = std::env::var("SYNC_SERVER_URL").expect("SYNC_SERVER_URL");
+        let server = Http::new(&url).expect("a transport");
+        let servers_database =
+            crate::database::tests::open_from_env("TEST_SERVER_DATABASE_URL").await;
+        let servers_database = Deployment::new(servers_database, Role::Server);
+        let email = format!("{}@example.com", Uuid::now_v7().simple());
+        let a_folder = tempfile::tempdir().expect("a folder");
+        let b_folder = tempfile::tempdir().expect("a folder");
+        let a = users::tests::device()
+            .await
+            .with_file_store(FileStore::Folder(a_folder.path().to_path_buf()));
+        let b = users::tests::device()
+            .await
+            .with_file_store(FileStore::Folder(b_folder.path().to_path_buf()));
+        let alice = {
+            let session = device_session_over(&server, &servers_database, &email).await;
+            accounts::keep_signed_in(&a, session)
+                .await
+                .expect("signed in on a")
+        };
+        let session = device_session_over(&server, &servers_database, &email).await;
+        accounts::keep_signed_in(&b, session)
+            .await
+            .expect("signed in on b");
+
+        let bytes: Vec<u8> = (0..300_000u32).map(|n| (n % 251) as u8).collect();
+        let file = files::create_with_bytes(&a, &alice, "over http.bin", "", &bytes)
+            .await
+            .expect("a file");
+        let report = run(&a, &server).await.expect("a sync");
+        assert_eq!(report.uploaded, 1, "{report:?}");
+        assert_eq!(report.pending, 0, "{report:?}");
+        let shown = files::get(&a, &alice, file.id).await.expect("on a");
+        assert_eq!(shown.state, FileState::Synced);
+
+        let report = run(&a, &server).await.expect("a sync");
+        assert_eq!(report.uploaded, 0);
+        run(&b, &server).await.expect("a sync");
+        let path = files::local_copy(&b, &server, &alice, file.id)
+            .await
+            .expect("fetched on b");
+        assert_eq!(std::fs::read(path).expect("the bytes"), bytes);
+
+        files::delete(&b, &alice, file.id)
+            .await
+            .expect("deleted on b");
+        let report = run(&b, &server).await.expect("a sync");
+        assert_eq!(report.cleaned, 1);
+        accounts::sign_out_on_device(&b, &server)
+            .await
+            .expect("signed out on b");
+        accounts::sign_out_on_device(&a, &server)
+            .await
+            .expect("signed out on a");
+    }
+
     /// Two devices against a running web server, `SYNC_SERVER_URL`,
     /// whose database, `TEST_SERVER_DATABASE_URL`, the test opens itself
     /// to sign a user up and read nothing from the server's log, then
