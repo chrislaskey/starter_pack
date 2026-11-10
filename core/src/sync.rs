@@ -6,14 +6,18 @@
 //! stands for. A device does one sync with `run`: it pushes its pending
 //! events through a `Transport` with its token, applies the answers,
 //! pulls pages from its cursor, backfills each community it has just
-//! joined, and prunes the posts it can no longer see. The transport is
-//! HTTP in the apps, behind the `sync-http` feature, and the server's
-//! own functions in this process in tests. A device that chose to work
+//! joined, and prunes the posts it can no longer see. A file added on
+//! the device is held back from the push until its bytes are in the
+//! server's bucket, which the sync sends last, see `files` and
+//! `docs/design/offline-files-decisions.md`. The transport is HTTP in
+//! the apps, behind the `sync-http` feature, and the server's own
+//! functions in this process in tests. A device that chose to work
 //! offline, `set_offline`, a device setting, makes no request at all
 //! until it chooses otherwise.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,7 +33,7 @@ use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, now};
 use crate::device_settings::{self, DeviceSettingsError, WORK_OFFLINE};
 use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus};
-use crate::files::{self, File, FileError};
+use crate::files::{self, File, FileError, FileUpload, FileUploadNew};
 use crate::memberships::{self, Membership, MembershipError};
 use crate::posts::{self, Post, PostError};
 use crate::posts_communities::{self, PostCommunity, PostCommunityError};
@@ -529,6 +533,29 @@ pub trait Transport {
         verifier: &str,
     ) -> impl Future<Output = Result<Session, SyncError>> + Send;
     fn sign_out(&self, token: &str) -> impl Future<Output = Result<(), SyncError>> + Send;
+    /// Asks whether the bucket has a file's bytes, and where to send
+    /// them when it has not, see `files::create_upload`.
+    fn files_create_upload(
+        &self,
+        token: Option<&str>,
+        request: FileUploadNew,
+    ) -> impl Future<Output = Result<FileUpload, SyncError>> + Send;
+    /// Sends the bytes at the path to where the upload says. The bucket
+    /// refusing them is `Refused`; not reaching it, `Transport`.
+    fn files_upload(
+        &self,
+        token: Option<&str>,
+        upload: &FileUpload,
+        path: &Path,
+    ) -> impl Future<Output = Result<(), SyncError>> + Send;
+    /// Fetches the bytes of a file of the user's from the bucket into
+    /// the path.
+    fn files_download(
+        &self,
+        token: Option<&str>,
+        id: Uuid,
+        path: &Path,
+    ) -> impl Future<Output = Result<(), SyncError>> + Send;
 }
 
 /// The server in this process: its functions called directly, for tests,
@@ -587,6 +614,106 @@ impl Transport for InProcess<'_> {
             .await
             .map_err(refused)
     }
+
+    #[cfg(feature = "object-storage")]
+    async fn files_create_upload(
+        &self,
+        token: Option<&str>,
+        request: FileUploadNew,
+    ) -> Result<FileUpload, SyncError> {
+        let user = self.user(token).await?;
+        files::create_upload(self.server, &user, &request)
+            .await
+            .map_err(refused_file)
+    }
+
+    /// Puts the bytes where the device's PUT would have.
+    #[cfg(feature = "object-storage")]
+    async fn files_upload(
+        &self,
+        token: Option<&str>,
+        upload: &FileUpload,
+        path: &Path,
+    ) -> Result<(), SyncError> {
+        let user = self.user(token).await?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| SyncError::Refused(error.to_string()))?;
+        files::bucket(self.server)
+            .map_err(refused_file)?
+            .put(&files::storage_key(user.id, upload.id), bytes)
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))
+    }
+
+    #[cfg(feature = "object-storage")]
+    async fn files_download(
+        &self,
+        token: Option<&str>,
+        id: Uuid,
+        path: &Path,
+    ) -> Result<(), SyncError> {
+        let user = self.user(token).await?;
+        let shown = files::get(self.server, &user, id)
+            .await
+            .map_err(refused_file)?;
+        let bytes = files::bucket(self.server)
+            .map_err(refused_file)?
+            .get(&files::storage_key(shown.file.owner_id, id))
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        tokio::fs::write(path, bytes)
+            .await
+            .map_err(|error| SyncError::Malformed(error.to_string()))
+    }
+
+    #[cfg(not(feature = "object-storage"))]
+    async fn files_create_upload(
+        &self,
+        _token: Option<&str>,
+        _request: FileUploadNew,
+    ) -> Result<FileUpload, SyncError> {
+        Err(no_bucket())
+    }
+
+    #[cfg(not(feature = "object-storage"))]
+    async fn files_upload(
+        &self,
+        _token: Option<&str>,
+        _upload: &FileUpload,
+        _path: &Path,
+    ) -> Result<(), SyncError> {
+        Err(no_bucket())
+    }
+
+    #[cfg(not(feature = "object-storage"))]
+    async fn files_download(
+        &self,
+        _token: Option<&str>,
+        _id: Uuid,
+        _path: &Path,
+    ) -> Result<(), SyncError> {
+        Err(no_bucket())
+    }
+}
+
+/// Without the bucket's code compiled in, the server in this process
+/// has none, as a server that is down for files would answer.
+#[cfg(not(feature = "object-storage"))]
+fn no_bucket() -> SyncError {
+    SyncError::Transport("the server in this process has no bucket".to_string())
+}
+
+/// The server's answer about a file as the web server would send it:
+/// what it will not take is refused in words, a missing or failing
+/// bucket is the server failing.
+#[cfg(feature = "object-storage")]
+fn refused_file(error: FileError) -> SyncError {
+    match error {
+        FileError::Database(error) => SyncError::Database(error),
+        FileError::NoFileStore | FileError::Storage(_) => SyncError::Transport(error.to_string()),
+        error => SyncError::Refused(error.to_string()),
+    }
 }
 
 /// The server's answer as the web server would send it: 401 for a code
@@ -605,18 +732,33 @@ fn refused(error: AccountError) -> SyncError {
 #[cfg(feature = "sync-http")]
 pub struct Http {
     client: reqwest::Client,
+    /// For a file's content, which the server answers by a redirect to
+    /// the bucket: the bucket is asked without the device's token.
+    not_following_redirects: reqwest::Client,
     base_url: String,
 }
+
+/// How long a file's bytes may take to send or fetch, far longer than
+/// any other request.
+#[cfg(feature = "sync-http")]
+const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 #[cfg(feature = "sync-http")]
 impl Http {
     pub fn new(base_url: &str) -> Result<Http, SyncError> {
+        let timeout = std::time::Duration::from_secs(60);
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
+            .build()
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        let not_following_redirects = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| SyncError::Transport(error.to_string()))?;
         Ok(Http {
             client,
+            not_following_redirects,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
@@ -675,7 +817,7 @@ impl Http {
         if !status.is_success() {
             let answer: Option<ErrorAnswer> = response.json().await.ok();
             return Err(match answer {
-                Some(answer) if status.is_client_error() => SyncError::Refused(answer.error),
+                Some(answer) if status.is_client_error() => SyncError::Refused(answer.message()),
                 _ => SyncError::Transport(format!("the server refused {path} with {status}")),
             });
         }
@@ -710,11 +852,25 @@ impl Http {
     }
 }
 
-/// The web server's error answer, `{"error": "..."}`.
+/// The web server's error answer, `{"error": "..."}`, with the fields
+/// that were wrong when a form's were, `{"errors": {...}}`.
 #[cfg(feature = "sync-http")]
 #[derive(Deserialize)]
 struct ErrorAnswer {
     error: String,
+    #[serde(default)]
+    errors: Option<crate::field_errors::FieldErrors>,
+}
+
+#[cfg(feature = "sync-http")]
+impl ErrorAnswer {
+    /// The fields' messages when there are any, else the error.
+    fn message(self) -> String {
+        match self.errors {
+            Some(errors) => errors.to_string(),
+            None => self.error,
+        }
+    }
 }
 
 #[cfg(feature = "sync-http")]
@@ -755,6 +911,125 @@ impl Transport for Http {
     async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
         self.delete(token, "/api/accounts/sign-out").await
     }
+
+    async fn files_create_upload(
+        &self,
+        token: Option<&str>,
+        request: FileUploadNew,
+    ) -> Result<FileUpload, SyncError> {
+        self.post(token, "/api/files/upload", &request).await
+    }
+
+    /// PUTs the file to the signed URL, streamed from the disk.
+    async fn files_upload(
+        &self,
+        _token: Option<&str>,
+        upload: &FileUpload,
+        path: &Path,
+    ) -> Result<(), SyncError> {
+        let url = upload
+            .upload_url
+            .as_deref()
+            .ok_or_else(|| SyncError::Malformed("an upload with no URL".to_string()))?;
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| SyncError::Refused(error.to_string()))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|error| SyncError::Refused(error.to_string()))?
+            .len();
+        let response = self
+            .client
+            .put(url)
+            .timeout(FILE_TRANSFER_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, &upload.content_type)
+            .header(reqwest::header::CONTENT_LENGTH, size)
+            .body(reqwest::Body::from(file))
+            .send()
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        let status = response.status();
+        if status.is_client_error() {
+            return Err(SyncError::Refused(format!(
+                "the storage refused the file with {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(SyncError::Transport(format!(
+                "the storage answered {status}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Asks the server where the file's bytes are, then reads them from
+    /// the bucket into the path, a chunk at a time.
+    async fn files_download(
+        &self,
+        token: Option<&str>,
+        id: Uuid,
+        path: &Path,
+    ) -> Result<(), SyncError> {
+        use tokio::io::AsyncWriteExt;
+
+        let asked = format!("{}/api/files/{id}/content", self.base_url);
+        let mut request = self.not_following_redirects.get(&asked);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(SyncError::Unauthorized);
+        }
+        if status.is_client_error() {
+            return Err(SyncError::Refused(format!(
+                "the server has no file {id} for this user"
+            )));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .filter(|_| status.is_redirection())
+            .ok_or_else(|| {
+                SyncError::Transport(format!("the server answered {asked} with {status}"))
+            })?
+            .to_string();
+
+        let mut response = self
+            .client
+            .get(location)
+            .timeout(FILE_TRANSFER_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(SyncError::Transport(format!(
+                "the storage answered {}",
+                response.status()
+            )));
+        }
+        let mut file = tokio::fs::File::create(path)
+            .await
+            .map_err(|error| SyncError::Malformed(error.to_string()))?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| SyncError::Transport(error.to_string()))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| SyncError::Malformed(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| SyncError::Malformed(error.to_string()))
+    }
 }
 
 /// What the exchange of a device code sends.
@@ -778,6 +1053,8 @@ pub struct Report {
     pub conflicts: usize,
     /// Events the server rejected.
     pub rejected: usize,
+    /// Files whose bytes this sync sent to the server's bucket.
+    pub uploaded: usize,
     /// Rows received by the pull.
     pub pulled: usize,
     /// Rows received by the backfills of communities just joined.
@@ -805,12 +1082,15 @@ pub struct Status {
 }
 
 /// One sync on a device, as the user signed in and with the device's
-/// token: push the pending events and apply the answers, pull from the
-/// cursor, starting over from nothing if the server says so, backfill
-/// each community just joined, prune what the user no longer sees. A
-/// push that fails as a whole changes nothing on the device and the pull
-/// still runs. Working offline, it makes no request and only reports
-/// what waits.
+/// token: ask the server which waiting files' bytes it has, push the
+/// pending events but those of a file it has not, and apply the answers,
+/// pull from the cursor, starting over from nothing if the server says
+/// so, backfill each community just joined, prune what the user no
+/// longer sees, then send the waiting files' bytes and push their
+/// events. The bytes go last, so nothing else waits on them. A push that
+/// fails as a whole changes nothing on the device and the pull still
+/// runs. Working offline, it makes no request and only reports what
+/// waits.
 pub async fn run<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -828,12 +1108,25 @@ pub async fn run<T: Transport>(
     }
     let (user, token) = users::signed_in_with_token(deployment).await?;
     let token = Some(token.as_str());
-    if let Err(error) = push_pending(deployment, transport, token, &user, &mut report).await {
+    let mut waiting = files::ask_about_waiting(deployment, transport, token).await?;
+    let held_back = files::not_uploaded(&waiting);
+    if let Err(error) =
+        push_pending(deployment, transport, token, &user, &held_back, &mut report).await
+    {
         report.push_error = Some(error.to_string());
     }
     pull_pages(deployment, transport, token, &user, &mut report).await?;
     backfill_pending(deployment, transport, token, &user, &mut report).await?;
     prune(deployment, &user, &mut report).await?;
+    report.uploaded = files::upload_waiting(deployment, transport, token, &mut waiting).await?;
+    if report.uploaded > 0 {
+        let held_back = files::not_uploaded(&waiting);
+        if let Err(error) =
+            push_pending(deployment, transport, token, &user, &held_back, &mut report).await
+        {
+            report.push_error = Some(error.to_string());
+        }
+    }
     report.pending = status(deployment).await?.pending;
     Ok(report)
 }
@@ -862,16 +1155,22 @@ pub async fn set_offline(deployment: &Deployment, offline: bool) -> Result<(), S
     Ok(())
 }
 
+/// Pushes the pending events and applies the answers, leaving out the
+/// events of the files held back, whose bytes the server does not have.
 async fn push_pending<T: Transport>(
     deployment: &Deployment,
     transport: &T,
     token: Option<&str>,
     user: &User,
+    held_back: &BTreeSet<Uuid>,
     report: &mut Report,
 ) -> Result<(), SyncError> {
     let mut tx = deployment.begin().await?;
-    let pending = events::pending(&mut tx).await?;
+    let mut pending = events::pending(&mut tx).await?;
     tx.commit().await?;
+    pending.retain(|stored| {
+        stored.event.table != files::TABLE || !held_back.contains(&stored.event.row_id)
+    });
     if pending.is_empty() {
         return Ok(());
     }
@@ -1430,6 +1729,32 @@ pub(crate) mod tests {
         async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
             self.server.sign_out(token).await
         }
+
+        async fn files_create_upload(
+            &self,
+            token: Option<&str>,
+            request: FileUploadNew,
+        ) -> Result<FileUpload, SyncError> {
+            self.server.files_create_upload(token, request).await
+        }
+
+        async fn files_upload(
+            &self,
+            token: Option<&str>,
+            upload: &FileUpload,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_upload(token, upload, path).await
+        }
+
+        async fn files_download(
+            &self,
+            token: Option<&str>,
+            id: Uuid,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_download(token, id, path).await
+        }
     }
 
     #[tokio::test]
@@ -1569,6 +1894,32 @@ pub(crate) mod tests {
 
         async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
             self.server.sign_out(token).await
+        }
+
+        async fn files_create_upload(
+            &self,
+            token: Option<&str>,
+            request: FileUploadNew,
+        ) -> Result<FileUpload, SyncError> {
+            self.server.files_create_upload(token, request).await
+        }
+
+        async fn files_upload(
+            &self,
+            token: Option<&str>,
+            upload: &FileUpload,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_upload(token, upload, path).await
+        }
+
+        async fn files_download(
+            &self,
+            token: Option<&str>,
+            id: Uuid,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_download(token, id, path).await
         }
     }
 
@@ -1798,6 +2149,32 @@ pub(crate) mod tests {
 
         async fn sign_out(&self, _token: &str) -> Result<(), SyncError> {
             panic!("the device is working offline and must not sign out")
+        }
+
+        async fn files_create_upload(
+            &self,
+            _token: Option<&str>,
+            _request: FileUploadNew,
+        ) -> Result<FileUpload, SyncError> {
+            panic!("the device is working offline and must not ask about a file")
+        }
+
+        async fn files_upload(
+            &self,
+            _token: Option<&str>,
+            _upload: &FileUpload,
+            _path: &Path,
+        ) -> Result<(), SyncError> {
+            panic!("the device is working offline and must not send a file")
+        }
+
+        async fn files_download(
+            &self,
+            _token: Option<&str>,
+            _id: Uuid,
+            _path: &Path,
+        ) -> Result<(), SyncError> {
+            panic!("the device is working offline and must not fetch a file")
         }
     }
 

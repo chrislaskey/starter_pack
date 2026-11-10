@@ -14,6 +14,7 @@
 //! `create_with_bytes`, and the file waits there, its create pending,
 //! until a sync has sent them.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -31,7 +32,7 @@ use crate::events::{
 use crate::field_errors::FieldErrors;
 #[cfg(feature = "object-storage")]
 use crate::storage::{Storage, StorageError};
-use crate::sync::{Cursor, TableRow};
+use crate::sync::{Cursor, SyncError, TableRow, Transport};
 use crate::users::User;
 
 pub const TABLE: &str = "app_files";
@@ -395,6 +396,131 @@ pub async fn content_url(
             content_disposition.as_deref(),
         )
         .await?)
+}
+
+/// A file waiting on a device, with what the server said when asked
+/// about its bytes: nothing when it could not be asked or would not
+/// say, that it has them, or where to send them.
+#[derive(Clone, Debug)]
+pub struct WaitingFile {
+    pub id: Uuid,
+    /// The file's create, pending in the queue.
+    pub create_id: Uuid,
+    pub upload: Option<FileUpload>,
+}
+
+/// The first step of a sync on a device: asks the server about the
+/// bytes of every file whose create is pending. What the device knows
+/// of an upload is only this answer, asked again by every sync and
+/// kept nowhere. Once the server cannot be reached the rest are not
+/// asked, so a device offline waits for one request, not one per file.
+pub async fn ask_about_waiting<T: Transport>(
+    deployment: &Deployment,
+    transport: &T,
+    token: Option<&str>,
+) -> Result<Vec<WaitingFile>, SyncError> {
+    let mut tx = deployment.begin().await?;
+    let creates: Vec<StoredEvent> = events::pending(&mut tx)
+        .await?
+        .into_iter()
+        .filter(|stored| stored.event.table == TABLE && stored.event.kind == EventKind::Create)
+        .collect();
+    tx.commit().await?;
+
+    let mut waiting = Vec::with_capacity(creates.len());
+    let mut reachable = true;
+    for stored in creates {
+        let event = &stored.event;
+        let mut file = WaitingFile {
+            id: event.row_id,
+            create_id: event.id,
+            upload: None,
+        };
+        let request = FileUploadNew {
+            id: Some(event.row_id),
+            content_type: event.changes["content_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            size: event.changes["size"].as_u64().unwrap_or_default(),
+        };
+        if reachable {
+            match transport.files_create_upload(token, request).await {
+                Ok(upload) => file.upload = Some(upload),
+                Err(SyncError::Refused(reason)) => {
+                    note_error(deployment, event.id, &reason).await?;
+                }
+                Err(error @ SyncError::Transport(_)) => {
+                    reachable = false;
+                    note_error(deployment, event.id, &error.to_string()).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        waiting.push(file);
+    }
+    Ok(waiting)
+}
+
+/// The files whose bytes the server does not have: their events are
+/// held back from the push.
+pub fn not_uploaded(waiting: &[WaitingFile]) -> BTreeSet<Uuid> {
+    waiting
+        .iter()
+        .filter(|file| !file.upload.as_ref().is_some_and(|upload| upload.uploaded))
+        .map(|file| file.id)
+        .collect()
+}
+
+/// The last step of a sync on a device before the files' events are
+/// pushed: sends the bytes of each waiting file the server gave a URL
+/// for, from the account's folder, and marks it uploaded. How many
+/// went. A file that fails keeps its reason and waits for the next
+/// sync; once the bucket cannot be reached the rest wait too.
+///
+/// This runs inside the sync, which holds the sync lock while bytes go.
+/// An application with large files calls it from a task of its own
+/// instead, followed by a sync.
+pub async fn upload_waiting<T: Transport>(
+    deployment: &Deployment,
+    transport: &T,
+    token: Option<&str>,
+    waiting: &mut [WaitingFile],
+) -> Result<usize, SyncError> {
+    let mut uploaded = 0;
+    for file in waiting {
+        let Some(upload) = file.upload.as_mut().filter(|upload| !upload.uploaded) else {
+            continue;
+        };
+        let path = local_path(deployment, file.id)?;
+        match transport.files_upload(token, upload, &path).await {
+            Ok(()) => {
+                upload.uploaded = true;
+                uploaded += 1;
+            }
+            Err(SyncError::Refused(reason)) => {
+                note_error(deployment, file.create_id, &reason).await?;
+            }
+            Err(error @ SyncError::Transport(_)) => {
+                note_error(deployment, file.create_id, &error.to_string()).await?;
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(uploaded)
+}
+
+/// Keeps why a waiting file's bytes did not go, for the pages.
+async fn note_error(
+    deployment: &Deployment,
+    create_id: Uuid,
+    reason: &str,
+) -> Result<(), SyncError> {
+    let mut tx = deployment.begin().await?;
+    events::mark_error(&mut tx, create_id, reason).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// The file as it travels on the wire.
@@ -772,7 +898,7 @@ impl FileNew {
 
 /// The server's bucket, where there is one.
 #[cfg(feature = "object-storage")]
-fn bucket(deployment: &Deployment) -> Result<&Storage, FileError> {
+pub(crate) fn bucket(deployment: &Deployment) -> Result<&Storage, FileError> {
     match &deployment.file_store {
         FileStore::Bucket(storage) => Ok(storage),
         _ => Err(FileError::NoFileStore),
@@ -855,8 +981,13 @@ fn attachment_named(name: &str) -> String {
 #[cfg(all(test, feature = "object-storage"))]
 pub(crate) mod tests {
     use super::*;
+    use crate::accounts::Session;
     use crate::database::{Database, with_each_database};
-    use crate::users;
+    use crate::sync::tests::user_with_token;
+    use crate::sync::{
+        self, BackfillRequest, InProcess, Page, PullRequest, PushRequest, PushResponse,
+    };
+    use crate::{posts, users};
 
     /// A server with a bucket in memory.
     pub(crate) fn server(database: Database) -> (Deployment, Storage) {
@@ -963,6 +1094,288 @@ pub(crate) mod tests {
                 .count(),
             0
         );
+    }
+
+    /// The server in this process, with the faults a test asks for.
+    struct Faulty<'a> {
+        server: InProcess<'a>,
+        /// How many pushes carrying a file's event are lost on the way.
+        file_pushes_lost: std::sync::Mutex<u32>,
+        /// Answers that the bucket has every file's bytes, asked or not.
+        says_uploaded: bool,
+    }
+
+    impl<'a> Faulty<'a> {
+        fn new(server: &'a Deployment) -> Faulty<'a> {
+            Faulty {
+                server: InProcess { server },
+                file_pushes_lost: std::sync::Mutex::new(0),
+                says_uploaded: false,
+            }
+        }
+    }
+
+    impl Transport for Faulty<'_> {
+        async fn push(
+            &self,
+            token: Option<&str>,
+            request: PushRequest,
+        ) -> Result<PushResponse, SyncError> {
+            let carries_a_file = request.events.iter().any(|event| event.table == TABLE);
+            {
+                let mut lost = self.file_pushes_lost.lock().expect("the lock");
+                if carries_a_file && *lost > 0 {
+                    *lost -= 1;
+                    return Err(SyncError::Transport("the connection dropped".to_string()));
+                }
+            }
+            self.server.push(token, request).await
+        }
+
+        async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+            self.server.pull(token, request).await
+        }
+
+        async fn backfill(
+            &self,
+            token: Option<&str>,
+            request: BackfillRequest,
+        ) -> Result<Page, SyncError> {
+            self.server.backfill(token, request).await
+        }
+
+        async fn sign_in_with_device_code(
+            &self,
+            code: &str,
+            verifier: &str,
+        ) -> Result<Session, SyncError> {
+            self.server.sign_in_with_device_code(code, verifier).await
+        }
+
+        async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+            self.server.sign_out(token).await
+        }
+
+        async fn files_create_upload(
+            &self,
+            token: Option<&str>,
+            request: FileUploadNew,
+        ) -> Result<FileUpload, SyncError> {
+            let upload = self.server.files_create_upload(token, request).await?;
+            Ok(FileUpload {
+                uploaded: upload.uploaded || self.says_uploaded,
+                ..upload
+            })
+        }
+
+        async fn files_upload(
+            &self,
+            token: Option<&str>,
+            upload: &FileUpload,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_upload(token, upload, path).await
+        }
+
+        async fn files_download(
+            &self,
+            token: Option<&str>,
+            id: Uuid,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_download(token, id, path).await
+        }
+    }
+
+    async fn state_of(
+        deployment: &Deployment,
+        user: &User,
+        id: Uuid,
+    ) -> (FileState, Option<String>) {
+        let shown = get(deployment, user, id).await.expect("the file");
+        (shown.state, shown.error)
+    }
+
+    async fn in_bucket(storage: &Storage, user: &User, id: Uuid) -> Option<u64> {
+        storage
+            .size(&storage_key(user.id, id))
+            .await
+            .expect("looked")
+    }
+
+    #[tokio::test]
+    async fn files_added_offline_reach_the_bucket_the_server_and_another_device() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _a_folder) = device_with_folder(&alice, &token).await;
+            let (b, _b_folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            posts::create(&a, &alice, "a post beside it", &[])
+                .await
+                .expect("a post");
+            assert_eq!(in_bucket(&storage, &alice, file.id).await, None);
+
+            let report = sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(report.uploaded, 1);
+            assert_eq!(
+                report.pushed, 2,
+                "the post, then the file once its bytes went"
+            );
+            assert_eq!(report.pending, 0);
+            assert_eq!(report.push_error, None);
+            assert_eq!(in_bucket(&storage, &alice, file.id).await, Some(10));
+            let on_server = get(&server, &alice, file.id).await.expect("on the server");
+            assert_eq!(on_server.file.name, "notes.txt");
+            assert_eq!(on_server.file.version, 1);
+            let on_a = get(&a, &alice, file.id).await.expect("on a");
+            assert_eq!(on_a.state, FileState::Synced);
+            assert_eq!(on_a.file, on_server.file, "the server's row came back");
+            assert!(
+                local_path(&a, file.id).expect("a path").exists(),
+                "the device that added it keeps its copy"
+            );
+
+            sync::run(&b, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            let on_b = get(&b, &alice, file.id).await.expect("on b");
+            assert_eq!(on_b.file, on_server.file);
+            assert_eq!(on_b.state, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_failed_upload_holds_back_only_its_own_events() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let lost = create_with_bytes(&a, &alice, "lost.txt", "text/plain", b"lost")
+                .await
+                .expect("a file");
+            let kept = create_with_bytes(&a, &alice, "kept.txt", "text/plain", b"kept")
+                .await
+                .expect("a file");
+            update(&a, &alice, lost.id, "renamed.txt")
+                .await
+                .expect("renamed while waiting");
+            posts::create(&a, &alice, "a post", &[])
+                .await
+                .expect("a post");
+            std::fs::remove_file(local_path(&a, lost.id).expect("a path")).expect("its bytes gone");
+
+            let report = sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(report.uploaded, 1);
+            assert_eq!(report.pushed, 2, "the post and the other file");
+            assert_eq!(
+                report.pending, 2,
+                "the file's create and its rename wait together"
+            );
+            assert_eq!(in_bucket(&storage, &alice, kept.id).await, Some(4));
+            assert_eq!(in_bucket(&storage, &alice, lost.id).await, None);
+            let on_server: Vec<String> = list(&server, &alice)
+                .await
+                .expect("the files")
+                .into_iter()
+                .map(|listed| listed.file.name)
+                .collect();
+            assert_eq!(on_server, ["kept.txt"]);
+            let (state, error) = state_of(&a, &alice, lost.id).await;
+            assert_eq!(state, FileState::Waiting);
+            assert!(error.is_some(), "why it did not go is kept for the page");
+            assert_eq!(state_of(&a, &alice, kept.id).await.0, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_sync_cut_off_after_the_upload_is_finished_by_the_next() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            let transport = Faulty::new(&server);
+            *transport.file_pushes_lost.lock().expect("the lock") = 1;
+
+            let report = sync::run(&a, &transport).await.expect("a sync");
+            assert_eq!(report.uploaded, 1);
+            assert!(report.push_error.is_some());
+            assert_eq!(in_bucket(&storage, &alice, file.id).await, Some(10));
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Waiting);
+
+            let report = sync::run(&a, &transport).await.expect("a sync");
+            assert_eq!(report.uploaded, 0, "the server said it has the bytes");
+            assert_eq!(report.pushed, 1);
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+            assert!(get(&server, &alice, file.id).await.is_ok());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_bytes_gone_from_the_bucket_before_the_push_are_sent_again() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            let transport = Faulty::new(&server);
+            *transport.file_pushes_lost.lock().expect("the lock") = 1;
+            sync::run(&a, &transport).await.expect("a sync cut off");
+            storage
+                .delete(&storage_key(alice.id, file.id))
+                .await
+                .expect("swept, as a file no row points at is after a day");
+
+            let report = sync::run(&a, &transport).await.expect("a sync");
+            assert_eq!(report.uploaded, 1);
+            assert_eq!(in_bucket(&storage, &alice, file.id).await, Some(10));
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_create_pushed_without_its_bytes_stays_waiting_and_is_tried_again() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _folder) = device_with_folder(&alice, &token).await;
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            let wrong = Faulty {
+                says_uploaded: true,
+                ..Faulty::new(&server)
+            };
+
+            let report = sync::run(&a, &wrong).await.expect("a sync");
+            assert_eq!(report.rejected, 1);
+            assert_eq!(report.pending, 1);
+            let (state, error) = state_of(&a, &alice, file.id).await;
+            assert_eq!(state, FileState::Waiting, "the file is not dropped");
+            assert_eq!(error.as_deref(), Some(FILE_NOT_UPLOADED));
+            assert!(get(&server, &alice, file.id).await.is_err());
+
+            sync::run(&a, &InProcess { server: &server })
+                .await
+                .expect("a sync");
+            assert_eq!(state_of(&a, &alice, file.id).await.0, FileState::Synced);
+        })
+        .await;
     }
 
     #[tokio::test]
