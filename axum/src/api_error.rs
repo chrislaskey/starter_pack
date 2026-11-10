@@ -165,7 +165,9 @@ impl From<FileError> for ApiError {
             }
             FileError::NoFileStore => StatusCode::SERVICE_UNAVAILABLE,
             FileError::Storage(_) => StatusCode::BAD_GATEWAY,
-            FileError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            FileError::DeviceOnly | FileError::Io(_) | FileError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         ApiError::new(status, error.to_string())
     }

@@ -18,12 +18,20 @@ async function invokeForm(command, args) {
   try {
     return await invoke(command, args);
   } catch (problem) {
-    if (problem && typeof problem === "object" && "error" in problem) {
-      const { error, errors } = /** @type {{error: string, errors?: Record<string, string[]>}} */ (problem);
-      throw new FormError(error, errors);
-    }
-    throw problem;
+    throw formErrorOf(problem);
   }
+}
+
+/**
+ * A command's `{error, errors}` as a FormError; anything else as it is.
+ * @param {unknown} problem
+ */
+function formErrorOf(problem) {
+  if (problem && typeof problem === "object" && "error" in problem) {
+    const { error, errors } = /** @type {{error: string, errors?: Record<string, string[]>}} */ (problem);
+    return new FormError(error, errors);
+  }
+  return problem;
 }
 
 /**
@@ -186,21 +194,35 @@ export function filesDelete(id) {
 }
 
 /**
- * @param {File} _file
- * @param {string} _name
- * @param {(fraction: number) => void} [_onProgress]
+ * Adds the file the person picked: kept on this device at once, and
+ * sent to the server by the next sync; answers the file. The bytes are
+ * the command's body, the name and the type its headers.
+ * @param {File} file
+ * @param {string} name
+ * @param {(fraction: number) => void} [_onProgress] nothing to wait for here
  */
-export function filesCreate(_file, _name, _onProgress) {
-  return Promise.reject(new Error("adding a file in the app is not built yet"));
+export async function filesCreate(file, name, _onProgress) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const headers = { "x-file-name": encodeURIComponent(name), "x-file-content-type": file.type };
+  try {
+    return await invoke("files_create", bytes, { headers });
+  } catch (problem) {
+    throw formErrorOf(problem);
+  }
 }
 
+/** Whether this device saves a copy of a file outside the app. */
 export function filesDownloadSupported() {
-  return Promise.resolve(false);
+  return invoke("files_download_supported");
 }
 
-/** @param {string} _id */
-export function filesDownload(_id) {
-  return Promise.reject(new Error("downloading in the app is not built yet"));
+/**
+ * Saves a copy of the file in the Downloads folder.
+ * @param {string} id
+ * @returns {Promise<string | null>} where it was saved
+ */
+export function filesDownload(id) {
+  return invoke("files_download", { id });
 }
 
 /**

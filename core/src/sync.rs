@@ -906,6 +906,11 @@ async fn push_pending<T: Transport>(
                 match (event.kind, server.is_some()) {
                     // The server's row wins
                     (_, true) => events::delete(&mut tx, event.id).await?,
+                    // A file is the only copy of its bytes: it waits
+                    (EventKind::Create, false) if event.table == files::TABLE => {
+                        events::mark_error(&mut tx, event.id, &reason).await?;
+                        continue;
+                    }
                     // The server will never have this row: drop it
                     (EventKind::Create, false) => {
                         events::delete(&mut tx, event.id).await?;

@@ -10,7 +10,11 @@
 //! What differs is the create: the server writes the row only once the
 //! file is in its bucket, and answers `file_not_uploaded` until then.
 //! On the web the page asks `create_upload` where to PUT the bytes,
-//! sends them, then creates the row.
+//! sends them, then creates the row. A device keeps the bytes itself,
+//! `create_with_bytes`, and the file waits there, its create pending,
+//! until a sync has sent them.
+
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use garde::Validate;
@@ -20,9 +24,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::database::{Transaction, sql};
-#[cfg(feature = "object-storage")]
-use crate::deployment::FileStore;
-use crate::deployment::{Deployment, Role, now};
+use crate::deployment::{Deployment, FileStore, Role, now};
 use crate::events::{
     self, Answer, AnswerStatus, Conflicts, Event, EventKind, EventStatus, Fields, StoredEvent,
 };
@@ -177,8 +179,12 @@ pub enum FileError {
     Rejected(String),
     #[error("files are not set up on this deployment")]
     NoFileStore,
+    #[error("only a device keeps a file's bytes itself")]
+    DeviceOnly,
     #[error("{0}")]
     Malformed(String),
+    #[error("could not read or write the file on this device: {0}")]
+    Io(#[from] std::io::Error),
     #[cfg(feature = "object-storage")]
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -232,6 +238,39 @@ pub async fn create(
     apply(deployment, user, &event).await?.file()
 }
 
+/// Adds a file on a device: keeps its bytes in the account's folder
+/// under a new id, then writes its row and queues its create, so the
+/// file is there with the network off and the next sync sends it. The
+/// bytes go first: a crash in between leaves bytes without a row, which
+/// the cleanup removes, never a row without its bytes.
+pub async fn create_with_bytes(
+    deployment: &Deployment,
+    user: &User,
+    name: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Result<File, FileError> {
+    if deployment.role != Role::Device {
+        return Err(FileError::DeviceOnly);
+    }
+    let new = FileNew {
+        id: Uuid::now_v7(),
+        name: name.to_string(),
+        content_type: content_type.to_string(),
+        size: bytes.len() as u64,
+    }
+    .checked()?;
+    let path = local_path(deployment, new.id)?;
+    write_whole(&path, bytes).await?;
+    match create(deployment, user, &new).await {
+        Ok(file) => Ok(file),
+        Err(error) => {
+            delete_local(&path).await?;
+            Err(error)
+        }
+    }
+}
+
 /// Writes a new name over the user's file.
 pub async fn update(
     deployment: &Deployment,
@@ -258,12 +297,20 @@ pub async fn update(
     applied.file()
 }
 
-/// Deletes the user's file: a soft delete, so it syncs like any edit.
-/// The bytes go after the row, by the sweep on the server and the
-/// cleanup on a device.
+/// Deletes the user's file: a soft delete, so it syncs like any edit,
+/// and the bytes go after the row, by the sweep on the server and the
+/// cleanup on a device. A file on a device that never reached the
+/// server, waiting or refused, goes at once and whole, its row, its
+/// events and its bytes, and nothing is pushed.
 pub async fn delete(deployment: &Deployment, user: &User, id: Uuid) -> Result<(), FileError> {
     let mut tx = deployment.begin().await?;
     let file = get_own(&mut tx, user, id).await?;
+    if deployment.role == Role::Device && create_of(&mut tx, id).await?.is_some() {
+        events::delete_of_row(&mut tx, TABLE, id).await?;
+        sql!(&mut tx, files::delete_row(id))?;
+        tx.commit().await?;
+        return delete_local(&local_path(deployment, id)?).await;
+    }
     let event = Event::update(
         TABLE,
         id,
@@ -393,6 +440,45 @@ pub(crate) async fn list_synced_after(
 /// The row by its id, deleted or not, whoever owns it.
 pub(crate) async fn get_in(tx: &mut Transaction, id: Uuid) -> Result<Option<File>, FileError> {
     Ok(sql!(tx, files::get(id))?)
+}
+
+/// Where a file's bytes are on this device, there or not.
+pub fn local_path(deployment: &Deployment, id: Uuid) -> Result<PathBuf, FileError> {
+    match &deployment.file_store {
+        FileStore::Folder(folder) => Ok(folder.join(id.hyphenated().to_string())),
+        _ => Err(FileError::NoFileStore),
+    }
+}
+
+/// Writes the bytes under a temporary name beside the path, then
+/// renames, so a file at its path is always whole.
+async fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
+    let partial = partial_path(path);
+    tokio::fs::write(&partial, bytes).await?;
+    tokio::fs::rename(&partial, path).await?;
+    Ok(())
+}
+
+/// The name a file is written under until it is whole.
+pub(crate) fn partial_path(path: &Path) -> PathBuf {
+    path.with_extension("part")
+}
+
+/// Removes the bytes at the path, if any are there.
+async fn delete_local(path: &Path) -> Result<(), FileError> {
+    match tokio::fs::remove_file(path).await {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+/// The create of a file that has not reached the server, on a device:
+/// pending while the file waits, a conflict once the server refused it.
+async fn create_of(tx: &mut Transaction, id: Uuid) -> Result<Option<StoredEvent>, FileError> {
+    Ok(events::list_of_table(tx, TABLE)
+        .await?
+        .into_iter()
+        .find(|stored| stored.event.row_id == id && stored.event.kind == EventKind::Create))
 }
 
 /// The live file, if the user owns it; another user's is not found, as
@@ -804,6 +890,79 @@ pub(crate) mod tests {
             .await
             .expect("the upload");
         create(deployment, user, &new).await.expect("a file")
+    }
+
+    /// A device the user is signed in on, with a folder for its files'
+    /// bytes, which goes when the test drops it.
+    pub(crate) async fn device_with_folder(
+        user: &User,
+        token: &str,
+    ) -> (Deployment, tempfile::TempDir) {
+        let folder = tempfile::tempdir().expect("a folder");
+        let deployment = users::tests::device_of(user, token)
+            .await
+            .with_file_store(FileStore::Folder(folder.path().to_path_buf()));
+        (deployment, folder)
+    }
+
+    #[tokio::test]
+    async fn files_create_with_bytes_on_a_device_keeps_them_and_waits() {
+        let alice = users::tests::alice();
+        let (device, folder) = device_with_folder(&alice, "a token").await;
+
+        let file = create_with_bytes(&device, &alice, " notes.txt ", "text/plain", b"some notes")
+            .await
+            .expect("a file");
+        assert_eq!(file.name, "notes.txt");
+        assert_eq!(file.size, 10);
+        assert_eq!(file.version, 0);
+        let path = local_path(&device, file.id).expect("a path");
+        assert_eq!(std::fs::read(&path).expect("the bytes"), b"some notes");
+        let listed = list(&device, &alice).await.expect("the files");
+        assert_eq!(listed[0].file, file);
+        assert_eq!(listed[0].state, FileState::Waiting);
+
+        let error = create_with_bytes(&device, &alice, "empty.txt", "text/plain", b"")
+            .await
+            .expect_err("no bytes");
+        assert!(matches!(error, FileError::Invalid(_)));
+        assert_eq!(
+            std::fs::read_dir(folder.path())
+                .expect("the folder")
+                .count(),
+            1,
+            "a file outside the rules leaves no bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn files_delete_of_a_waiting_file_on_a_device_leaves_nothing() {
+        let alice = users::tests::alice();
+        let (device, folder) = device_with_folder(&alice, "a token").await;
+        let file = create_with_bytes(&device, &alice, "notes.txt", "text/plain", b"x")
+            .await
+            .expect("a file");
+        update(&device, &alice, file.id, "renamed.txt")
+            .await
+            .expect("renamed while waiting");
+
+        delete(&device, &alice, file.id).await.expect("deleted");
+        assert!(list(&device, &alice).await.expect("the files").is_empty());
+        let mut tx = device.begin().await.expect("a transaction");
+        assert!(get_in(&mut tx, file.id).await.expect("looked").is_none());
+        assert!(
+            events::list_of_table(&mut tx, TABLE)
+                .await
+                .expect("the events")
+                .is_empty(),
+            "nothing is left to push"
+        );
+        assert_eq!(
+            std::fs::read_dir(folder.path())
+                .expect("the folder")
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]

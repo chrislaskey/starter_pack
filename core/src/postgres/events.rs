@@ -176,6 +176,21 @@ pub async fn delete_pending_of_row(
     Ok(())
 }
 
+/// Removes every event of the row, whatever its status: for a row that
+/// never reached the server and is going from the device.
+pub async fn delete_of_row(
+    connection: &mut PgConnection,
+    table: &str,
+    row_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM app_events WHERE table_name = $1 AND row_id = $2")
+        .bind(table)
+        .bind(row_id)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
 pub async fn mark_conflict(
     connection: &mut PgConnection,
     id: Uuid,

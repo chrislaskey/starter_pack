@@ -31,9 +31,10 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate", "chrono", "json", "uuid"] }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "fs"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }

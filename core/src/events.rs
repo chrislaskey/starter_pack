@@ -372,6 +372,15 @@ pub async fn delete_pending_of_row(
     sql!(tx, events::delete_pending_of_row(table, row_id))
 }
 
+/// Removes every event of the row, whatever its status.
+pub async fn delete_of_row(
+    tx: &mut Transaction,
+    table: &str,
+    row_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sql!(tx, events::delete_of_row(table, row_id))
+}
+
 pub async fn mark_conflict(
     tx: &mut Transaction,
     id: Uuid,

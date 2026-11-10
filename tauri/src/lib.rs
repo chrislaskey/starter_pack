@@ -27,6 +27,12 @@ use tauri::{Manager, WindowEvent};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol("files", |context, request, responder| {
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                responder.respond(files::content_response(&app, request.uri()).await);
+            });
+        })
         .setup(|app| {
             device_accounts::open_and_manage(app)?;
             sync::setup(app)?;
@@ -57,8 +63,11 @@ pub fn run() {
             posts::posts_delete,
             files::files_list,
             files::files_get,
+            files::files_create,
             files::files_update,
             files::files_delete,
+            files::files_download_supported,
+            files::files_download,
             sync::sync_run,
             sync::sync_status,
             sync::sync_set_offline,
