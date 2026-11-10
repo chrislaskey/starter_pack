@@ -1,0 +1,150 @@
+/* The quick picker fills its small window: the filter box, the list,
+   which scrolls, and the footer. */
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+}
+
+.quick-picker {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: var(--card);
+}
+
+.quick-picker input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--fg);
+  background: var(--color-base-200);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+}
+
+.quick-picker input:focus {
+  border-color: var(--accent);
+}
+
+.quick-picker-items {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quick-picker-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0.65rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--fg);
+  text-align: left;
+  cursor: default;
+}
+
+.quick-picker-item .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-picker-item .size {
+  flex: none;
+  color: var(--muted);
+}
+
+.quick-picker-item.selected {
+  background: var(--accent);
+  color: var(--color-primary-content);
+}
+
+.quick-picker-item.selected .size {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.quick-picker-item .thumbnail {
+  flex: none;
+  width: 32px;
+  height: 20px;
+  border-radius: 3px;
+  object-fit: cover;
+  background: var(--color-base-200);
+}
+
+.quick-picker-item .text-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.quick-picker-item.selected .text-mark {
+  color: inherit;
+  background: color-mix(in oklab, var(--color-primary-content) 20%, transparent);
+}
+
+.quick-picker-items .empty {
+  padding: 0.3rem 0.65rem;
+}
+
+.quick-picker-signed-out {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  text-align: center;
+}
+
+.quick-picker footer {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.quick-picker footer p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-picker footer .keys {
+  display: flex;
+  gap: 0.3em;
+  justify-content: flex-end;
+}
+
+.quick-picker kbd {
+  font-family: inherit;
+  padding: 0 0.3em;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}

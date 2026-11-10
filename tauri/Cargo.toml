@@ -27,11 +27,16 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "fs", "rt"] }
 uuid = { version = "1", features = ["serde"] }
 
-# The clipboard's image types, see src/clipboard/
+# The clipboard's image types, see src/clipboard/, and the quick picker,
+# see src/quick_picker/ and src/macos/
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-global-shortcut = "2"
+tauri-nspanel = "2.1"
+core-graphics = "0.25"
+core-foundation = "0.10"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSURL", "NSArray", "NSDictionary", "NSString"] }
-objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSPasteboard", "NSPasteboardItem"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"

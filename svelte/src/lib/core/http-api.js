@@ -351,3 +351,34 @@ export function conflictsTryAgain(_id) {
 export function conflictsLetGo(_id) {
   return Promise.reject(new Error("nothing to let go on the web"));
 }
+
+// The quick picker is the desktop app's: a browser has none.
+
+export function quickPickerList() {
+  return Promise.reject(new Error("the quick picker is the desktop app's"));
+}
+
+/** @param {string} _kind @param {string} _id */
+export function quickPickerPaste(_kind, _id) {
+  return Promise.reject(new Error("the quick picker is the desktop app's"));
+}
+
+export function quickPickerClose() {
+  return Promise.resolve();
+}
+
+export function quickPickerOpenApp() {
+  return Promise.reject(new Error("the quick picker is the desktop app's"));
+}
+
+export function quickPickerAccessibilityRequest() {
+  return Promise.resolve(false);
+}
+
+/**
+ * @param {(opened: {accessibility_trusted: boolean}) => void} _callback
+ * @returns {() => void} stops listening
+ */
+export function onQuickPickerOpened(_callback) {
+  return () => {};
+}

@@ -1,7 +1,8 @@
 //! Copying an image to the system clipboard on Apple's platforms, where
 //! Tauri has nothing that keeps an animated GIF: each app pastes the form
 //! it understands, the GIF's own bytes where GIFs are taken and a PNG
-//! elsewhere. AppKit on macOS (`macos`), UIKit on iOS (`ios`).
+//! elsewhere. AppKit on macOS (`macos`), UIKit on iOS (`ios`). Text too
+//! on macOS, for the quick picker.
 
 #[cfg(target_os = "ios")]
 mod ios;
@@ -46,6 +47,12 @@ pub fn copy_image(image: ClipboardImage<'_>) -> Result<Vec<String>, String> {
     return macos::copy_image(image);
     #[cfg(target_os = "ios")]
     return ios::copy_image(image);
+}
+
+/// Copies the text to the clipboard; call on the main thread.
+#[cfg(target_os = "macos")]
+pub fn copy_text(text: &str) -> Result<(), String> {
+    macos::copy_text(text)
 }
 
 #[cfg(test)]

@@ -340,3 +340,51 @@ export function conflictsTryAgain(id) {
 export function conflictsLetGo(id) {
   return invoke("conflicts_let_go", { id });
 }
+
+// The quick picker, the desktop app's second window (../../quick-picker/).
+
+/**
+ * The signed-in person's posts and images, newest first, each
+ * `{kind, id, label, size}`.
+ */
+export function quickPickerList() {
+  return invoke("quick_picker_list");
+}
+
+/**
+ * Copies the item, closes the picker and pastes where the person was typing.
+ * @param {string} kind "text" or "image"
+ * @param {string} id
+ */
+export function quickPickerPaste(kind, id) {
+  return invoke("quick_picker_paste", { kind, id });
+}
+
+export function quickPickerClose() {
+  return invoke("quick_picker_close");
+}
+
+/** Closes the picker and brings the app's window to the front, where a sign-in starts. */
+export function quickPickerOpenApp() {
+  return invoke("quick_picker_open_app");
+}
+
+/**
+ * Asks macOS for the Accessibility access pasting needs.
+ * @returns {Promise<boolean>} whether it is granted now
+ */
+export function quickPickerAccessibilityRequest() {
+  return invoke("quick_picker_accessibility_request");
+}
+
+/**
+ * Calls back each time the picker opens, with `{accessibility_trusted}`.
+ * @param {(opened: {accessibility_trusted: boolean}) => void} callback
+ * @returns {() => void} stops listening
+ */
+export function onQuickPickerOpened(callback) {
+  const stopping = listen("quick-picker-opened", (event) => callback(event.payload));
+  return () => {
+    stopping.then((stop) => stop());
+  };
+}

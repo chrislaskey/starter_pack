@@ -5,7 +5,7 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
 
 // The theme script sets `data-theme` on <html> before the first paint. The
-// `<!-- theme-script -->` marker in index.html becomes an inline classic
+// `<!-- theme-script -->` marker in an HTML entry becomes an inline classic
 // script with the file's contents, in dev and in builds.
 const THEME_SCRIPT = resolve(import.meta.dirname, "src/lib/theme_script.js");
 const THEME_SCRIPT_MARKER = "<!-- theme-script -->";
@@ -33,10 +33,11 @@ const WEB_SERVER_URL = process.env.WEB_SERVER_URL ?? "http://localhost:4000";
 // address on the network, so a phone or simulator reaches the dev server.
 const TAURI_DEV_HOST = process.env.TAURI_DEV_HOST;
 
-// One HTML entry, src/index.html, whose router (src/lib/router.js) shows
-// the page at the address. The dev server answers any other path with
-// index.html, and so do the web server (../axum) and the Tauri app, so
-// every page is reloadable. `pnpm build` writes dist/, which the web server
+// One HTML entry per window: src/index.html, whose router
+// (src/lib/router.js) shows the page at the address, and
+// src/quick-picker.html for the desktop app's quick picker. The dev server
+// answers any other path with index.html, and so do the web server
+// (../axum) and the Tauri app, so every page is reloadable. `pnpm build` writes dist/, which the web server
 // serves and the Tauri app bundles.
 export default defineConfig({
   root: "src",
@@ -52,5 +53,11 @@ export default defineConfig({
   build: {
     outDir: "../dist",
     emptyOutDir: true,
+    rolldownOptions: {
+      input: {
+        main: resolve(import.meta.dirname, "src/index.html"),
+        quick_picker: resolve(import.meta.dirname, "src/quick-picker.html"),
+      },
+    },
   },
 });

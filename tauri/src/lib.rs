@@ -6,7 +6,8 @@
 //! `device_accounts`; the other commands read and write the active one
 //! as its user, see `users` and `accounts`, and it syncs with the web
 //! server, see `sync`. A sign-in happens in the system browser, see
-//! `accounts`.
+//! `accounts`. On macOS ⌃⌘T anywhere opens the quick picker, a second
+//! window, see `quick_picker`.
 
 mod accounts;
 mod avatars;
@@ -16,14 +17,19 @@ mod communities;
 mod conflicts;
 mod device_accounts;
 mod files;
+#[cfg(target_os = "macos")]
+mod macos;
 mod memberships;
 mod pending_changes;
 mod posts;
+mod quick_picker;
 mod server_urls;
 mod sync;
 mod users;
 
 use tauri::{Manager, WindowEvent};
+
+pub(crate) const MAIN_WINDOW: &str = "main";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,10 +44,11 @@ pub fn run() {
         .setup(|app| {
             device_accounts::open_and_manage(app)?;
             sync::setup(app)?;
+            quick_picker::register(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
-            if came_to_foreground(event) {
+            if window.label() == MAIN_WINDOW && came_to_foreground(event) {
                 sync::spawn_on_foreground(window.app_handle());
             }
         })
@@ -85,7 +92,12 @@ pub fn run() {
             device_accounts::device_accounts_list,
             device_accounts::device_accounts_switch,
             device_accounts::device_accounts_deactivate,
-            device_accounts::device_accounts_remove
+            device_accounts::device_accounts_remove,
+            quick_picker::quick_picker_list,
+            quick_picker::quick_picker_paste,
+            quick_picker::quick_picker_close,
+            quick_picker::quick_picker_open_app,
+            quick_picker::quick_picker_accessibility_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -146,12 +146,14 @@ pub fn files_copy_supported() -> bool {
 /// Copies the image to the clipboard, from this device's copy of it,
 /// fetched first when there is none.
 #[tauri::command]
-pub async fn files_copy(
-    app: AppHandle,
-    device: State<'_, DeviceAccounts>,
-    server: State<'_, SyncServer>,
-    id: Uuid,
-) -> Result<(), String> {
+pub async fn files_copy(app: AppHandle, id: Uuid) -> Result<(), String> {
+    copy_to_clipboard(&app, id).await
+}
+
+/// `files_copy`, for the quick picker too.
+pub async fn copy_to_clipboard(app: &AppHandle, id: Uuid) -> Result<(), String> {
+    let device = app.state::<DeviceAccounts>();
+    let server = app.state::<SyncServer>();
     let (deployment, user) = signed_in(&device).await?;
     let shown = files::get(&deployment, &user, id)
         .await
@@ -159,23 +161,21 @@ pub async fn files_copy(
     let path = files::local_copy(&deployment, server.transport(), &user, id)
         .await
         .map_err(|error| error.to_string())?;
-    copy_image(&app, &shown.file.content_type, path).await
+    copy_image(app, &shown.file, path).await
 }
 
 /// AppKit's and UIKit's pasteboards and images are the main thread's.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-async fn copy_image(
-    app: &AppHandle,
-    content_type: &str,
-    path: std::path::PathBuf,
-) -> Result<(), String> {
+async fn copy_image(app: &AppHandle, file: &File, path: std::path::PathBuf) -> Result<(), String> {
     use crate::clipboard::{self, ClipboardImage};
 
-    let uniform_type = clipboard::uniform_type_of(content_type)
+    let uniform_type = clipboard::uniform_type_of(&file.content_type)
         .ok_or("This kind of image cannot be copied yet")?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let path = copy_under_its_name(app, &path, &file.name, &file.content_type).await?;
     let (copied, result) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         let image = ClipboardImage {
@@ -190,10 +190,66 @@ async fn copy_image(
     result.await.map_err(|error| error.to_string())?
 }
 
+/// A copy of the file under its own name, in the cache's `clipboard`
+/// folder, which holds only the last one: an app pasting the file takes
+/// its name and its extension from the path, and the account's folder
+/// keeps a file under its id alone.
+#[cfg(target_os = "macos")]
+async fn copy_under_its_name(
+    app: &AppHandle,
+    from: &std::path::Path,
+    name: &str,
+    content_type: &str,
+) -> Result<std::path::PathBuf, String> {
+    let folder = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("clipboard");
+    // Nothing to remove the first time
+    let _ = tokio::fs::remove_dir_all(&folder).await;
+    tokio::fs::create_dir_all(&folder)
+        .await
+        .map_err(|error| error.to_string())?;
+    let to = folder.join(clipboard_file_name(name, content_type));
+    tokio::fs::copy(from, &to)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(to)
+}
+
+/// The file's name as a file's on the clipboard: only its last part,
+/// so it stays in the folder, ending in the extension of its type.
+#[cfg(any(target_os = "macos", test))]
+fn clipboard_file_name(name: &str, content_type: &str) -> String {
+    let name = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image");
+    let extensions: &[&str] = match content_type.split(';').next().unwrap_or_default().trim() {
+        "image/png" => &["png"],
+        "image/jpeg" => &["jpg", "jpeg"],
+        "image/gif" => &["gif"],
+        "image/webp" => &["webp"],
+        "image/tiff" => &["tiff", "tif"],
+        "image/bmp" => &["bmp"],
+        "image/heic" => &["heic"],
+        _ => &[],
+    };
+    let named = std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extensions.contains(&extension.to_lowercase().as_str()));
+    match extensions.first() {
+        Some(extension) if !named => format!("{name}.{extension}"),
+        _ => name.to_string(),
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 async fn copy_image(
     _app: &AppHandle,
-    _content_type: &str,
+    _file: &File,
     _path: std::path::PathBuf,
 ) -> Result<(), String> {
     Err("Copying is not available on this device yet".to_string())
@@ -313,4 +369,22 @@ async fn content(app: &AppHandle, uri: &Uri) -> Option<(String, Vec<u8>)> {
         .ok()?;
     let bytes = tokio::fs::read(path).await.ok()?;
     Some((shown.file.content_type, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn files_clipboard_file_name_ends_in_the_extension_of_its_type() {
+        assert_eq!(clipboard_file_name("cat.gif", "image/gif"), "cat.gif");
+        assert_eq!(
+            clipboard_file_name("Photo.JPEG", "image/jpeg"),
+            "Photo.JPEG"
+        );
+        assert_eq!(clipboard_file_name("cat", "image/webp"), "cat.webp");
+        assert_eq!(clipboard_file_name("cat.txt", "image/png"), "cat.txt.png");
+        assert_eq!(clipboard_file_name("../up/cat.png", "image/png"), "cat.png");
+        assert_eq!(clipboard_file_name("..", "image/png"), "image.png");
+    }
 }

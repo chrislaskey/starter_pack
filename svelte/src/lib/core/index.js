@@ -59,6 +59,12 @@ export const conflictsReapply = core.conflictsReapply;
 export const conflictsTryAgain = core.conflictsTryAgain;
 export const conflictsLetGo = core.conflictsLetGo;
 export const pendingChangesList = core.pendingChangesList;
+export const quickPickerList = core.quickPickerList;
+export const quickPickerPaste = core.quickPickerPaste;
+export const quickPickerClose = core.quickPickerClose;
+export const quickPickerOpenApp = core.quickPickerOpenApp;
+export const quickPickerAccessibilityRequest = core.quickPickerAccessibilityRequest;
+export const onQuickPickerOpened = core.onQuickPickerOpened;
 
 /**
  * Uploads the picture straight to object storage, then makes it the

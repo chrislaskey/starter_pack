@@ -202,7 +202,7 @@ clipboard:
 
 | Where | What goes on the clipboard | An animated GIF |
 | --- | --- | --- |
-| macOS app, `tauri/src/clipboard/macos.rs` | one item: the file, its own bytes, a PNG and a TIFF | animated where GIFs are taken, a still elsewhere |
+| macOS app, `tauri/src/clipboard/macos.rs` | one item: the file, its own bytes and a PNG; a TIFF too when `TIFF_RENDERING` is on, off for now | animated where GIFs are taken, a still elsewhere |
 | iOS app, `tauri/src/clipboard/ios.rs` | one item: its own bytes and a PNG | the same |
 | web, `filesCopy` in `http-api.js` | a PNG, the one image type browsers write | its first frame |
 

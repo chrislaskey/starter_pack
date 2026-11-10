@@ -426,6 +426,15 @@ nav) dispatches, keeping the choice in `localStorage` under `app:theme`;
 `index.html`, in dev and in builds. The pages' own styles
 (`svelte/src/styles.css`) take their colours from the theme's variables.
 
+### Quick picker
+
+On macOS ⌃⌘T in any app opens a second window, a small panel under the
+text caret, listing the signed-in person's posts and images
+(`svelte/src/quick-picker.html`, `tauri/src/quick_picker/`). Choosing
+one copies it and pastes it where the person was typing; with nobody
+signed in it sends them to the app to sign in. The design, its limits
+and how to test it by hand: `docs/design/quick-picker.md`.
+
 ### Full bleed
 
 The page runs under the window chrome and keeps its content clear of it.
