@@ -12,7 +12,9 @@
 //! On the web the page asks `create_upload` where to PUT the bytes,
 //! sends them, then creates the row. A device keeps the bytes itself,
 //! `create_with_bytes`, and the file waits there, its create pending,
-//! until a sync has sent them.
+//! until a sync has sent them. Another device gets the row by the pull
+//! and the bytes the first time a page shows the file, `local_copy`,
+//! and keeps them.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -26,6 +28,7 @@ use uuid::Uuid;
 
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, FileStore, Role, now};
+use crate::device_settings::{self, WORK_OFFLINE};
 use crate::events::{
     self, Answer, AnswerStatus, Conflicts, Event, EventKind, EventStatus, Fields, StoredEvent,
 };
@@ -33,7 +36,7 @@ use crate::field_errors::FieldErrors;
 #[cfg(feature = "object-storage")]
 use crate::storage::{Storage, StorageError};
 use crate::sync::{Cursor, SyncError, TableRow, Transport};
-use crate::users::User;
+use crate::users::{self, User};
 
 pub const TABLE: &str = "app_files";
 /// The largest file, 25 MB.
@@ -186,11 +189,21 @@ pub enum FileError {
     Malformed(String),
     #[error("could not read or write the file on this device: {0}")]
     Io(#[from] std::io::Error),
+    #[error("the file is not on this device")]
+    NotOnDevice,
+    #[error(transparent)]
+    Sync(Box<SyncError>),
     #[cfg(feature = "object-storage")]
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+}
+
+impl From<SyncError> for FileError {
+    fn from(error: SyncError) -> FileError {
+        FileError::Sync(Box::new(error))
+    }
 }
 
 impl From<serde_json::Error> for FileError {
@@ -566,6 +579,57 @@ pub(crate) async fn list_synced_after(
 /// The row by its id, deleted or not, whoever owns it.
 pub(crate) async fn get_in(tx: &mut Transaction, id: Uuid) -> Result<Option<File>, FileError> {
     Ok(sql!(tx, files::get(id))?)
+}
+
+/// Where the bytes of the user's file are on this device, fetched from
+/// the server first when they are not there: the first time a device
+/// that did not add the file shows it. Fetched under a temporary name
+/// and renamed once whole, so a file at its path is never half there.
+/// Working offline, or with the server out of reach, a file not here
+/// is `NotOnDevice`.
+pub async fn local_copy<T: Transport>(
+    deployment: &Deployment,
+    transport: &T,
+    user: &User,
+    id: Uuid,
+) -> Result<PathBuf, FileError> {
+    let mut tx = deployment.begin().await?;
+    let file = get_own(&mut tx, user, id).await?;
+    let offline: bool = device_settings::get(&mut tx, WORK_OFFLINE)
+        .await
+        .map_err(|error| FileError::Malformed(error.to_string()))?;
+    tx.commit().await?;
+    let path = local_path(deployment, id)?;
+    if tokio::fs::try_exists(&path).await? {
+        return Ok(path);
+    }
+    if offline {
+        return Err(FileError::NotOnDevice);
+    }
+    let (_user, token) = users::signed_in_with_token(deployment)
+        .await
+        .map_err(|error| FileError::Malformed(error.to_string()))?;
+    // A name of its own, since two pages may ask for one file at once
+    let partial = path.with_extension(format!("{}.part", Uuid::now_v7().simple()));
+    let fetched = match transport.files_download(Some(&token), id, &partial).await {
+        Ok(()) => tokio::fs::metadata(&partial)
+            .await
+            .map(|fetched| fetched.len()),
+        Err(SyncError::Transport(_)) => {
+            delete_local(&partial).await?;
+            return Err(FileError::NotOnDevice);
+        }
+        Err(error) => {
+            delete_local(&partial).await?;
+            return Err(error.into());
+        }
+    };
+    if fetched.as_ref().ok() != Some(&file.size) {
+        delete_local(&partial).await?;
+        return Err(FileError::NotOnDevice);
+    }
+    tokio::fs::rename(&partial, &path).await?;
+    Ok(path)
 }
 
 /// Where a file's bytes are on this device, there or not.
@@ -1246,6 +1310,85 @@ pub(crate) mod tests {
             let on_b = get(&b, &alice, file.id).await.expect("on b");
             assert_eq!(on_b.file, on_server.file);
             assert_eq!(on_b.state, FileState::Synced);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_local_copy_fetches_once_on_another_device_then_reads_with_the_network_off() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bobs_token) = user_with_token(&server, "bob@example.com").await;
+            let (a, _a_folder) = device_with_folder(&alice, &token).await;
+            let (b, b_folder) = device_with_folder(&alice, &token).await;
+            let (bobs, _bobs_folder) = device_with_folder(&bob, &bobs_token).await;
+            let transport = InProcess { server: &server };
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            sync::run(&a, &transport).await.expect("a sync");
+            sync::run(&b, &transport).await.expect("a sync");
+            assert!(!local_path(&b, file.id).expect("a path").exists());
+
+            let path = local_copy(&b, &transport, &alice, file.id)
+                .await
+                .expect("fetched");
+            assert_eq!(std::fs::read(&path).expect("the bytes"), b"some notes");
+            assert_eq!(
+                std::fs::read_dir(b_folder.path())
+                    .expect("the folder")
+                    .count(),
+                1,
+                "nothing half fetched is left"
+            );
+
+            storage
+                .delete(&storage_key(alice.id, file.id))
+                .await
+                .expect("the bucket out of reach, in effect");
+            let again = local_copy(&b, &transport, &alice, file.id)
+                .await
+                .expect("read from the device");
+            assert_eq!(again, path);
+
+            let error = local_copy(&bobs, &transport, &bob, file.id)
+                .await
+                .expect_err("not bob's");
+            assert!(matches!(error, FileError::NotFound { .. }));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_local_copy_working_offline_fetches_nothing() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, _a_folder) = device_with_folder(&alice, &token).await;
+            let (b, b_folder) = device_with_folder(&alice, &token).await;
+            let transport = InProcess { server: &server };
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            sync::run(&a, &transport).await.expect("a sync");
+            sync::run(&b, &transport).await.expect("a sync");
+            sync::set_offline(&b, true).await.expect("offline");
+
+            let error = local_copy(&b, &transport, &alice, file.id)
+                .await
+                .expect_err("not fetched");
+            assert!(matches!(error, FileError::NotOnDevice));
+            assert_eq!(
+                std::fs::read_dir(b_folder.path())
+                    .expect("the folder")
+                    .count(),
+                0
+            );
+            assert!(
+                local_copy(&a, &transport, &alice, file.id).await.is_ok(),
+                "the device that added it has it"
+            );
         })
         .await;
     }

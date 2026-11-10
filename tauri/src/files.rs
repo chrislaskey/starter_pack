@@ -6,7 +6,8 @@
 //!
 //! A page reads a file's bytes through the `files` protocol,
 //! `content_response`, which serves the copy in the account's folder,
-//! so an `<img>` shows it with the network off.
+//! fetched from the server the first time when this device did not add
+//! the file, so an `<img>` shows it with the network off from then on.
 
 use percent_encoding::percent_decode_str;
 use tauri::http::header::{CONTENT_TYPE, HeaderValue, X_CONTENT_TYPE_OPTIONS};
@@ -19,7 +20,7 @@ use app_core::files::{self, File, FileError, FileWithState};
 
 use crate::avatars::FormError;
 use crate::device_accounts::DeviceAccounts;
-use crate::sync;
+use crate::sync::{self, SyncServer};
 use crate::users::signed_in;
 
 /// How many names a download tries before giving up.
@@ -130,6 +131,7 @@ pub fn files_download_supported() -> bool {
 pub async fn files_download(
     app: AppHandle,
     device: State<'_, DeviceAccounts>,
+    server: State<'_, SyncServer>,
     id: Uuid,
 ) -> Result<String, String> {
     if !cfg!(desktop) {
@@ -139,7 +141,9 @@ pub async fn files_download(
     let shown = files::get(&deployment, &user, id)
         .await
         .map_err(|error| error.to_string())?;
-    let from = files::local_path(&deployment, id).map_err(|error| error.to_string())?;
+    let from = files::local_copy(&deployment, server.transport(), &user, id)
+        .await
+        .map_err(|error| error.to_string())?;
     let downloads = app
         .path()
         .download_dir()
@@ -191,8 +195,8 @@ fn copy_under_a_free_name(
 }
 
 /// Answers a request of the `files` protocol, `files://localhost/<id>`:
-/// the bytes of the signed-in user's file from this device, with the
-/// row's content type, or 404. `nosniff`, so the webview shows a file as
+/// the bytes of the signed-in user's file from this device, fetched
+/// first when they are not here, with the row's content type, or 404. `nosniff`, so the webview shows a file as
 /// the type its row says and never as a page of its own guessing.
 pub async fn content_response(app: &AppHandle, uri: &Uri) -> Response<Vec<u8>> {
     match content(app, uri).await {
@@ -221,7 +225,11 @@ async fn content(app: &AppHandle, uri: &Uri) -> Option<(String, Vec<u8>)> {
     let device = app.state::<DeviceAccounts>();
     let (deployment, user) = signed_in(&device).await.ok()?;
     let shown = files::get(&deployment, &user, id).await.ok()?;
-    let path = files::local_path(&deployment, id).ok()?;
+    let server = app.state::<SyncServer>();
+    let path = files::local_copy(&deployment, server.transport(), &user, id)
+        .await
+        .inspect_err(|error| log::info!("file {id} is not shown: {error}"))
+        .ok()?;
     let bytes = tokio::fs::read(path).await.ok()?;
     Some((shown.file.content_type, bytes))
 }
