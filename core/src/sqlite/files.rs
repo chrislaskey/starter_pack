@@ -79,6 +79,21 @@ pub async fn get(connection: &mut SqliteConnection, id: Uuid) -> Result<Option<F
     Ok(row.map(File::from))
 }
 
+/// Every row's id and owner, with whether it is deleted: what the
+/// bytes kept for the rows are checked against.
+pub async fn list_ids(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<(Uuid, Uuid, bool)>, sqlx::Error> {
+    let rows: Vec<(Hyphenated, Hyphenated, bool)> =
+        sqlx::query_as("SELECT id, owner_id, deleted_at IS NOT NULL FROM app_files")
+            .fetch_all(connection)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, owner_id, deleted)| (id.into_uuid(), owner_id.into_uuid(), deleted))
+        .collect())
+}
+
 /// The user's rows the server wrote after the cursor, in cursor order,
 /// deleted or not: a page of a pull.
 pub async fn list_synced_after(

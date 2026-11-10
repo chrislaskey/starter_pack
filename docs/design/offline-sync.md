@@ -122,7 +122,8 @@ replaced by the server's when its answer comes back.
 The synced tables, parents first, which is the order a device writes
 them in: `app_users`, `app_communities`, `app_users_communities` (a
 membership), `app_posts`, `app_posts_communities` (a post in a
-community, under the owner's membership there). Their foreign keys are
+community, under the owner's membership there), `app_files` (a file's
+row; its bytes travel apart, see `offline-files-decisions.md`). Their foreign keys are
 real on every deployment, with `on delete cascade`, which is what a
 device's prune leans on.
 
@@ -159,6 +160,7 @@ Any other field is refused as `not_editable: <field>`:
 | `app_users_communities` | `user_id`, `community_id`, `role` | `deleted_at` |
 | `app_posts_communities` | `post_id`, `community_id`, `users_communities_id` | `deleted_at` |
 | `app_users` | nothing, the server makes a user | `avatar_url`, by the server only for now, see `uploads.md` |
+| `app_files` | `name`, `content_type`, `size`, once the bytes are in the bucket | `name`, `deleted_at` |
 
 Who made the event is not on the wire: the server records the user its
 token stood for, a device the user signed in, as `user_id` in
@@ -200,9 +202,16 @@ same transaction as the row, so a retried event gets the same answer and
 nothing applies twice. On a device it is the queue: an event is `pending`
 until the server answers it, deleted when applied, and kept as a
 `conflict` until the person resolves it. A rejected event the server sent
-no row for stays pending with the reason in `last_error`, for a debugging
-screen rather than the conflict page, unless the reason is that the row
-is unknown to the server, see "Purge and resync".
+no row for stays pending with the reason in `last_error`, unless the
+reason is that the row is unknown to the server, see "Purge and resync".
+
+**A pending event is not tried for ever.** Each time the server
+rejects it and it stays pending counts in `attempts`, and at 30,
+`events::MAX_ATTEMPTS`, the event is refused: kept as a conflict with
+the reason and nothing on the server's side, for the conflicts page.
+Only the server's no to that event counts. No network, a timeout,
+working offline, and a server or a bucket that is failing count
+nothing, so an outage of any length refuses nothing.
 
 A delete copied down, a post's community rows deleted with the post or a
 member's with their membership, is written as a row, with its version
@@ -311,10 +320,13 @@ other.
 
 As the user signed in, with the device's token:
 
+0. **Ask** the server which waiting files' bytes its bucket has. The
+   events of a file whose bytes it has not are held back from the push.
 1. **Push** every pending event, in `made_at, id` order. Apply the answers:
    `applied` deletes the event; `conflict` keeps it with the conflicts;
    a rejected `create` deletes the event and the row it made, and the
-   server's row, if any, takes its place; another `rejected` with a server
+   server's row, if any, takes its place, except a file's, which is
+   never dropped; another `rejected` with a server
    row deletes the event, the server wins; a `rejected` without one for a
    row the server does not know deletes the device's copy and keeps the
    change as a conflict with nothing on the other side; any other
@@ -330,6 +342,11 @@ As the user signed in, with the device's token:
    page. A page that says `resync` starts over, see below.
 3. **Backfill** each community in `sync_backfills`, page by page.
 4. **Prune** the posts the user no longer sees.
+5. **Upload** the bytes of the files held back, then push their events.
+   Last, so nothing else waits on bytes.
+6. **Clean** the account's folder of the bytes no file points at.
+
+Steps 0, 5 and 6 are `offline-files-decisions.md`.
 
 A push that fails as a whole changes nothing on the device, and the pull
 still runs. One sync runs at a time. A sync runs when the app starts,
@@ -412,7 +429,9 @@ person's value and the value now on the device, which is the server's as
 of the last sync. **Reapply** queues a new update from the row's current
 version with the person's values and syncs; it applies unless someone
 changed the field yet again. **Let it go** deletes the event. A conflict
-on a post that is gone can only be let go.
+on a post that is gone can only be let go. A file the server refused is
+there too, by its name with the reason: **Try again** queues its create
+as it was, **Let it go** removes the file from the device.
 
 ## Purge and resync
 

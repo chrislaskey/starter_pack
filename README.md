@@ -43,6 +43,13 @@ Inside the Tauri app each is a command of the same name
 | `communitiesCreate(name)` | `POST /api/communities` with `{"name": "..."}`, 201 |
 | `membershipsJoin(communityId)` | `PUT /api/memberships/:community_id` |
 | `membershipsLeave(communityId)` | `DELETE /api/memberships/:community_id`, 204 |
+| `filesList()`, `filesGet(id)` | `GET /api/files`, `GET /api/files/:id`, each file with how it is shown and where it stands |
+| `filesCreate(file, name, onProgress?)` | `POST /api/files/upload` for where to PUT the bytes, the PUT to the bucket, then `POST /api/files`, 201; in the app one command, the bytes kept on the device and sent by the next sync |
+| `filesUpdate(id, name)` | `PUT /api/files/:id` with `{"name": "..."}` |
+| `filesDelete(id)` | `DELETE /api/files/:id`, 204 |
+| `filesContentUrl(id)` | `/api/files/:id/content`, a redirect to the bytes for an `<img>`; in the app the `files` protocol, serving the device's copy |
+| `filesDownload(id)`, `filesDownloadSupported()` | the same URL with `?download=1`; in the desktop app a copy into Downloads |
+| `conflictsList()`, `conflictsReapply(id)`, `conflictsTryAgain(id)`, `conflictsLetGo(id)` | none: the web has nothing to resolve |
 | `usersMe()` | `GET /api/users/me`, 401 when nobody is signed in |
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
 | `avatarsUpdate(key)` | `PUT /api/avatars` with `{"key": "..."}`, the user with their `avatar_url` |
@@ -158,10 +165,37 @@ through the server (`core/src/avatars.rs`, `core/src/storage.rs`, over
 signed for its key and content type, the page PUTs the file there, and
 the server checks the file arrived and is the image it said before the
 user's `avatar_url` points at it. The Profile page sets the picture.
-Uploads are online only for now; the design, the failure cases and how
+This pattern is online only, see [Files added offline](#files-added-offline)
+for the other; the design, the failure cases and how
 files are deleted are `docs/design/uploads.md`. In dev the bucket is
 Garage, which `bin/dev` starts with the web server when it is installed
 (`brew install garage`); without it the server runs with uploads off.
+
+## Files added offline
+
+A file (`core/src/files.rs`) is the second upload pattern: a resource
+of its own whose row syncs like a post while its bytes travel apart. In
+the app a file picked on the New page is kept at once in the account's
+folder on the device, `accounts/<user id>/files/<file id>`, with a row
+whose create waits in the queue, so it is listed and shown with the
+network off. A sync asks the server which waiting files' bytes its
+bucket has, pushes everything else, pulls, then PUTs the bytes to a
+signed URL and pushes the files' events; the server writes a file's row
+only once its bytes are in the bucket. Another device gets the row by
+the pull and the bytes the first time a page shows the file, through
+the app's `files` protocol (`tauri/src/files.rs`), and keeps them. On
+the web the page PUTs the bytes first, then creates the row.
+
+A file is waiting, refused or synced. Waiting is tried by every sync;
+the server saying no 30 times, or a file it will not take at all,
+makes it refused, kept on its device and listed on the conflicts page
+to try again or let go. Bytes follow rows on both sides: the server's
+sweep (`files::delete_unreferenced`) and a cleanup of the account's
+folder at the end of each sync. The Files page shows images, animated
+ones too unless "Play animations" is off, plain text and PDFs in
+place. The decisions are `docs/design/offline-files-decisions.md`, how
+they were reached `docs/design/offline-files.md`, and what was left
+out `docs/suggestions/files.md`.
 
 ## Communities
 
@@ -323,6 +357,10 @@ shows the page at the path, swapped in place:
 | `/posts/new` | `posts/PostsNewPage.svelte` |
 | `/posts/:id` | `posts/PostsShowPage.svelte`, with Edit and Delete |
 | `/posts/:id/edit` | `posts/PostsEditPage.svelte` |
+| `/files` | `files/FilesIndexPage.svelte`, each with its state when it is not on the server yet |
+| `/files/new` | `files/FilesNewPage.svelte`, a file picked and named |
+| `/files/:id` | `files/FilesShowPage.svelte`, the file shown in place when it is an image, plain text or a PDF, with Download, Rename and Delete |
+| `/files/:id/edit` | `files/FilesEditPage.svelte`, renaming |
 | `/communities` | `communities/CommunitiesIndexPage.svelte`, to create, join and leave |
 | `/conflicts` | `conflicts/ConflictsIndexPage.svelte`, inside the apps: the changes waiting to reach the server and those it did not keep |
 | `/accounts` | `accounts/AccountsIndexPage.svelte`, inside the apps: the accounts on the device, to switch, add and remove |
@@ -492,6 +530,8 @@ see [The database](#the-database).
   user, see [Who the user is](#who-the-user-is)
 * A community's own page, roles, deleting an account: see
   `docs/suggestions/communities.md`
+* A bucket of its own for files, the sweep on a schedule, download on
+  phones, audio and video: see `docs/suggestions/files.md`
 * The `main` branch's desktop app has a quick search popup, a tmux example
   page and the offline-first pages against Phoenix; they can come back
   from there once the pieces they need are here

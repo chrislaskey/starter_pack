@@ -1055,6 +1055,9 @@ pub struct Report {
     pub rejected: usize,
     /// Files whose bytes this sync sent to the server's bucket.
     pub uploaded: usize,
+    /// Files' bytes removed from the device: of files deleted, and
+    /// leftovers no file points at.
+    pub cleaned: usize,
     /// Rows received by the pull.
     pub pulled: usize,
     /// Rows received by the backfills of communities just joined.
@@ -1087,7 +1090,8 @@ pub struct Status {
 /// pull from the cursor, starting over from nothing if the server says
 /// so, backfill each community just joined, prune what the user no
 /// longer sees, then send the waiting files' bytes and push their
-/// events. The bytes go last, so nothing else waits on them. A push that
+/// events, and remove the bytes no file on the device points at any
+/// more. The bytes go last, so nothing else waits on them. A push that
 /// fails as a whole changes nothing on the device and the pull still
 /// runs. Working offline, it makes no request and only reports what
 /// waits.
@@ -1127,6 +1131,7 @@ pub async fn run<T: Transport>(
             report.push_error = Some(error.to_string());
         }
     }
+    report.cleaned = files::delete_unreferenced_on_device(deployment, now()).await?;
     report.pending = status(deployment).await?.pending;
     Ok(report)
 }

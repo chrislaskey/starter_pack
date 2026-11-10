@@ -77,6 +77,16 @@ pub async fn get(connection: &mut PgConnection, id: Uuid) -> Result<Option<File>
     Ok(row.map(File::from))
 }
 
+/// Every row's id and owner, with whether it is deleted: what the
+/// bytes kept for the rows are checked against.
+pub async fn list_ids(
+    connection: &mut PgConnection,
+) -> Result<Vec<(Uuid, Uuid, bool)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, owner_id, deleted_at IS NOT NULL FROM app_files")
+        .fetch_all(connection)
+        .await
+}
+
 /// The user's rows the server wrote after the cursor, in cursor order,
 /// deleted or not: a page of a pull.
 pub async fn list_synced_after(

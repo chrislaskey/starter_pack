@@ -3,8 +3,9 @@
 How a file a person picks reaches object storage, how a row comes to
 point at it, and how a file nobody points at goes away. The first file
 is a user's picture, `app_users.avatar_url`; the rules here are meant to
-hold for the next ones, a post's attachments say. Online only for now;
-"Offline, later" is the plan for the apps.
+hold for the next ones, a post's attachments say. Online only: a file
+added with the network off is another pattern, the `files` resource,
+see `offline-files-decisions.md`.
 
 ## Decisions
 
@@ -104,7 +105,9 @@ first, and files after, by reconciliation rather than bookkeeping:
   file.
 - **Each table with files says which column and which prefix**, so the
   sweep reads every table's references; `avatar_url` and `avatars/` are
-  the first.
+  the first, `avatars::delete_unreferenced`. `app_files` and `files/`
+  are the second, `files::delete_unreferenced`, where a file's key is
+  worked out from its row.
 - **Deleting an account** deletes its prefixes at once, without waiting
   for the sweep, since erasure is owed promptly.
 
@@ -118,6 +121,10 @@ files longer needs to know when a file stopped being pointed at, which
 is the table of uploads again; not worth it for pictures.
 
 ## Offline, later
+
+Ideas for a picture, never examined; what was built for files added
+offline is `offline-files-decisions.md`, which differs: no upload
+queue, and the local copy is kept.
 
 The app would set a picture as it writes a post: at once on the device,
 the change queued and pushed. The file has to wait for the network, so:

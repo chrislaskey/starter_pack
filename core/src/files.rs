@@ -15,6 +15,11 @@
 //! until a sync has sent them. Another device gets the row by the pull
 //! and the bytes the first time a page shows the file, `local_copy`,
 //! and keeps them.
+//!
+//! Rows go first and bytes after, on both sides, by looking at what the
+//! rows point at now: `delete_unreferenced` in the bucket, daily, and
+//! `delete_unreferenced_on_device` in the account's folder, at the end
+//! of each sync.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -55,6 +60,10 @@ const CREATE_FIELDS: &[&str] = &["name", "content_type", "size"];
 const UPDATE_FIELDS: &[&str] = &["name", "deleted_at"];
 /// Where files go in the bucket: `files/<owner id>/<file id>`.
 const KEY_PREFIX: &str = "files";
+/// Bytes no row points at are removed once they are older than this,
+/// in the bucket and on a device: an upload whose row never came, bytes
+/// written a moment before their row.
+pub const UNREFERENCED_DAYS: i64 = 1;
 /// How long a signed upload URL works.
 #[cfg(feature = "object-storage")]
 const UPLOAD_URL_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -562,6 +571,86 @@ async fn note_error(
     events::mark_error(&mut tx, create_id, reason).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Deletes from the bucket every file's bytes that no row points at,
+/// deleted rows included, once they are older than `UNREFERENCED_DAYS`:
+/// an upload whose push never came, a refused file let go, a row the
+/// purge removed. A deleted row keeps its bytes until the purge takes
+/// it. On the server, daily, after `purge::run` and beside
+/// `avatars::delete_unreferenced`, once there is a scheduler, see
+/// `docs/design/uploads.md`.
+///
+/// A device that comes back in the moment between this reading the rows
+/// and deleting a file can have its row written just before the bytes
+/// go; rare enough to accept, see "A gap accepted" in
+/// `docs/design/offline-files-decisions.md`.
+#[cfg(feature = "object-storage")]
+pub async fn delete_unreferenced(
+    deployment: &Deployment,
+    now: DateTime<Utc>,
+) -> Result<crate::avatars::DeleteUnreferencedReport, FileError> {
+    let storage = bucket(deployment)?;
+    let mut tx = deployment.begin().await?;
+    let referenced: BTreeSet<String> = sql!(&mut tx, files::list_ids())?
+        .into_iter()
+        .map(|(id, owner_id, _deleted)| storage_key(owner_id, id))
+        .collect();
+    tx.commit().await?;
+
+    let cutoff = now - chrono::Duration::days(UNREFERENCED_DAYS);
+    let mut report = crate::avatars::DeleteUnreferencedReport::default();
+    for file in storage.list(KEY_PREFIX).await? {
+        if referenced.contains(&file.key) || file.last_modified > cutoff {
+            report.kept += 1;
+            continue;
+        }
+        storage.delete(&file.key).await?;
+        report.deleted += 1;
+    }
+    Ok(report)
+}
+
+/// Removes from the account's folder the bytes no live row points at:
+/// those of a deleted row at once, and those of no row, or a fetch left
+/// half done, once they are older than `UNREFERENCED_DAYS`, since a
+/// file being added has its bytes there a moment before its row. That
+/// covers a delete, a resync that dropped the rows, and a crash between
+/// the bytes and the row. How many went. A deployment with no folder
+/// has nothing to remove.
+pub async fn delete_unreferenced_on_device(
+    deployment: &Deployment,
+    now: DateTime<Utc>,
+) -> Result<usize, FileError> {
+    let FileStore::Folder(folder) = &deployment.file_store else {
+        return Ok(0);
+    };
+    let mut tx = deployment.begin().await?;
+    let rows = sql!(&mut tx, files::list_ids())?;
+    tx.commit().await?;
+
+    let cutoff = now - chrono::Duration::days(UNREFERENCED_DAYS);
+    let mut removed = 0;
+    let mut entries = tokio::fs::read_dir(folder).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let row = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| Uuid::parse_str(name).ok())
+            .and_then(|id| rows.iter().find(|(row_id, _, _)| *row_id == id));
+        let remove = match row {
+            Some((_, _, deleted)) => *deleted,
+            None => {
+                let modified: DateTime<Utc> = entry.metadata().await?.modified()?.into();
+                modified < cutoff
+            }
+        };
+        if remove {
+            delete_local(&entry.path()).await?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// The file as it travels on the wire.
@@ -1803,6 +1892,124 @@ pub(crate) mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn files_delete_unreferenced_sweeps_the_bucket_of_bytes_no_row_points_at() {
+        with_each_database(|database| async move {
+            let (server, storage) = server(database);
+            let alice = users::create(&server, "alice@example.com")
+                .await
+                .expect("a user");
+            let kept = uploaded(&server, &storage, &alice, "kept.txt", b"kept").await;
+            let deleted = uploaded(&server, &storage, &alice, "deleted.txt", b"deleted").await;
+            delete(&server, &alice, deleted.id).await.expect("deleted");
+            let never_pushed = Uuid::now_v7();
+            storage
+                .put(&storage_key(alice.id, never_pushed), b"orphan".to_vec())
+                .await
+                .expect("an upload whose row never came");
+            let now = now();
+
+            let report = delete_unreferenced(&server, now).await.expect("a sweep");
+            assert_eq!(
+                (report.kept, report.deleted),
+                (3, 0),
+                "nothing is a day old"
+            );
+
+            let tomorrow = now + chrono::Duration::days(UNREFERENCED_DAYS + 1);
+            let report = delete_unreferenced(&server, tomorrow)
+                .await
+                .expect("a sweep");
+            assert_eq!((report.kept, report.deleted), (2, 1));
+            assert_eq!(in_bucket(&storage, &alice, never_pushed).await, None);
+            assert_eq!(
+                in_bucket(&storage, &alice, deleted.id).await,
+                Some(7),
+                "a deleted row keeps its bytes until the purge"
+            );
+
+            let after_the_window = now + chrono::Duration::days(crate::purge::RETENTION_DAYS + 1);
+            crate::purge::run(&server, after_the_window)
+                .await
+                .expect("purged");
+            let report = delete_unreferenced(&server, after_the_window)
+                .await
+                .expect("a sweep");
+            assert_eq!((report.kept, report.deleted), (1, 1));
+            assert_eq!(in_bucket(&storage, &alice, deleted.id).await, None);
+            assert_eq!(in_bucket(&storage, &alice, kept.id).await, Some(4));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_a_deleted_files_bytes_leave_every_device_at_its_next_sync() {
+        with_each_database(|database| async move {
+            let (server, _storage) = server(database);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let (a, a_folder) = device_with_folder(&alice, &token).await;
+            let (b, b_folder) = device_with_folder(&alice, &token).await;
+            let transport = InProcess { server: &server };
+            let file = create_with_bytes(&a, &alice, "notes.txt", "text/plain", b"some notes")
+                .await
+                .expect("a file");
+            sync::run(&a, &transport).await.expect("a sync");
+            sync::run(&b, &transport).await.expect("a sync");
+            local_copy(&b, &transport, &alice, file.id)
+                .await
+                .expect("fetched on b");
+
+            delete(&a, &alice, file.id).await.expect("deleted on a");
+            let report = sync::run(&a, &transport).await.expect("a sync");
+            assert_eq!(report.cleaned, 1);
+            assert_eq!(
+                std::fs::read_dir(a_folder.path())
+                    .expect("the folder")
+                    .count(),
+                0
+            );
+            let report = sync::run(&b, &transport).await.expect("a sync");
+            assert_eq!(report.cleaned, 1);
+            assert_eq!(
+                std::fs::read_dir(b_folder.path())
+                    .expect("the folder")
+                    .count(),
+                0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn files_delete_unreferenced_on_device_leaves_new_bytes_and_every_file_not_yet_synced() {
+        let alice = users::tests::alice();
+        let (device, folder) = device_with_folder(&alice, "a token").await;
+        let waiting = create_with_bytes(&device, &alice, "notes.txt", "text/plain", b"x")
+            .await
+            .expect("a file");
+        let without_a_row = folder.path().join(Uuid::now_v7().hyphenated().to_string());
+        std::fs::write(&without_a_row, b"written a moment before its row").expect("bytes");
+        let half_fetched = folder.path().join("0192f7c0.part");
+        std::fs::write(&half_fetched, b"half").expect("bytes");
+
+        let removed = delete_unreferenced_on_device(&device, now())
+            .await
+            .expect("cleaned");
+        assert_eq!(removed, 0, "nothing without a row is a day old");
+
+        let tomorrow = now() + chrono::Duration::days(UNREFERENCED_DAYS + 1);
+        let removed = delete_unreferenced_on_device(&device, tomorrow)
+            .await
+            .expect("cleaned");
+        assert_eq!(removed, 2);
+        assert!(!without_a_row.exists());
+        assert!(!half_fetched.exists());
+        assert!(
+            local_path(&device, waiting.id).expect("a path").exists(),
+            "a waiting file is the only copy, however old"
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ This is a second pattern beside `uploads.md`, which stays as it is: a
 user's picture is online only, a column on its row, sent by the page.
 Which pattern a file follows is the application's choice. How these
 decisions were reached, with the alternatives, is `offline-files.md`.
+Built as written, in `core/src/files.rs`; what was left out is
+`docs/suggestions/files.md`.
 
 ## Decisions
 
@@ -22,7 +24,10 @@ decisions were reached, with the alternatives, is `offline-files.md`.
   and nothing else; the content type is the device's word.
 - **Private in the bucket**, at `files/<owner id>/<file id>`, a key
   worked out from the row and never stored. Reading is through a
-  download URL the server signs for a user who sees the row.
+  download URL the server signs for a user who sees the row. The
+  bucket must not answer `files/` without a signature: dev's shares
+  the avatars' bucket, which Garage serves whole by its web endpoint,
+  see `docs/suggestions/files.md`.
 - **On a device, one folder per account holds every file's bytes**,
   uploaded or not, each under its bare id. In the app's data directory,
   never the OS cache: a file not yet uploaded is the only copy.
@@ -86,15 +91,17 @@ which the cleanup removes, and never a row without a file.
 
 | Step | Who | What |
 | --- | --- | --- |
-| 1 | device | for each pending create on `app_files`, asks `POST /api/files/upload` with `{id, content_type, size}` |
+| 1 | device, `files::ask_about_waiting` | for each pending create on `app_files`, asks `POST /api/files/upload` with `{id, content_type, size}` |
 | 2 | server | checks the size; looks at `files/<owner id>/<file id>`. There, of that size: `uploaded`. Otherwise a signed PUT URL, good for 10 minutes |
-| 3 | device | pushes every pending event except those of a file not answered `uploaded`; a rename waits with its create |
+| 3 | device | pushes every pending event except those of a file not answered `uploaded`, `files::held_back`; a rename waits with its create |
 | 4 | device | pulls, backfills, prunes, as ever |
 | 5 | device, `files::upload_waiting` | sends each waiting file's bytes from disk to its URL, as a stream, with a longer timeout than the sync's requests |
 | 6 | device | pushes the events of the files just sent |
 | 7 | server, `files::apply_event` | on create, looks in the bucket again: there, the row is written; not there, `file_not_uploaded`, and the event stays pending for the next sync |
 
-- What to hold back is worked out in each sync and kept nowhere.
+- What to hold back is worked out in each sync and kept nowhere. Once
+  the server cannot be reached the rest of the files are not asked
+  about, so a device offline waits on one request, not one per file.
 - Every step can run again: a sync cut off after step 5 hears
   `uploaded` next time and pushes.
 - A file that fails holds back only its own events.
@@ -105,8 +112,10 @@ which the cleanup removes, and never a row without a file.
 - One PUT per file, started over if cut off. No checksum.
 - The file has no row on the server when its upload is asked for, so
   the server holds the user to the key's prefix, their own.
-- The `Transport` trait carries the asking and the sending, so tests
-  run the exchange in one process against the in-memory bucket.
+- The `Transport` trait carries the asking, the sending and the
+  fetching (`files_create_upload`, `files_upload`, `files_download`),
+  so tests run the exchange in one process against the in-memory
+  bucket.
 - On the web there is no queue: the page asks for an upload without an
   id, the server makes one, the page sends the bytes and creates the
   row.
@@ -116,14 +125,18 @@ which the cleanup removes, and never a row without a file.
 | State | Gets there | On its own | The person can |
 | --- | --- | --- | --- |
 | Waiting | added; the create is pending | every sync tries again | delete it |
-| Refused | the server will not take it, or 30 tries | nothing | Try again, Let it go |
+| Refused | the server will not take it, its bytes are gone, or 30 tries | nothing | Try again, Let it go |
 | Synced | the create was applied | syncs like a post | rename, delete |
 
 - **Refused keeps everything.** A post's rejected create is dropped
   with its row; a file's is kept as a conflict with nothing on the
   server's side, with its row and its bytes, and the file still shows
-  on that device. Reasons: over the limit, a name not valid, the bytes
-  gone from the disk, the limit of tries.
+  on that device. Refused at once: the server will not sign an upload
+  for it, or rejects its create for anything but missing bytes, over
+  the limit or a name not valid say; or the device finds the bytes gone
+  from its disk. Refused at the limit: the tries below. A refused
+  file's later events, a rename, are held back too, since the server
+  never had the row.
 - **Try again** makes the create pending and sets its tries to 0.
   **Let it go** removes the event, the row and the bytes.
 - **Deleting a waiting file is local**: the row, its events and the
@@ -143,7 +156,8 @@ which the cleanup removes, and never a row without a file.
 | the bucket refused the PUT, a 4xx | yes |
 
 An outage counts nothing however long, so the limit is not sized
-against one.
+against one. The reason is kept under the file either way, counted or
+not, so the page says why a file still waits.
 
 ## Showing a file
 
@@ -152,8 +166,10 @@ or a frame:
 
 - **In the app**, a custom protocol handled in Rust: it serves the local
   copy with the row's content type, and when there is none fetches the
-  file first, written under a temporary name and renamed when whole. A
-  file that cannot be had is a 404 and the page shows a placeholder.
+  file first, `files::local_copy`, written under a temporary name and
+  renamed when whole. A file that cannot be had, the server out of
+  reach or the device working offline, is a 404 and the page shows a
+  placeholder.
 - **On the web**, `GET /api/files/:id/content` redirects to a signed
   download URL good for an hour, the redirect cacheable in that browser
   for a little less.
@@ -164,7 +180,8 @@ by type, the same on every platform:
 | Type | Shown with |
 | --- | --- |
 | image, animated or not | `FileImage` |
-| plain text, PDF | a sandboxed frame |
+| plain text | a sandboxed frame |
+| PDF | a frame, not sandboxed: a sandbox turns off the webview's PDF viewer |
 | anything else | its name and size |
 
 Only these types are rendered, and every answer says `nosniff`: an HTML
@@ -186,13 +203,15 @@ Downloads folder; absent on phones.
 A delete is the soft delete, synced like any edit.
 
 - **On a device**, a cleanup at the end of each sync, over the
-  account's folder: a file whose row is deleted is removed; a file with
-  no row is removed once it is a day old. The day is for a file being
-  added, whose bytes are on disk a moment before its row.
-- **In the bucket**, `files/` joins `avatars/` in the server's sweep: a
-  file with no row, a day old, is deleted. A deleted row keeps its file
-  for the purge's 90 days. Deleting an account deletes its prefix at
-  once.
+  account's folder, `files::delete_unreferenced_on_device`: a file
+  whose row is deleted is removed; a file with no row, or a fetch left
+  half done, is removed once it is a day old. The day is for a file
+  being added, whose bytes are on disk a moment before its row.
+- **In the bucket**, `files/` joins `avatars/` in the server's sweep,
+  `files::delete_unreferenced`: a file with no row, a day old, is
+  deleted. A deleted row keeps its file for the purge's 90 days.
+  Deleting an account, once there is such a thing, deletes its prefix
+  at once. The sweep waits for a scheduler, as the avatars' does.
 
 **A gap accepted.** A file uploaded whose push never came is swept
 after a day and uploaded again when the device returns. If the device
@@ -208,8 +227,9 @@ again before each delete.
 - A PDF in a frame from the custom protocol, on each platform's
   webview; where it does not render, the page shows the name and size.
 - The canvas still of an image served by the custom protocol.
-- That `object_store` can sign a download URL asking for an attachment
-  under a given name.
+- That the bucket honours `response-content-disposition` in the
+  signed download URL, which is how Download on the web asks for an
+  attachment; `object_store` signs it.
 - 25 MB through the page's file input and a command's raw body on a
   phone.
 
