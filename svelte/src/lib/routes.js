@@ -12,6 +12,7 @@ export const ACCOUNTS_INDEX_PATH = "/accounts";
 export const ACCOUNTS_SIGN_UP_PATH = "/accounts/sign-up";
 export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
 export const ACCOUNTS_SETTINGS_PATH = "/accounts/settings";
+export const ACCOUNTS_PASSWORD_EDIT_PATH = "/accounts/password";
 export const POSTS_INDEX_PATH = "/posts";
 export const POSTS_NEW_PATH = "/posts/new";
 export const POSTS_SHOW_PATH = "/posts/:id";
@@ -155,6 +156,11 @@ export function profileEditUrl() {
 /** The signed-in person's account: their email, and later their plan. */
 export function accountsSettingsUrl() {
   return ACCOUNTS_SETTINGS_PATH;
+}
+
+/** Where the signed-in person makes or changes their password. */
+export function accountsPasswordEditUrl() {
+  return ACCOUNTS_PASSWORD_EDIT_PATH;
 }
 
 export function supportIndexUrl() {

@@ -215,9 +215,11 @@ impl From<AccountError> for ApiError {
             AccountError::User(error) => return error.into(),
             AccountError::AccountUser(error) => return error.into(),
             AccountError::Sync(error) => return error.into(),
-            AccountError::InvalidEmailOrPassword
+            AccountError::SignInExpired
             | AccountError::CodeDoesNotMatch
             | AccountError::UnknownDeviceCode => StatusCode::UNAUTHORIZED,
+            AccountError::PasswordDoesNotMatch => StatusCode::UNPROCESSABLE_ENTITY,
+            AccountError::PasswordResetNotAllowed => StatusCode::FORBIDDEN,
             AccountError::Credential(
                 CredentialError::PasswordTooShort | CredentialError::PasswordTooLong,
             ) => StatusCode::UNPROCESSABLE_ENTITY,

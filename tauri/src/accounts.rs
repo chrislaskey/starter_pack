@@ -8,14 +8,16 @@
 //! `accounts_sign_in_finish` exchanges it with the verifier for the
 //! session, which goes into the account's own file, see
 //! `device_accounts`, which becomes the active one and syncs. The app
-//! never sees a password. A sign-out syncs first, so a change still
+//! sees no password at a sign-in. A signed-in person makes or changes
+//! theirs from the account page, which asks the server, so only when
+//! online. A sign-out syncs first, so a change still
 //! waiting reaches the server, then closes the account, whose data stays
 //! for the next sign-in.
 
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
-use app_core::accounts;
+use app_core::accounts::{self, PasswordUpdate, SecondFactor};
 use app_core::users::User;
 
 use crate::device_accounts::{DeviceAccounts, PendingSignIn};
@@ -111,6 +113,35 @@ pub async fn accounts_sign_out(
     let _no_sync_meanwhile = server.hold().await;
     device
         .sign_out(server.transport())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// What the signed-in user's account asks for after the emailed code,
+/// asked of the server.
+#[tauri::command]
+pub async fn accounts_second_factors(
+    device: State<'_, DeviceAccounts>,
+    server: State<'_, SyncServer>,
+) -> Result<Vec<SecondFactor>, String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
+    accounts::second_factors_on_device(&deployment, server.transport())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The signed-in user's password, their first or a new one, kept by
+/// the server.
+#[tauri::command]
+pub async fn accounts_password_update(
+    device: State<'_, DeviceAccounts>,
+    server: State<'_, SyncServer>,
+    current: Option<String>,
+    password: String,
+) -> Result<(), String> {
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
+    let update = PasswordUpdate { current, password };
+    accounts::password_update_on_device(&deployment, server.transport(), &update)
         .await
         .map_err(|error| error.to_string())
 }

@@ -1,9 +1,10 @@
 <!-- The signed-in person's account, at /accounts/settings: their email,
-     and a placeholder for the rest (password, plan) until it is built,
-     see docs/design/multi-app.md. -->
+     the way to their password, and a placeholder for the rest (plan)
+     until it is built, see docs/design/multi-app.md. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import { currentUserLoad } from "../lib/current_user.js";
+  import { accountsPasswordEditUrl } from "../lib/routes.js";
 
   /** @type {import("../lib/current_user.js").User | null} */
   let currentUser = $state(null);
@@ -20,5 +21,5 @@
   {#if currentUser}
     <p>{currentUser.email}</p>
   {/if}
-  <p class="muted">Nothing else here yet.</p>
+  <p><a href={accountsPasswordEditUrl()} class="link">Password</a></p>
 </main>

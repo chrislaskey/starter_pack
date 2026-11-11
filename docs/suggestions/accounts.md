@@ -1,7 +1,7 @@
 # Accounts: what was left out
 
-The sign-up and sign-in with an email and a password and the emailed
-code (`core/src/accounts.rs`, the design in
+The sign-up and sign-in with an email and the emailed code, with a
+password as an optional second factor (`core/src/accounts.rs`, the design in
 `docs/design/accounts-sign-in.md`), and the apps signing in through the
 browser, are the smallest flow that puts a real, confirmed user on every
 deployment. The Phoenix app has the rest, and each is a layer on top of
@@ -11,8 +11,22 @@ this one:
   here the email carries a code. A link is the same pending sign-in
   with the pending token and the code in the URL, and on a phone it
   can open the app directly once the universal links exist.
-- **Changing the password, and resetting a forgotten one** by a link
-  sent to the email.
+- **A way back for an app that locks out.** A forgotten password is
+  reset after the emailed code by default, which leaves it guarding
+  nothing the inbox does not already open. With
+  `accounts::FORGOTTEN_PASSWORD` set to `LockedOut` it is a true second
+  factor and needs another way back: recovery codes shown when the
+  password is made, or staff clearing it from ops after checking who
+  is asking.
+- **The choice as a setting of the deployment**, or of each account,
+  rather than a constant in the code.
+- **Removing a password**, back to the code alone, and **signing the
+  other sessions out** when it is made or changed.
+- **Other second factors** beside the password, an authenticator app
+  or a passkey: another entry in `accounts::SecondFactor`, its own
+  step after the code.
+- **One page for sign-up and sign-in**: the email first, and the name
+  asked after the code when the account is new.
 - **Changing the email**, with a confirmation link, which also has to
   update the synced `app_users` row.
 - **Sudo mode**: asking for the password again before a sensitive

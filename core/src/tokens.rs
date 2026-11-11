@@ -3,9 +3,10 @@
 //! and told apart by its `Context`, which also sets how long it lives.
 //! The API token an app sends as a bearer token on every request and
 //! the token the browser's cookie holds, which the server resolves to a
-//! user, `users::get_by_token`; the pending sign-in that passed the
-//! password and waits for its emailed code, which carries the code's
-//! hash and the wrong attempts so far; and the device code a finished
+//! user, `users::get_by_token`; the pending sign-in that waits for its
+//! emailed code, which carries the code's hash and the wrong attempts
+//! so far; the one whose code matched and that waits for a password;
+//! and the device code a finished
 //! browser sign-in leaves for the device to collect, see `accounts`.
 //! Made and deleted there; the expired ones go with the purge.
 
@@ -32,19 +33,22 @@ pub enum Context {
     Api,
     /// The browser's cookie, sixty days.
     Session,
-    /// A sign-in that passed the password and waits for its emailed
-    /// code, ten minutes.
+    /// A sign-in that waits for its emailed code, ten minutes.
     SignInCode,
+    /// A sign-in whose code matched and that waits for a password, or
+    /// for one to be made or skipped, ten minutes.
+    SignInPassword,
     /// A finished browser sign-in waiting for the device to collect it,
     /// five minutes.
     DeviceCode,
 }
 
 impl Context {
-    pub const ALL: [Context; 4] = [
+    pub const ALL: [Context; 5] = [
         Context::Api,
         Context::Session,
         Context::SignInCode,
+        Context::SignInPassword,
         Context::DeviceCode,
     ];
 
@@ -54,6 +58,7 @@ impl Context {
             Context::Api => "api",
             Context::Session => "session",
             Context::SignInCode => "sign_in_code",
+            Context::SignInPassword => "sign_in_password",
             Context::DeviceCode => "device_code",
         }
     }
@@ -69,7 +74,9 @@ impl Context {
         match self {
             Context::Api => Duration::days(API_VALIDITY_DAYS),
             Context::Session => Duration::days(SESSION_VALIDITY_DAYS),
-            Context::SignInCode => Duration::minutes(SIGN_IN_CODE_VALIDITY_MINUTES),
+            Context::SignInCode | Context::SignInPassword => {
+                Duration::minutes(SIGN_IN_CODE_VALIDITY_MINUTES)
+            }
             Context::DeviceCode => Duration::minutes(DEVICE_CODE_VALIDITY_MINUTES),
         }
     }
@@ -126,6 +133,16 @@ pub(crate) async fn create_sign_in_code(
     )
     .await?;
     Ok((pending, code))
+}
+
+/// Makes the pending token of the user's sign-in whose code matched,
+/// replacing any earlier one, for its password step.
+pub(crate) async fn create_sign_in_password(
+    tx: &mut Transaction,
+    user_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    delete_of_user(tx, user_id, Context::SignInPassword).await?;
+    create(tx, user_id, Context::SignInPassword).await
 }
 
 /// Makes the device code for the user's finished browser sign-in: 16

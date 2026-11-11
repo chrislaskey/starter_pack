@@ -1,17 +1,19 @@
 //! Accounts: signing up, signing in and signing out. The server does
-//! the work, and every sign-up and sign-in ends with a code emailed to
-//! the person, see `docs/design/accounts-sign-in.md`. A sign-up writes
-//! the person's account, `users`, unconfirmed, their user's row with
-//! their name, `crate::users`, and their password hash; a sign-in
-//! checks the password; both then make a pending sign-in, `tokens`,
-//! and mail its six-digit code, `mails`, answering the pending token the
-//! page holds. The code, `sign_in_with_code`, confirms the email the
-//! first time and ends in `finish_in`: a session token for the browser's
-//! cookie, or, for a sign-in a device started in the browser, a device
-//! code the device exchanges for its API token,
-//! `sign_in_with_device_code`, with the verifier only it holds. Every
-//! way of proving who someone is, a provider's say-so one day, ends in
-//! that same function. A sign-out deletes the token.
+//! the work, and the emailed code is what proves who someone is, see
+//! `docs/design/accounts-sign-in.md`. A sign-up writes the person's
+//! account, `users`, unconfirmed, and their user's row with their name,
+//! `crate::users`; a sign-in finds the account by its email; both then
+//! make a pending sign-in, `tokens`, and mail its six-digit code,
+//! `mails`, answering the pending token the page holds. The code,
+//! `sign_in_with_code`, confirms the email the first time, then asks
+//! for whatever the account's `second_factors` are, a password being
+//! the only one: an account with a password is asked for it,
+//! `sign_in_with_password`, and a new account is offered to make one or
+//! skip, `sign_in_with_new_password`. Every way ends in `finish_in`: a
+//! session token for the browser's cookie, or, for a sign-in a device
+//! started in the browser, a device code the device exchanges for its
+//! API token, `sign_in_with_device_code`, with the verifier only it
+//! holds. A sign-out deletes the token.
 //!
 //! A device never sees a password: it keeps the session the exchange
 //! answered, `keep_signed_in`, as the `signed_in` device setting, and a
@@ -37,8 +39,56 @@ use crate::users::{SignedIn, User, UserError};
 
 use self::users::{AccountUser, AccountUserError};
 
-/// Wrong codes a pending sign-in takes before it is deleted.
+/// Wrong codes a pending sign-in takes before it is deleted, and wrong
+/// passwords after the code.
 pub const MAX_CODE_ATTEMPTS: i64 = 5;
+
+/// What an account with a password does about one its owner forgot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgottenPassword {
+    /// After the emailed code they make a new one, so the password
+    /// guards only against someone without the inbox.
+    Reset,
+    /// Nothing: the account stays closed without its password.
+    LockedOut,
+}
+
+/// The app's choice, to change in a fork.
+pub const FORGOTTEN_PASSWORD: ForgottenPassword = ForgottenPassword::Reset;
+
+/// A second proof of who someone is, asked for after the emailed code
+/// when their account has it. A password is the only one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecondFactor {
+    Password,
+}
+
+/// What the page asks for after the code matched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextStep {
+    /// The account's password, `sign_in_with_password`.
+    Password,
+    /// A password to make, or to skip, at the first sign-in,
+    /// `sign_in_with_new_password`.
+    NewPassword,
+}
+
+/// What the emailed code answers: the finished sign-in, or the step
+/// still to take with the pending token to take it with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum SignInStep<Finished> {
+    Finished(Finished),
+    Next {
+        next: NextStep,
+        pending: String,
+        /// Whether a forgotten password may be reset at this step,
+        /// `sign_in_with_reset_password`.
+        can_reset_password: bool,
+    },
+}
 
 /// What a finished sign-in answers: the user, their account's email,
 /// which a device shows its accounts by, and the token that stands for
@@ -48,6 +98,14 @@ pub struct Session {
     pub user: User,
     pub email: String,
     pub token: String,
+}
+
+/// A password for the signed-in user, with the one they have now when
+/// they have one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordUpdate {
+    pub current: Option<String>,
+    pub password: String,
 }
 
 /// What a sign-up or a sign-in answers: the pending token the page
@@ -70,8 +128,12 @@ pub enum AccountError {
     ServerOnly,
     #[error("only a device keeps someone signed in")]
     DeviceOnly,
-    #[error("That email and password do not match")]
-    InvalidEmailOrPassword,
+    #[error("That password is wrong")]
+    PasswordDoesNotMatch,
+    #[error("That sign-in has expired; sign in again")]
+    SignInExpired,
+    #[error("A forgotten password cannot be reset")]
+    PasswordResetNotAllowed,
     #[error("That code is wrong or has expired; sign in again to get a new one")]
     CodeDoesNotMatch,
     #[error("That code is wrong or has expired; sign in again")]
@@ -100,18 +162,16 @@ enum Finish<'a> {
     Device { challenge: &'a str },
 }
 
-/// Registers the person on the server, unconfirmed, with their name
-/// and password, and mails them a code: their account, their user's
-/// row, their password and a pending sign-in, in one transaction, then
-/// the email. An email that already has a confirmed account is answered
-/// the same way, after the same work, and its owner is emailed that
-/// they have one; an unconfirmed one gets this name and password and a
+/// Registers the person on the server, unconfirmed, with their name,
+/// and mails them a code: their account, their user's row and a pending
+/// sign-in, in one transaction, then the email. An email that already
+/// has a confirmed account is answered the same way, and its owner is
+/// emailed that they have one; an unconfirmed one gets this name and a
 /// new code, so whoever reads the inbox gets the account.
 pub async fn sign_up(
     deployment: &Deployment,
     mailer: &Mailer,
     email: &str,
-    password: &str,
     name: &str,
 ) -> Result<CodeSent, AccountError> {
     if deployment.role != Role::Server {
@@ -122,20 +182,17 @@ pub async fn sign_up(
     let existing = users::get_by_email_in(&mut tx, email).await?;
     let (mail, pending) = match existing {
         Some(account) if account.confirmed_at.is_some() => {
-            let _hashed_to_take_as_long = credentials::checked_hash(password).await?;
             let mail = mails::already_signed_up(&account.email);
             (mail, tokens::random_hex(32))
         }
         Some(account) => {
             crate::users::update_name_in(&mut tx, account.id, name).await?;
-            credentials::set(&mut tx, account.id, password).await?;
             let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
             (mails::sign_in_code(&account.email, &code), pending)
         }
         None => {
             let account = users::create_in(&mut tx, Uuid::now_v7(), email, false).await?;
             crate::users::create_in(&mut tx, account.id, name).await?;
-            credentials::set(&mut tx, account.id, password).await?;
             let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
             (mails::sign_in_code(&account.email, &code), pending)
         }
@@ -145,30 +202,28 @@ pub async fn sign_up(
     Ok(CodeSent { pending })
 }
 
-/// Checks the password, on the server, and mails the person a code for
-/// a pending sign-in. An unknown email is answered as a wrong password
-/// is, after the same work.
+/// Mails the account of the email a code for a pending sign-in, on the
+/// server. An email with no account is answered the same way, and
+/// emailed that it has none.
 pub async fn sign_in(
     deployment: &Deployment,
     mailer: &Mailer,
     email: &str,
-    password: &str,
 ) -> Result<CodeSent, AccountError> {
     if deployment.role != Role::Server {
         return Err(AccountError::ServerOnly);
     }
+    let email = users::checked_email(email)?;
     let mut tx = deployment.begin().await?;
-    let account = users::get_by_email_in(&mut tx, email).await?;
-    let account_id = account.as_ref().map(|account| account.id);
-    let matches = credentials::verify(&mut tx, account_id, password).await?;
-    let Some(account) = account.filter(|_| matches) else {
-        return Err(AccountError::InvalidEmailOrPassword);
+    let (mail, pending) = match users::get_by_email_in(&mut tx, &email).await? {
+        Some(account) => {
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
+            (mails::sign_in_code(&account.email, &code), pending)
+        }
+        None => (mails::no_account(&email), tokens::random_hex(32)),
     };
-    let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
     tx.commit().await?;
-    mailer
-        .send(mails::sign_in_code(&account.email, &code))
-        .await?;
+    mailer.send(mail).await?;
     Ok(CodeSent { pending })
 }
 
@@ -215,57 +270,168 @@ pub async fn resend_code_to(
     Ok(account.email)
 }
 
-/// Finishes the pending sign-in with the code that was emailed, on the
-/// server, and makes a token for the browser's cookie. A wrong code
-/// counts; after `MAX_CODE_ATTEMPTS` the pending sign-in is gone.
+/// Takes the code that was emailed for the pending sign-in, on the
+/// server: a token for the browser's cookie, or the step still to take.
+/// A wrong code counts; after `MAX_CODE_ATTEMPTS` the pending sign-in
+/// is gone.
 pub async fn sign_in_with_code(
     deployment: &Deployment,
     pending: &str,
     code: &str,
-) -> Result<Session, AccountError> {
-    if deployment.role != Role::Server {
-        return Err(AccountError::ServerOnly);
-    }
-    let mut tx = deployment.begin().await?;
-    let (user, account) = match match_code_in(&mut tx, pending, code).await {
-        Ok(matched) => matched,
-        Err(error) => {
-            tx.commit().await?;
-            return Err(error);
-        }
-    };
-    let token = finish_in(&mut tx, &user, Finish::Session).await?;
-    tx.commit().await?;
-    Ok(Session {
-        user,
-        email: account.email,
-        token,
-    })
+) -> Result<SignInStep<Session>, AccountError> {
+    let proof = Proof::Code { pending, code };
+    let (step, _account) = prove(deployment, proof, Finish::Session).await?;
+    Ok(step)
 }
 
-/// Finishes the pending sign-in with the code, for a sign-in a device
-/// started with the challenge: the device code it collects, and no
-/// token for the browser.
+/// Takes the code, for a sign-in a device started with the challenge:
+/// the device code it collects, and no token for the browser, or the
+/// step still to take.
 pub async fn sign_in_with_code_for_device(
     deployment: &Deployment,
     pending: &str,
     code: &str,
     challenge: &str,
+) -> Result<SignInStep<DeviceCode>, AccountError> {
+    let proof = Proof::Code { pending, code };
+    let (step, _account) = prove(deployment, proof, Finish::Device { challenge }).await?;
+    Ok(step)
+}
+
+/// Finishes a sign-in whose code matched with the account's password,
+/// on the server. A wrong one counts as a wrong code does.
+pub async fn sign_in_with_password(
+    deployment: &Deployment,
+    pending: &str,
+    password: &str,
+) -> Result<Session, AccountError> {
+    let proof = Proof::Password { pending, password };
+    let (step, _account) = prove(deployment, proof, Finish::Session).await?;
+    finished(step)
+}
+
+/// Finishes it with the password for the device whose challenge it is.
+pub async fn sign_in_with_password_for_device(
+    deployment: &Deployment,
+    pending: &str,
+    password: &str,
+    challenge: &str,
 ) -> Result<DeviceCode, AccountError> {
+    let proof = Proof::Password { pending, password };
+    let (step, _account) = prove(deployment, proof, Finish::Device { challenge }).await?;
+    finished(step)
+}
+
+/// Finishes a first sign-in whose code matched, keeping the password
+/// the person made, or none when they skipped.
+pub async fn sign_in_with_new_password(
+    deployment: &Deployment,
+    pending: &str,
+    password: Option<&str>,
+) -> Result<Session, AccountError> {
+    let proof = Proof::NewPassword { pending, password };
+    let (step, _account) = prove(deployment, proof, Finish::Session).await?;
+    finished(step)
+}
+
+/// Finishes it for the device whose challenge it is.
+pub async fn sign_in_with_new_password_for_device(
+    deployment: &Deployment,
+    pending: &str,
+    password: Option<&str>,
+    challenge: &str,
+) -> Result<DeviceCode, AccountError> {
+    let proof = Proof::NewPassword { pending, password };
+    let (step, _account) = prove(deployment, proof, Finish::Device { challenge }).await?;
+    finished(step)
+}
+
+/// Finishes a sign-in whose code matched with a new password in place
+/// of the one the person forgot, when `FORGOTTEN_PASSWORD` lets them,
+/// and mails them that it changed.
+pub async fn sign_in_with_reset_password(
+    deployment: &Deployment,
+    mailer: &Mailer,
+    pending: &str,
+    password: &str,
+) -> Result<Session, AccountError> {
+    let proof = Proof::ResetPassword { pending, password };
+    let (step, account) = prove(deployment, proof, Finish::Session).await?;
+    mailer.send(mails::password_reset(&account.email)).await?;
+    finished(step)
+}
+
+/// Finishes it for the device whose challenge it is.
+pub async fn sign_in_with_reset_password_for_device(
+    deployment: &Deployment,
+    mailer: &Mailer,
+    pending: &str,
+    password: &str,
+    challenge: &str,
+) -> Result<DeviceCode, AccountError> {
+    let proof = Proof::ResetPassword { pending, password };
+    let (step, account) = prove(deployment, proof, Finish::Device { challenge }).await?;
+    mailer.send(mails::password_reset(&account.email)).await?;
+    finished(step)
+}
+
+/// What the signed-in user's account asks for after the emailed code.
+pub async fn second_factors(
+    deployment: &Deployment,
+    user: &User,
+) -> Result<Vec<SecondFactor>, AccountError> {
     if deployment.role != Role::Server {
         return Err(AccountError::ServerOnly);
     }
     let mut tx = deployment.begin().await?;
-    let (user, _account) = match match_code_in(&mut tx, pending, code).await {
-        Ok(matched) => matched,
-        Err(error) => {
-            tx.commit().await?;
-            return Err(error);
-        }
-    };
-    let code = finish_in(&mut tx, &user, Finish::Device { challenge }).await?;
+    let factors = second_factors_in(&mut tx, user.id).await?;
     tx.commit().await?;
-    Ok(DeviceCode { code })
+    Ok(factors)
+}
+
+/// Keeps the password as the signed-in user's, their first or in place
+/// of the one they had, which `current` must then be.
+pub async fn password_update(
+    deployment: &Deployment,
+    user: &User,
+    update: &PasswordUpdate,
+) -> Result<(), AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let current = update.current.as_deref().unwrap_or_default();
+    if credentials::is_set(&mut tx, user.id).await?
+        && !credentials::verify(&mut tx, Some(user.id), current).await?
+    {
+        return Err(AccountError::PasswordDoesNotMatch);
+    }
+    credentials::set(&mut tx, user.id, &update.password).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// `second_factors` asked of the server by the user signed in on this
+/// device.
+#[cfg(feature = "sync-http")]
+pub async fn second_factors_on_device(
+    deployment: &Deployment,
+    server: &crate::sync::Http,
+) -> Result<Vec<SecondFactor>, AccountError> {
+    let (_user, token) = crate::users::signed_in_with_token(deployment).await?;
+    Ok(server.accounts_second_factors(&token).await?)
+}
+
+/// `password_update` asked of the server by the user signed in on this
+/// device.
+#[cfg(feature = "sync-http")]
+pub async fn password_update_on_device(
+    deployment: &Deployment,
+    server: &crate::sync::Http,
+    update: &PasswordUpdate,
+) -> Result<(), AccountError> {
+    let (_user, token) = crate::users::signed_in_with_token(deployment).await?;
+    Ok(server.accounts_password_update(&token, update).await?)
 }
 
 /// Exchanges the device code, with the verifier the device kept, for
@@ -393,35 +559,214 @@ pub async fn forget_signed_in(deployment: &Deployment) -> Result<(), AccountErro
     Ok(())
 }
 
-/// The user of the pending sign-in and their account, once the code
-/// matches: the pending sign-in is deleted and the email confirmed if
-/// it was not yet. A wrong code is counted, and the one that reaches
-/// `MAX_CODE_ATTEMPTS` deletes the pending sign-in; the caller commits
-/// either way.
+/// What a step of a sign-in is given.
+enum Proof<'a> {
+    Code {
+        pending: &'a str,
+        code: &'a str,
+    },
+    Password {
+        pending: &'a str,
+        password: &'a str,
+    },
+    NewPassword {
+        pending: &'a str,
+        password: Option<&'a str>,
+    },
+    ResetPassword {
+        pending: &'a str,
+        password: &'a str,
+    },
+}
+
+/// One step of a sign-in: the proof is checked, and the sign-in is
+/// finished or its next step answered. A refusal is committed too, so
+/// a wrong attempt stays counted.
+async fn prove<Finished: FromFinish>(
+    deployment: &Deployment,
+    proof: Proof<'_>,
+    finish: Finish<'_>,
+) -> Result<(SignInStep<Finished>, AccountUser), AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    let mut tx = deployment.begin().await?;
+    let proven = match proof {
+        Proof::Code { pending, code } => match_code_in(&mut tx, pending, code).await,
+        Proof::Password { pending, password } => {
+            match_password_in(&mut tx, pending, password).await
+        }
+        Proof::NewPassword { pending, password } => {
+            keep_new_password_in(&mut tx, pending, password).await
+        }
+        Proof::ResetPassword { pending, password } => {
+            keep_reset_password_in(&mut tx, pending, password, FORGOTTEN_PASSWORD).await
+        }
+    };
+    let (account, next) = match proven {
+        Ok(proven) => proven,
+        Err(error) => {
+            tx.commit().await?;
+            return Err(error);
+        }
+    };
+    let step = match next {
+        Some(next) => {
+            let pending = tokens::create_sign_in_password(&mut tx, account.id).await?;
+            SignInStep::Next {
+                next,
+                pending,
+                can_reset_password: next == NextStep::Password
+                    && FORGOTTEN_PASSWORD == ForgottenPassword::Reset,
+            }
+        }
+        None => {
+            let user = live_user_in(&mut tx, account.id)
+                .await?
+                .ok_or(AccountError::SignInExpired)?;
+            let secret = finish_in(&mut tx, &user, finish).await?;
+            SignInStep::Finished(Finished::from_finish(user, account.email.clone(), secret))
+        }
+    };
+    tx.commit().await?;
+    Ok((step, account))
+}
+
+/// What `finish_in` answered, as the caller's kind of finished sign-in.
+trait FromFinish {
+    fn from_finish(user: User, email: String, secret: String) -> Self;
+}
+
+impl FromFinish for Session {
+    fn from_finish(user: User, email: String, token: String) -> Self {
+        Session { user, email, token }
+    }
+}
+
+impl FromFinish for DeviceCode {
+    fn from_finish(_user: User, _email: String, code: String) -> Self {
+        DeviceCode { code }
+    }
+}
+
+/// A password step always finishes.
+fn finished<Finished>(step: SignInStep<Finished>) -> Result<Finished, AccountError> {
+    match step {
+        SignInStep::Finished(finished) => Ok(finished),
+        SignInStep::Next { .. } => Err(AccountError::SignInExpired),
+    }
+}
+
+/// The account of the pending sign-in, once the code matches, and the
+/// step still to take: the pending sign-in is deleted and the email
+/// confirmed if it was not yet. A wrong code is counted, and the one
+/// that reaches `MAX_CODE_ATTEMPTS` deletes the pending sign-in.
 async fn match_code_in(
     tx: &mut Transaction,
     pending: &str,
     code: &str,
-) -> Result<(User, AccountUser), AccountError> {
+) -> Result<(AccountUser, Option<NextStep>), AccountError> {
     let row = tokens::get_valid(tx, &tokens::hash(pending), Context::SignInCode, now())
         .await?
         .ok_or(AccountError::CodeDoesNotMatch)?;
     if row.code_hash.as_deref() != Some(tokens::hash(code.trim()).as_str()) {
-        let attempts = tokens::count_attempt(tx, row.id).await?;
-        if attempts >= MAX_CODE_ATTEMPTS {
-            tokens::delete_by_id(tx, row.id).await?;
-        }
+        count_attempt_in(tx, row.id).await?;
         return Err(AccountError::CodeDoesNotMatch);
     }
     tokens::delete_by_id(tx, row.id).await?;
     let account = live_account_in(tx, row.user_id).await?;
-    let user = live_user_in(tx, row.user_id)
-        .await?
-        .ok_or(AccountError::CodeDoesNotMatch)?;
-    if account.confirmed_at.is_none() {
+    let first_sign_in = account.confirmed_at.is_none();
+    if first_sign_in {
         users::confirm_in(tx, account.id).await?;
     }
-    Ok((user, account))
+    let next = match second_factors_in(tx, account.id).await?.first() {
+        Some(SecondFactor::Password) => Some(NextStep::Password),
+        None if first_sign_in => Some(NextStep::NewPassword),
+        None => None,
+    };
+    Ok((account, next))
+}
+
+/// The account of the sign-in whose code matched, once the password
+/// does too. A wrong one is counted as a wrong code is.
+async fn match_password_in(
+    tx: &mut Transaction,
+    pending: &str,
+    password: &str,
+) -> Result<(AccountUser, Option<NextStep>), AccountError> {
+    let row = tokens::get_valid(tx, &tokens::hash(pending), Context::SignInPassword, now())
+        .await?
+        .ok_or(AccountError::SignInExpired)?;
+    if !credentials::verify(tx, Some(row.user_id), password).await? {
+        count_attempt_in(tx, row.id).await?;
+        return Err(AccountError::PasswordDoesNotMatch);
+    }
+    tokens::delete_by_id(tx, row.id).await?;
+    Ok((live_account_in(tx, row.user_id).await?, None))
+}
+
+/// The account of the first sign-in whose code matched, with the
+/// password kept if one was made. An account that has a password is
+/// not given another this way.
+async fn keep_new_password_in(
+    tx: &mut Transaction,
+    pending: &str,
+    password: Option<&str>,
+) -> Result<(AccountUser, Option<NextStep>), AccountError> {
+    let row = tokens::get_valid(tx, &tokens::hash(pending), Context::SignInPassword, now())
+        .await?
+        .ok_or(AccountError::SignInExpired)?;
+    if credentials::is_set(tx, row.user_id).await? {
+        return Err(AccountError::SignInExpired);
+    }
+    if let Some(password) = password {
+        credentials::set(tx, row.user_id, password).await?;
+    }
+    tokens::delete_by_id(tx, row.id).await?;
+    Ok((live_account_in(tx, row.user_id).await?, None))
+}
+
+/// The account of the sign-in whose code matched, with a new password
+/// in place of the one it had, when the app lets a forgotten one be
+/// reset.
+async fn keep_reset_password_in(
+    tx: &mut Transaction,
+    pending: &str,
+    password: &str,
+    forgotten_password: ForgottenPassword,
+) -> Result<(AccountUser, Option<NextStep>), AccountError> {
+    if forgotten_password == ForgottenPassword::LockedOut {
+        return Err(AccountError::PasswordResetNotAllowed);
+    }
+    let row = tokens::get_valid(tx, &tokens::hash(pending), Context::SignInPassword, now())
+        .await?
+        .ok_or(AccountError::SignInExpired)?;
+    if !credentials::is_set(tx, row.user_id).await? {
+        return Err(AccountError::SignInExpired);
+    }
+    credentials::set(tx, row.user_id, password).await?;
+    tokens::delete_by_id(tx, row.id).await?;
+    Ok((live_account_in(tx, row.user_id).await?, None))
+}
+
+/// Counts a wrong attempt against the pending token; the one that
+/// reaches `MAX_CODE_ATTEMPTS` deletes it.
+async fn count_attempt_in(tx: &mut Transaction, id: Uuid) -> Result<(), AccountError> {
+    if tokens::count_attempt(tx, id).await? >= MAX_CODE_ATTEMPTS {
+        tokens::delete_by_id(tx, id).await?;
+    }
+    Ok(())
+}
+
+async fn second_factors_in(
+    tx: &mut Transaction,
+    account_id: Uuid,
+) -> Result<Vec<SecondFactor>, AccountError> {
+    let mut factors = Vec::new();
+    if credentials::is_set(tx, account_id).await? {
+        factors.push(SecondFactor::Password);
+    }
+    Ok(factors)
 }
 
 /// Where every proven user ends: the browser's token, or the device
@@ -463,18 +808,60 @@ pub(crate) mod tests {
         mails::code_in(&mail).expect("a code in it")
     }
 
-    /// A user signed up on the server and finished with their code, as
-    /// a device: the session its exchange answered, with an API token.
-    pub(crate) async fn signed_up_for_a_device(server: &Deployment, email: &str) -> Session {
-        let mailer = Mailer::memory();
-        let sent = sign_up(server, &mailer, email, PASSWORD, "Alice")
+    /// The pending token of the step the code answered.
+    fn next_of<Finished>(step: SignInStep<Finished>, expected: NextStep) -> String {
+        match step {
+            SignInStep::Next { next, pending, .. } if next == expected => pending,
+            _ => panic!("expected the step {expected:?}"),
+        }
+    }
+
+    /// The pending token of a step still to take, none when finished.
+    fn session_of_or_pending(step: SignInStep<Session>) -> Option<String> {
+        match step {
+            SignInStep::Finished(_) => None,
+            SignInStep::Next { pending, .. } => Some(pending),
+        }
+    }
+
+    fn session_of(step: SignInStep<Session>) -> Session {
+        finished(step).expect("a finished sign-in")
+    }
+
+    /// A user signed up on the server with no password, their email
+    /// confirmed: the browser's session.
+    async fn signed_up(server: &Deployment, mailer: &Mailer, email: &str) -> Session {
+        let sent = sign_up(server, mailer, email, "Alice")
             .await
             .expect("signed up");
-        let code = code_sent_to(&mailer, email);
-        let (verifier, challenge) = verifier_and_challenge();
-        let device_code = sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
+        let code = code_sent_to(mailer, email);
+        let step = sign_in_with_code(server, &sent.pending, &code)
             .await
             .expect("the code matched");
+        let pending = next_of(step, NextStep::NewPassword);
+        sign_in_with_new_password(server, &pending, None)
+            .await
+            .expect("skipped making a password")
+    }
+
+    /// A sign-in of an account with no password, as a device: the
+    /// device code and the verifier to exchange it with.
+    async fn signed_in_for_a_device(server: &Deployment, email: &str) -> (DeviceCode, String) {
+        let mailer = Mailer::memory();
+        let sent = sign_in(server, &mailer, email).await.expect("signed in");
+        let code = code_sent_to(&mailer, email);
+        let (verifier, challenge) = verifier_and_challenge();
+        let step = sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
+            .await
+            .expect("the code matched");
+        (finished(step).expect("a finished sign-in"), verifier)
+    }
+
+    /// A user signed up on the server with no password, as a device:
+    /// the session its exchange answered, with an API token.
+    pub(crate) async fn signed_up_for_a_device(server: &Deployment, email: &str) -> Session {
+        signed_up(server, &Mailer::memory(), email).await;
+        let (device_code, verifier) = signed_in_for_a_device(server, email).await;
         sign_in_with_device_code(server, &device_code.code, &verifier)
             .await
             .expect("exchanged")
@@ -485,7 +872,7 @@ pub(crate) mod tests {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            let sent = sign_up(&server, &mailer, " Alice@Example.com ", PASSWORD, "Alice")
+            let sent = sign_up(&server, &mailer, " Alice@Example.com ", "Alice")
                 .await
                 .expect("signed up");
             assert_eq!(sent.pending.len(), 64);
@@ -498,9 +885,20 @@ pub(crate) mod tests {
                 .expect_err("wrong, unless the code is 000000");
             assert!(matches!(error, AccountError::CodeDoesNotMatch) || code == "000000");
 
-            let signed_up = sign_in_with_code(&server, &sent.pending, &format!(" {code} "))
+            let step = sign_in_with_code(&server, &sent.pending, &format!(" {code} "))
                 .await
                 .expect("the code matched, trimmed");
+            let pending = next_of(step, NextStep::NewPassword);
+            assert!(
+                matches!(
+                    sign_in_with_code(&server, &sent.pending, &code).await,
+                    Err(AccountError::CodeDoesNotMatch)
+                ),
+                "a code is used once"
+            );
+            let signed_up = sign_in_with_new_password(&server, &pending, None)
+                .await
+                .expect("skipped making a password");
             assert_eq!(signed_up.email, "alice@example.com");
             assert_eq!(signed_up.user.name, "Alice");
             let account = super::users::get(&server, signed_up.user.id)
@@ -515,19 +913,26 @@ pub(crate) mod tests {
             );
             assert!(
                 matches!(
-                    sign_in_with_code(&server, &sent.pending, &code).await,
-                    Err(AccountError::CodeDoesNotMatch)
+                    sign_in_with_new_password(&server, &pending, None).await,
+                    Err(AccountError::SignInExpired)
                 ),
-                "a code is used once"
+                "the step is taken once"
+            );
+            assert!(
+                second_factors(&server, &signed_up.user)
+                    .await
+                    .expect("looked")
+                    .is_empty()
             );
 
-            let sent = sign_in(&server, &mailer, "ALICE@example.com", PASSWORD)
+            let sent = sign_in(&server, &mailer, "ALICE@example.com")
                 .await
                 .expect("signed in");
             let code = code_sent_to(&mailer, "alice@example.com");
-            let signed_in = sign_in_with_code(&server, &sent.pending, &code)
+            let step = sign_in_with_code(&server, &sent.pending, &code)
                 .await
                 .expect("signed in");
+            let signed_in = session_of(step);
             assert_eq!(signed_in.user, signed_up.user);
             assert_ne!(signed_in.token, signed_up.token, "a token of its own");
 
@@ -550,45 +955,285 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_sign_up_refuses_a_bad_email_or_password_and_answers_a_taken_email_quietly() {
+    async fn accounts_a_password_made_at_the_first_sign_in_is_asked_for_after_the_code() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            let error = sign_up(&server, &mailer, "alice", PASSWORD, "Alice")
+            let sent = sign_up(&server, &mailer, "alice@example.com", "Alice")
+                .await
+                .expect("signed up");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::NewPassword);
+            let error = sign_in_with_new_password(&server, &pending, Some("short"))
+                .await
+                .expect_err("too short");
+            assert!(matches!(
+                error,
+                AccountError::Credential(CredentialError::PasswordTooShort)
+            ));
+            let alice = sign_in_with_new_password(&server, &pending, Some(PASSWORD))
+                .await
+                .expect("the step is still there after a refused password");
+            assert_eq!(
+                second_factors(&server, &alice.user).await.expect("looked"),
+                vec![SecondFactor::Password]
+            );
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            assert!(
+                matches!(
+                    sign_in_with_new_password(&server, &pending, None).await,
+                    Err(AccountError::SignInExpired)
+                ),
+                "a password is not skipped once the account has one"
+            );
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in again");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            let error = sign_in_with_password(&server, &pending, "wrong horse battery")
+                .await
+                .expect_err("wrong");
+            assert!(matches!(error, AccountError::PasswordDoesNotMatch));
+            let session = sign_in_with_password(&server, &pending, PASSWORD)
+                .await
+                .expect("the password matched");
+            assert_eq!(session.user, alice.user);
+            assert!(matches!(
+                sign_in_with_password(&server, &pending, PASSWORD).await,
+                Err(AccountError::SignInExpired)
+            ));
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let (verifier, challenge) = verifier_and_challenge();
+            let step = sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            for _ in 0..MAX_CODE_ATTEMPTS {
+                assert!(matches!(
+                    sign_in_with_password_for_device(&server, &pending, "wrong", &challenge).await,
+                    Err(AccountError::PasswordDoesNotMatch)
+                ));
+            }
+            assert!(
+                matches!(
+                    sign_in_with_password_for_device(&server, &pending, PASSWORD, &challenge).await,
+                    Err(AccountError::SignInExpired)
+                ),
+                "the right password is too late"
+            );
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            let device_code =
+                sign_in_with_password_for_device(&server, &pending, PASSWORD, &challenge)
+                    .await
+                    .expect("the password matched");
+            let session = sign_in_with_device_code(&server, &device_code.code, &verifier)
+                .await
+                .expect("exchanged");
+            assert_eq!(session.user, alice.user);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_a_forgotten_password_is_reset_after_the_code_unless_the_app_locks_out() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let alice = signed_up(&server, &mailer, "alice@example.com").await.user;
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let pending = session_of_or_pending(
+                sign_in_with_code(&server, &sent.pending, &code)
+                    .await
+                    .expect("the code matched"),
+            );
+            assert!(pending.is_none(), "no password, so nothing to reset");
+
+            let first = PasswordUpdate {
+                current: None,
+                password: PASSWORD.to_string(),
+            };
+            password_update(&server, &alice, &first)
+                .await
+                .expect("a password");
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            assert!(matches!(
+                step,
+                SignInStep::Next {
+                    can_reset_password: true,
+                    ..
+                }
+            ));
+            let pending = next_of(step, NextStep::Password);
+
+            let mut tx = server.begin().await.expect("a transaction");
+            let locked_out = ForgottenPassword::LockedOut;
+            assert!(matches!(
+                keep_reset_password_in(&mut tx, &pending, "another horse battery", locked_out)
+                    .await,
+                Err(AccountError::PasswordResetNotAllowed)
+            ));
+            tx.commit().await.expect("committed");
+
+            let error = sign_in_with_reset_password(&server, &mailer, &pending, "short")
+                .await
+                .expect_err("too short");
+            assert!(matches!(
+                error,
+                AccountError::Credential(CredentialError::PasswordTooShort)
+            ));
+            let session =
+                sign_in_with_reset_password(&server, &mailer, &pending, "another horse battery")
+                    .await
+                    .expect("reset and signed in");
+            assert_eq!(session.user, alice);
+            let mail = mailer.last_sent_to("alice@example.com").expect("mailed");
+            assert_eq!(mail.subject, "Your password was changed");
+            assert!(matches!(
+                sign_in_with_reset_password(&server, &mailer, &pending, PASSWORD).await,
+                Err(AccountError::SignInExpired)
+            ));
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            assert!(matches!(
+                sign_in_with_password(&server, &pending, PASSWORD).await,
+                Err(AccountError::PasswordDoesNotMatch)
+            ));
+            sign_in_with_password(&server, &pending, "another horse battery")
+                .await
+                .expect("the new one");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_password_update_makes_the_first_and_changes_it_with_the_current_one() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let alice = signed_up(&server, &mailer, "alice@example.com").await.user;
+            let first = PasswordUpdate {
+                current: None,
+                password: PASSWORD.to_string(),
+            };
+            let short = PasswordUpdate {
+                current: None,
+                password: "short".to_string(),
+            };
+            assert!(matches!(
+                password_update(&server, &alice, &short).await,
+                Err(AccountError::Credential(CredentialError::PasswordTooShort))
+            ));
+            password_update(&server, &alice, &first)
+                .await
+                .expect("their first password");
+            assert_eq!(
+                second_factors(&server, &alice).await.expect("looked"),
+                vec![SecondFactor::Password]
+            );
+
+            let another = "another horse battery".to_string();
+            for current in [None, Some("wrong horse battery".to_string())] {
+                let update = PasswordUpdate {
+                    current,
+                    password: another.clone(),
+                };
+                assert!(matches!(
+                    password_update(&server, &alice, &update).await,
+                    Err(AccountError::PasswordDoesNotMatch)
+                ));
+            }
+            let update = PasswordUpdate {
+                current: Some(PASSWORD.to_string()),
+                password: another.clone(),
+            };
+            password_update(&server, &alice, &update)
+                .await
+                .expect("changed");
+
+            let sent = sign_in(&server, &mailer, "alice@example.com")
+                .await
+                .expect("signed in");
+            let code = code_sent_to(&mailer, "alice@example.com");
+            let step = sign_in_with_code(&server, &sent.pending, &code)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::Password);
+            assert!(matches!(
+                sign_in_with_password(&server, &pending, PASSWORD).await,
+                Err(AccountError::PasswordDoesNotMatch)
+            ));
+            sign_in_with_password(&server, &pending, &another)
+                .await
+                .expect("the new one");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accounts_sign_up_refuses_a_bad_email_and_answers_a_taken_email_quietly() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let mailer = Mailer::memory();
+            let error = sign_up(&server, &mailer, "alice", "Alice")
                 .await
                 .expect_err("no @");
             assert!(matches!(
                 error,
                 AccountError::AccountUser(AccountUserError::InvalidEmail)
             ));
-            let error = sign_up(&server, &mailer, "alice@example.com", "short", "Alice")
-                .await
-                .expect_err("short");
-            assert!(matches!(
-                error,
-                AccountError::Credential(CredentialError::PasswordTooShort)
-            ));
-            assert!(
-                sign_in(&server, &mailer, "alice@example.com", PASSWORD)
-                    .await
-                    .is_err(),
-                "a refused sign-up wrote nothing"
-            );
             assert!(mailer.sent().is_empty());
 
-            let first = sign_up(&server, &mailer, "alice@example.com", PASSWORD, "Alice")
+            let first = sign_up(&server, &mailer, "alice@example.com", "Alice")
                 .await
                 .expect("signed up");
             let first_code = code_sent_to(&mailer, "alice@example.com");
-            let again = sign_up(
-                &server,
-                &mailer,
-                "alice@example.com",
-                "another horse battery",
-                "Alice Again",
-            )
-            .await
-            .expect("signed up again before confirming");
+            let again = sign_up(&server, &mailer, "alice@example.com", "Alice Again")
+                .await
+                .expect("signed up again before confirming");
             assert!(
                 matches!(
                     sign_in_with_code(&server, &first.pending, &first_code).await,
@@ -597,31 +1242,17 @@ pub(crate) mod tests {
                 "the first pending sign-in was replaced"
             );
             let code = code_sent_to(&mailer, "alice@example.com");
-            let session = sign_in_with_code(&server, &again.pending, &code)
+            let step = sign_in_with_code(&server, &again.pending, &code)
                 .await
                 .expect("the second one works");
+            let pending = next_of(step, NextStep::NewPassword);
+            let session = sign_in_with_new_password(&server, &pending, None)
+                .await
+                .expect("skipped");
             assert_eq!(session.user.name, "Alice Again", "with the second name");
-            assert!(
-                sign_in(
-                    &server,
-                    &mailer,
-                    "alice@example.com",
-                    "another horse battery"
-                )
-                .await
-                .is_ok(),
-                "with the second password"
-            );
-            let error = sign_up(&server, &mailer, "alice@example.com", "short", "Alice")
-                .await
-                .expect_err("a bad password is refused before anything else");
-            assert!(matches!(
-                error,
-                AccountError::Credential(CredentialError::PasswordTooShort)
-            ));
 
             let sent_before = mailer.sent().len();
-            let taken = sign_up(&server, &mailer, "alice@example.com", PASSWORD, "Alice")
+            let taken = sign_up(&server, &mailer, "alice@example.com", "Mallory")
                 .await
                 .expect("answered as a new one");
             assert_eq!(taken.pending.len(), 64);
@@ -632,36 +1263,39 @@ pub(crate) mod tests {
                 sign_in_with_code(&server, &taken.pending, "123456").await,
                 Err(AccountError::CodeDoesNotMatch)
             ));
-            assert!(
-                sign_in(
-                    &server,
-                    &mailer,
-                    "alice@example.com",
-                    "another horse battery"
-                )
-                .await
-                .is_ok(),
-                "the password was not touched"
+            assert_eq!(
+                users::get(&server, session.user.id)
+                    .await
+                    .expect("alice")
+                    .name,
+                "Alice Again",
+                "the name was not touched"
             );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn accounts_sign_in_refuses_a_wrong_password_and_an_unknown_email_alike() {
+    async fn accounts_sign_in_answers_an_unknown_email_as_a_known_one_and_mails_that_it_has_none() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            signed_up_for_a_device(&server, "alice@example.com").await;
-            let error = sign_in(&server, &mailer, "alice@example.com", "wrong horse battery")
+            let error = sign_in(&server, &mailer, "nobody").await.expect_err("no @");
+            assert!(matches!(
+                error,
+                AccountError::AccountUser(AccountUserError::InvalidEmail)
+            ));
+            let sent = sign_in(&server, &mailer, "nobody@example.com")
                 .await
-                .expect_err("wrong password");
-            assert!(matches!(error, AccountError::InvalidEmailOrPassword));
-            let error = sign_in(&server, &mailer, "nobody@example.com", PASSWORD)
-                .await
-                .expect_err("unknown email");
-            assert!(matches!(error, AccountError::InvalidEmailOrPassword));
-            assert!(mailer.sent().is_empty());
+                .expect("answered as a known one");
+            assert_eq!(sent.pending.len(), 64);
+            let mail = mailer.last_sent_to("nobody@example.com").expect("mailed");
+            assert!(mail.subject.starts_with("No "));
+            assert!(mails::code_in(&mail).is_none());
+            assert!(matches!(
+                sign_in_with_code(&server, &sent.pending, "123456").await,
+                Err(AccountError::CodeDoesNotMatch)
+            ));
         })
         .await;
     }
@@ -671,7 +1305,7 @@ pub(crate) mod tests {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD, "Alice")
+            let sent = sign_up(&server, &mailer, "alice@example.com", "Alice")
                 .await
                 .expect("signed up");
             let code = code_sent_to(&mailer, "alice@example.com");
@@ -689,14 +1323,14 @@ pub(crate) mod tests {
                 ),
                 "the right code is too late"
             );
-            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
+            let sent = sign_in(&server, &mailer, "alice@example.com")
                 .await
                 .expect("signed in again");
             let code = code_sent_to(&mailer, "alice@example.com");
-            let session = sign_in_with_code(&server, &sent.pending, &code)
+            let step = sign_in_with_code(&server, &sent.pending, &code)
                 .await
                 .expect("a fresh code works");
-            assert_eq!(session.email, "alice@example.com");
+            next_of(step, NextStep::NewPassword);
         })
         .await;
     }
@@ -706,7 +1340,7 @@ pub(crate) mod tests {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD, "Alice")
+            let sent = sign_up(&server, &mailer, "alice@example.com", "Alice")
                 .await
                 .expect("signed up");
             let first = code_sent_to(&mailer, "alice@example.com");
@@ -753,16 +1387,20 @@ pub(crate) mod tests {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
             let mailer = Mailer::memory();
-            let sent = sign_up(&server, &mailer, "alice@example.com", PASSWORD, "Alice")
+            let sent = sign_up(&server, &mailer, "alice@example.com", "Alice")
                 .await
                 .expect("signed up");
             let code = code_sent_to(&mailer, "alice@example.com");
             let (verifier, challenge) = verifier_and_challenge();
             assert_eq!(challenge, challenge_of(&verifier));
+            let step = sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                .await
+                .expect("the code matched");
+            let pending = next_of(step, NextStep::NewPassword);
             let device_code =
-                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
+                sign_in_with_new_password_for_device(&server, &pending, None, &challenge)
                     .await
-                    .expect("the code matched");
+                    .expect("skipped making a password");
             assert_eq!(device_code.code.len(), 32);
 
             let error = sign_in_with_device_code(&server, &device_code.code, "another verifier")
@@ -792,11 +1430,11 @@ pub(crate) mod tests {
         let device = users::tests::device().await;
         let mailer = Mailer::memory();
         assert!(matches!(
-            sign_up(&device, &mailer, "alice@example.com", PASSWORD, "Alice").await,
+            sign_up(&device, &mailer, "alice@example.com", "Alice").await,
             Err(AccountError::ServerOnly)
         ));
         assert!(matches!(
-            sign_in(&device, &mailer, "alice@example.com", PASSWORD).await,
+            sign_in(&device, &mailer, "alice@example.com").await,
             Err(AccountError::ServerOnly)
         ));
         assert!(matches!(
@@ -874,16 +1512,8 @@ pub(crate) mod tests {
                 "and nothing syncs meanwhile"
             );
 
-            let mailer = Mailer::memory();
-            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed in on the server");
-            let code = code_sent_to(&mailer, "alice@example.com");
-            let (verifier, challenge) = verifier_and_challenge();
-            let device_code =
-                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
-                    .await
-                    .expect("the code matched");
+            let (device_code, verifier) =
+                signed_in_for_a_device(&server, "alice@example.com").await;
             let session =
                 sign_in_with_device_code_through(&transport, &device_code.code, &verifier)
                     .await
@@ -925,16 +1555,8 @@ pub(crate) mod tests {
             );
             assert_eq!(sync::status(&device).await.expect("status").pending, 1);
 
-            let mailer = Mailer::memory();
-            let sent = sign_in(&server, &mailer, "alice@example.com", PASSWORD)
-                .await
-                .expect("signed in on the server");
-            let code = code_sent_to(&mailer, "alice@example.com");
-            let (verifier, challenge) = verifier_and_challenge();
-            let device_code =
-                sign_in_with_code_for_device(&server, &sent.pending, &code, &challenge)
-                    .await
-                    .expect("the code matched");
+            let (device_code, verifier) =
+                signed_in_for_a_device(&server, "alice@example.com").await;
             let session =
                 sign_in_with_device_code_through(&transport, &device_code.code, &verifier)
                     .await

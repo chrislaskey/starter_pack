@@ -561,8 +561,6 @@ mod tests {
     use app_core::sync::InProcess;
     use app_core::{mails, posts};
 
-    const PASSWORD: &str = "correct horse battery";
-
     async fn server() -> Deployment {
         let database = Database::open_sqlite_in_memory()
             .await
@@ -575,22 +573,29 @@ mod tests {
     /// answered. Once the email has an account, a sign-in instead.
     async fn signed_up(server: &Deployment, email: &str) -> Session {
         let mailer = Mailer::memory();
-        let sent = accounts::sign_up(server, &mailer, email, PASSWORD, "Alice")
+        let sent = accounts::sign_up(server, &mailer, email, "Alice")
             .await
             .expect("signed up");
         let mail = mailer.last_sent_to(email).expect("mailed");
         let sent = match mails::code_in(&mail) {
             Some(_) => sent,
-            None => accounts::sign_in(server, &mailer, email, PASSWORD)
+            None => accounts::sign_in(server, &mailer, email)
                 .await
                 .expect("signed in"),
         };
         let code = mails::code_in(&mailer.last_sent_to(email).expect("mailed")).expect("a code");
         let (verifier, challenge) = accounts::verifier_and_challenge();
-        let device_code =
-            accounts::sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
-                .await
-                .expect("the code matched");
+        let step = accounts::sign_in_with_code_for_device(server, &sent.pending, &code, &challenge)
+            .await
+            .expect("the code matched");
+        let device_code = match step {
+            accounts::SignInStep::Finished(device_code) => device_code,
+            accounts::SignInStep::Next { pending, .. } => {
+                accounts::sign_in_with_new_password_for_device(server, &pending, None, &challenge)
+                    .await
+                    .expect("skipped making a password")
+            }
+        };
         accounts::sign_in_with_device_code(server, &device_code.code, &verifier)
             .await
             .expect("exchanged")

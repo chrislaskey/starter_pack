@@ -71,23 +71,56 @@ export function avatarsUpdate(key) {
   return invokeForm("avatars_update", { key });
 }
 
-// The app never asks for a password: a sign-in happens in the system
+// The app asks for no password at a sign-in: it happens in the system
 // browser, on the web's sign-in page, which ends by showing a code the
 // person pastes into the app, see accountsSignInStart.
 
-/** @param {string} _email @param {string} _password @param {string} _name */
-export function accountsSignUp(_email, _password, _name) {
+/** @param {string} _email @param {string} _name */
+export function accountsSignUp(_email, _name) {
   return Promise.reject(new Error("in the app, sign in from the accounts page"));
 }
 
-/** @param {string} _email @param {string} _password */
-export function accountsSignIn(_email, _password) {
+/** @param {string} _email */
+export function accountsSignIn(_email) {
   return Promise.reject(new Error("in the app, sign in from the accounts page"));
 }
 
 /** @param {string} _pending @param {string} _code @param {string} [_challenge] */
 export function accountsCode(_pending, _code, _challenge) {
   return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _pending @param {string} _password @param {string} [_challenge] */
+export function accountsSignInPassword(_pending, _password, _challenge) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _pending @param {string} _password @param {string} [_challenge] */
+export function accountsSignInResetPassword(_pending, _password, _challenge) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/** @param {string} _pending @param {string | null} _password @param {string} [_challenge] */
+export function accountsSignInNewPassword(_pending, _password, _challenge) {
+  return Promise.reject(new Error("in the app, sign in from the accounts page"));
+}
+
+/**
+ * What the signed-in person's account asks for after the emailed code,
+ * asked of the server, so only when online.
+ * @returns {Promise<Array<"password">>}
+ */
+export function accountsSecondFactors() {
+  return invoke("accounts_second_factors");
+}
+
+/**
+ * The signed-in person's password, kept by the server, so only when online.
+ * @param {string | null} current
+ * @param {string} password
+ */
+export function accountsPasswordUpdate(current, password) {
+  return invoke("accounts_password_update", { current, password });
 }
 
 /** @param {string} _pending */

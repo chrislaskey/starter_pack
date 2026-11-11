@@ -65,6 +65,8 @@ pub fn run() {
             accounts::accounts_sign_in_finish,
             accounts::accounts_sign_in_cancel,
             accounts::accounts_sign_out,
+            accounts::accounts_second_factors,
+            accounts::accounts_password_update,
             communities::communities_list,
             communities::communities_get,
             communities::communities_create,

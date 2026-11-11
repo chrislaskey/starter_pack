@@ -721,7 +721,7 @@ fn refused_file(error: FileError) -> SyncError {
 /// it does not know, the message for anything else it refused.
 fn refused(error: AccountError) -> SyncError {
     match error {
-        AccountError::InvalidEmailOrPassword
+        AccountError::SignInExpired
         | AccountError::CodeDoesNotMatch
         | AccountError::UnknownDeviceCode => SyncError::Unauthorized,
         AccountError::Database(error) => SyncError::Database(error),
@@ -781,6 +781,27 @@ impl Http {
         request: &AvatarUpdate,
     ) -> Result<User, SyncError> {
         self.send(reqwest::Method::PUT, Some(token), "/api/avatars", request)
+            .await
+    }
+
+    /// `accounts::second_factors` on the server, of the token's user.
+    pub async fn accounts_second_factors(
+        &self,
+        token: &str,
+    ) -> Result<Vec<accounts::SecondFactor>, SyncError> {
+        let path = "/api/accounts/second-factors";
+        self.send(reqwest::Method::GET, Some(token), path, &())
+            .await
+    }
+
+    /// `accounts::password_update` on the server, as the token's user.
+    pub async fn accounts_password_update(
+        &self,
+        token: &str,
+        request: &accounts::PasswordUpdate,
+    ) -> Result<(), SyncError> {
+        let path = "/api/accounts/password";
+        self.send(reqwest::Method::PUT, Some(token), path, request)
             .await
     }
 
@@ -2965,19 +2986,18 @@ pub(crate) mod tests {
         email: &str,
     ) -> Session {
         let mailer = crate::mailer::Mailer::memory();
-        let password = "correct horse battery";
-        let sent = accounts::sign_up(servers_database, &mailer, email, password, "Alice")
+        let sent = accounts::sign_up(servers_database, &mailer, email, "Alice")
             .await
             .expect("signed up");
         let sent = match crate::mails::code_in(&mailer.last_sent_to(email).expect("mailed")) {
             Some(_) => sent,
-            None => accounts::sign_in(servers_database, &mailer, email, password)
+            None => accounts::sign_in(servers_database, &mailer, email)
                 .await
                 .expect("signed in instead"),
         };
         let code = crate::accounts::tests::code_sent_to(&mailer, email);
         let (verifier, challenge) = accounts::verifier_and_challenge();
-        let device_code = accounts::sign_in_with_code_for_device(
+        let step = accounts::sign_in_with_code_for_device(
             servers_database,
             &sent.pending,
             &code,
@@ -2985,6 +3005,19 @@ pub(crate) mod tests {
         )
         .await
         .expect("the code matched");
+        let device_code = match step {
+            accounts::SignInStep::Finished(device_code) => device_code,
+            accounts::SignInStep::Next { pending, .. } => {
+                accounts::sign_in_with_new_password_for_device(
+                    servers_database,
+                    &pending,
+                    None,
+                    &challenge,
+                )
+                .await
+                .expect("skipped making a password")
+            }
+        };
         accounts::sign_in_with_device_code_through(server, &device_code.code, &verifier)
             .await
             .expect("exchanged over HTTP")

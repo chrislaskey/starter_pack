@@ -59,6 +59,23 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
         .route("/api/accounts/sign-in", post(accounts::sign_in))
         .route("/api/accounts/code", post(accounts::code))
         .route("/api/accounts/code/resend", post(accounts::code_resend))
+        .route(
+            "/api/accounts/sign-in/password",
+            post(accounts::sign_in_password),
+        )
+        .route(
+            "/api/accounts/sign-in/new-password",
+            post(accounts::sign_in_new_password),
+        )
+        .route(
+            "/api/accounts/sign-in/reset-password",
+            post(accounts::sign_in_reset_password),
+        )
+        .route(
+            "/api/accounts/second-factors",
+            get(accounts::second_factors),
+        )
+        .route("/api/accounts/password", put(accounts::password_update))
         .route("/api/accounts/device-token", post(accounts::device_token))
         .route("/api/accounts/sign-out", delete(accounts::sign_out))
         .layer(rate_limits::per_ip_layer(state.trust_proxy_headers));
@@ -133,13 +150,14 @@ mod tests {
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
-    use app_core::accounts::Session;
+    use app_core::accounts::{Session, SignInStep};
     use app_core::storage::Storage;
 
     use super::*;
 
     const MISSING_ID: &str = "01900000-0000-7000-8000-000000000000";
     const PASSWORD: &str = "correct horse battery";
+    const NEW_PASSWORD: &str = "another horse battery";
 
     /// A router over an in-memory database with Alice signed up and one
     /// post of hers, and a stand-in `index.html`. Every request `send`
@@ -199,13 +217,19 @@ mod tests {
 
     /// A user signed up on the server and finished with their code.
     async fn signed_up(deployment: &Deployment, mailer: &Mailer, email: &str) -> Session {
-        let sent = app_core::accounts::sign_up(deployment, mailer, email, PASSWORD, "Alice")
+        let sent = app_core::accounts::sign_up(deployment, mailer, email, "Alice")
             .await
             .expect("signed up");
         let code = code_sent_to(mailer, email);
-        app_core::accounts::sign_in_with_code(deployment, &sent.pending, &code)
+        let step = app_core::accounts::sign_in_with_code(deployment, &sent.pending, &code)
             .await
-            .expect("the code matched")
+            .expect("the code matched");
+        let SignInStep::Next { pending, .. } = step else {
+            panic!("a new account is offered a password");
+        };
+        app_core::accounts::sign_in_with_new_password(deployment, &pending, None)
+            .await
+            .expect("skipped making a password")
     }
 
     /// The code the last email to the address carried.
@@ -349,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn accounts_sign_up_then_the_code_sign_in_and_sign_out_over_the_cookie() {
         let (router, _) = test_router().await;
-        let bob = json!({ "email": "Bob@example.com", "password": PASSWORD, "name": "Bob" });
+        let bob = json!({ "email": "Bob@example.com", "name": "Bob" });
         let (status, body) = send_as(
             &router.router,
             None,
@@ -399,6 +423,32 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["next"], json!("new_password"), "a first sign-in");
+        assert!(headers.get(header::SET_COOKIE).is_none(), "not finished");
+        let pending = body["pending"].as_str().expect("the pending token");
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/new-password",
+            Some(json!({ "pending": pending, "password": "short" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({ "error": "a password needs at least 12 characters" })
+        );
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/new-password",
+            Some(json!({ "pending": pending, "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(body["email"], json!("bob@example.com"));
         assert_eq!(body["user"]["name"], json!("Bob"));
         let set_cookie = headers[header::SET_COOKIE].to_str().expect("a cookie");
@@ -419,6 +469,38 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(me["email"], json!("bob@example.com"));
+        let (status, _, factors) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::GET,
+            "/api/accounts/second-factors",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(factors, json!(["password"]));
+        let (status, _, body) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::PUT,
+            "/api/accounts/password",
+            Some(json!({ "current": "wrong horse battery", "password": NEW_PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body, json!({ "error": "That password is wrong" }));
+        let (status, _, _) = send_with(
+            &router.router,
+            None,
+            Some(&cookie),
+            Method::PUT,
+            "/api/accounts/password",
+            Some(json!({ "current": PASSWORD, "password": NEW_PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, _, posts) = send_with(
             &router.router,
             None,
@@ -458,19 +540,6 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-in",
-            Some(json!({ "email": "bob@example.com", "password": "wrong horse battery" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            body,
-            json!({ "error": "That email and password do not match" })
-        );
-        let (status, body) = send_as(
-            &router.router,
-            None,
-            Method::POST,
-            "/api/accounts/sign-in",
             Some(bob),
         )
         .await;
@@ -486,7 +555,70 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["next"], json!("password"), "bob has a password");
+        assert!(body.get("token").is_none());
+        let pending = body["pending"].clone();
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/password",
+            Some(json!({ "pending": pending, "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "the old one");
+        assert_eq!(body, json!({ "error": "That password is wrong" }));
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/reset-password",
+            Some(json!({ "pending": pending, "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "forgotten, so reset");
         assert_eq!(body["email"], json!("bob@example.com"));
+        assert!(headers.get(header::SET_COOKIE).is_some());
+        assert_eq!(
+            router
+                .mailer
+                .last_sent_to("bob@example.com")
+                .unwrap()
+                .subject,
+            "Your password was changed"
+        );
+        let (_, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in",
+            Some(json!({ "email": "bob@example.com" })),
+        )
+        .await;
+        let code = code_sent_to(&router.mailer, "bob@example.com");
+        let (_, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/code",
+            Some(json!({ "pending": body["pending"], "code": code })),
+        )
+        .await;
+        assert_eq!(body["can_reset_password"], json!(true));
+        let pending = body["pending"].clone();
+        let (status, headers, body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/password",
+            Some(json!({ "pending": pending, "password": PASSWORD })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["email"], json!("bob@example.com"));
+        assert!(headers.get(header::SET_COOKIE).is_some());
 
         let sent_before = router.mailer.sent().len();
         let (status, body) = send_as(
@@ -494,7 +626,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-up",
-            Some(json!({ "email": "bob@example.com", "password": PASSWORD, "name": "Bob" })),
+            Some(json!({ "email": "bob@example.com", "name": "Bob" })),
         )
         .await;
         assert_eq!(
@@ -512,25 +644,12 @@ mod tests {
                 .subject,
             "You already have an account"
         );
-        let (status, body) = send_as(
-            &router.router,
-            None,
-            Method::POST,
-            "/api/accounts/sign-up",
-            Some(json!({ "email": "carol@example.com", "password": "short", "name": "Carol" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            body,
-            json!({ "error": "a password needs at least 12 characters" })
-        );
     }
 
     #[tokio::test]
     async fn accounts_routes_are_rate_limited_per_address_per_sign_in_and_per_client() {
         let (router, _) = test_router().await;
-        let alice = json!({ "email": "alice@example.com", "password": PASSWORD });
+        let alice = json!({ "email": "alice@example.com" });
         let mut pending = Value::Null;
         for _ in 0..rate_limits::EMAILS_PER_HOUR_PER_ADDRESS {
             let (status, body) = send_as(
@@ -582,7 +701,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-in",
-            Some(json!({ "email": "alice@example.com", "password": PASSWORD })),
+            Some(json!({ "email": "alice@example.com" })),
         )
         .await;
         let resend = json!({ "pending": body["pending"] });
@@ -659,7 +778,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-in",
-            Some(json!({ "email": "alice@example.com", "password": PASSWORD })),
+            Some(json!({ "email": "alice@example.com" })),
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -950,7 +1069,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-up",
-            Some(json!({ "email": "bob@example.com", "password": PASSWORD, "name": "Bob" })),
+            Some(json!({ "email": "bob@example.com", "name": "Bob" })),
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -964,6 +1083,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let (status, body) = send_as(
+            &router.router,
+            None,
+            Method::POST,
+            "/api/accounts/sign-in/new-password",
+            Some(json!({ "pending": body["pending"], "password": null })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "skipped making a password");
         let token = body["token"].as_str().unwrap();
         let (status, created) = send_as(
             &router.router,

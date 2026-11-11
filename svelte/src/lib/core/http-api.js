@@ -92,38 +92,95 @@ export function avatarsUpdate(key) {
   return send("PUT", "/api/avatars", { key });
 }
 
-// A sign-up or a sign-in emails a code and answers `{pending}`; the code
+// A sign-up or a sign-in emails a code and answers `{pending}`. The code
 // answers the user and sets the cookie the browser sends from then on, or,
-// with a device's challenge, `{code}` for the device and no cookie. A
-// sign-out clears the cookie.
+// with a device's challenge, `{code}` for the device and no cookie; or
+// `{next, pending}` when a password is asked for first ("password") or a
+// new account may make one ("new_password"), which then answers as the
+// code would have. A sign-out clears the cookie.
+
+/**
+ * What finishes a sign-in: the session, or a device's code.
+ * @typedef {{user: {id: string, name: string}, email: string, token: string} | {code: string}} SignInFinished
+ */
 
 /**
  * @param {string} email
- * @param {string} password
  * @param {string} name what the pages show the person by
  * @returns {Promise<{pending: string}>}
  */
-export function accountsSignUp(email, password, name) {
-  return send("POST", "/api/accounts/sign-up", { email, password, name });
+export function accountsSignUp(email, name) {
+  return send("POST", "/api/accounts/sign-up", { email, name });
 }
 
 /**
  * @param {string} email
- * @param {string} password
  * @returns {Promise<{pending: string}>}
  */
-export function accountsSignIn(email, password) {
-  return send("POST", "/api/accounts/sign-in", { email, password });
+export function accountsSignIn(email) {
+  return send("POST", "/api/accounts/sign-in", { email });
 }
 
 /**
  * @param {string} pending
  * @param {string} code the six digits emailed
  * @param {string} [challenge] the device's, when it opened this page
- * @returns {Promise<{user: {id: string, name: string}, email: string, token: string} | {code: string}>}
+ * @returns {Promise<SignInFinished | {next: "password" | "new_password", pending: string, can_reset_password: boolean}>}
  */
 export function accountsCode(pending, code, challenge) {
   return send("POST", "/api/accounts/code", { pending, code, challenge: challenge || null });
+}
+
+/**
+ * The account's password, after the code.
+ * @param {string} pending the one the code answered
+ * @param {string} password
+ * @param {string} [challenge]
+ * @returns {Promise<SignInFinished>}
+ */
+export function accountsSignInPassword(pending, password, challenge) {
+  return send("POST", "/api/accounts/sign-in/password", { pending, password, challenge: challenge || null });
+}
+
+/**
+ * A new password in place of a forgotten one, after the code; refused
+ * when the app does not let one be reset.
+ * @param {string} pending the one the code answered
+ * @param {string} password
+ * @param {string} [challenge]
+ * @returns {Promise<SignInFinished>}
+ */
+export function accountsSignInResetPassword(pending, password, challenge) {
+  return send("POST", "/api/accounts/sign-in/reset-password", { pending, password, challenge: challenge || null });
+}
+
+/**
+ * The password a new account makes after its first code, or null to skip.
+ * @param {string} pending the one the code answered
+ * @param {string | null} password
+ * @param {string} [challenge]
+ * @returns {Promise<SignInFinished>}
+ */
+export function accountsSignInNewPassword(pending, password, challenge) {
+  return send("POST", "/api/accounts/sign-in/new-password", { pending, password, challenge: challenge || null });
+}
+
+/**
+ * What the signed-in person's account asks for after the emailed code.
+ * @returns {Promise<Array<"password">>}
+ */
+export function accountsSecondFactors() {
+  return send("GET", "/api/accounts/second-factors");
+}
+
+/**
+ * The signed-in person's password: their first, or a new one in place of
+ * the current one.
+ * @param {string | null} current
+ * @param {string} password
+ */
+export function accountsPasswordUpdate(current, password) {
+  return send("PUT", "/api/accounts/password", { current, password });
 }
 
 /**

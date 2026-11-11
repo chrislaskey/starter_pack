@@ -63,9 +63,14 @@ Inside the Tauri app each is a command of the same name
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
 | `avatarsUpdate(key)` | `PUT /api/avatars` with `{"key": "..."}`, the user with their `avatar_url` |
 | `avatarsUpload(file, onProgress?)` | both, with the file PUT straight to the bucket between them, see [Forms and uploads](#forms-and-uploads) |
-| `accountsSignUp(email, password, name)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
-| `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
-| `accountsCode(pending, code, challenge?)` | `POST /api/accounts/code`, the user and the token, and the cookie; with a device's challenge, the device code and no cookie |
+| `accountsSignUp(email, name)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
+| `accountsSignIn(email)` | `POST /api/accounts/sign-in`, the same |
+| `accountsCode(pending, code, challenge?)` | `POST /api/accounts/code`, the user and the token, and the cookie; with a device's challenge, the device code and no cookie; or `{next, pending}` when a password comes first |
+| `accountsSignInPassword(pending, password, challenge?)` | `POST /api/accounts/sign-in/password`, the account's password after the code; answers as a finished code |
+| `accountsSignInResetPassword(pending, password, challenge?)` | `POST /api/accounts/sign-in/reset-password`, a new password in place of a forgotten one; answers as a finished code, 403 when the app locks out |
+| `accountsSignInNewPassword(pending, password, challenge?)` | `POST /api/accounts/sign-in/new-password`, the password a new account makes, or null to skip; answers as a finished code |
+| `accountsSecondFactors()` | `GET /api/accounts/second-factors`, `["password"]` or `[]` |
+| `accountsPasswordUpdate(current, password)` | `PUT /api/accounts/password`, 204; the current one when there is one |
 | `accountsCodeResend(pending)` | `POST /api/accounts/code/resend`, 202, a new code emailed |
 | `accountsSignOut()` | `DELETE /api/accounts/sign-out`, 204 |
 | `accountsSignInStart(email?)`, `accountsSignInPending()`, `accountsSignInFinish(code)`, `accountsSignInCancel()` | none: the web signs in on its own page; the app's `POST /api/accounts/device-token` is what `accountsSignInFinish` calls, see "Accounts on a device" |
@@ -115,11 +120,15 @@ sign-in a device collects, five minutes.
 Signing up, in and out is `core/src/accounts.rs`, on the server, and
 every sign-up and sign-in ends with a six-digit code emailed to the
 person, the design in `docs/design/accounts-sign-in.md`. A sign-up
-writes the account, unconfirmed, the user with their name, and the password, a sign-in checks the
-password; both then make a pending sign-in, email its code
+writes the account, unconfirmed, and the user with their name, a sign-in finds
+the account by its email; both then make a pending sign-in, email its code
 (`core/src/mails.rs` through `core/src/mailer.rs`) and answer the
 pending token. The code, five wrong tries at most, confirms the email
-the first time and makes the token; a sign-out deletes it. Emails are
+the first time. A password is optional, a second factor: an account
+that has one is asked for it after the code, a new account is offered
+to make one or skip, and a signed-in person makes or changes theirs at
+`/accounts/password`. A forgotten one is reset at the password step,
+unless `accounts::FORGOTTEN_PASSWORD` is changed to lock out. The last step makes the token; a sign-out deletes it. Emails are
 lowercased, and a sign-up with an email that has an account is answered
 as a new one, its owner emailed instead. Where the email goes is
 `MAILER`: unset or `log`, the server logs it in full, which is how a dev
@@ -137,7 +146,7 @@ client IP (`axum/src/rate_limits.rs`, the `governor` crate); behind a
 reverse proxy, `TRUST_PROXY_HEADERS=1` takes the client IP from
 `X-Forwarded-For`.
 
-A device never asks for a password: it signs in in the system browser,
+A device asks for no password at a sign-in: it signs in in the system browser,
 on the web's own sign-in page, and exchanges the code the page shows
 for its token, see "Accounts on a device". It keeps who signed in and
 their token as the `signed_in` device setting. A sign-out syncs first,
@@ -149,15 +158,18 @@ server's log:
 
 ```sh
 curl -H "Content-Type: application/json" \
-  -d '{"email":"alice@example.com","password":"correct horse battery","name":"Alice"}' \
+  -d '{"email":"alice@example.com","name":"Alice"}' \
   localhost:4000/api/accounts/sign-up   # answers {"pending": ...}; the code is in the log
 curl -H "Content-Type: application/json" \
   -d '{"pending":"<pending>","code":"<code>"}' \
-  localhost:4000/api/accounts/code      # answers her token
+  localhost:4000/api/accounts/code      # answers {"next": "new_password", "pending": ...}
+curl -H "Content-Type: application/json" \
+  -d '{"pending":"<pending>","password":null}' \
+  localhost:4000/api/accounts/sign-in/new-password   # skips it; answers her token
 curl -H "Authorization: Bearer <token>" localhost:4000/api/posts
 ```
 
-What was left out, password reset and the rest of the Phoenix flow, is
+What was left out, changing the email and the rest of the Phoenix flow, is
 `docs/suggestions/accounts.md`.
 
 ## Forms and uploads
@@ -370,8 +382,9 @@ shows the page at the path, swapped in place:
 | --- | --- |
 | `/` | on the web the public website's home page, `public/index.html`, not the router's; in the apps the router sends it to `/home` |
 | `/home` | `HomePage.svelte` |
-| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte`, on the web: the name, email and password, then the code |
-| `/accounts/settings` | `accounts/AccountsSettingsPage.svelte`, the person's own account: a placeholder with their email |
+| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte`, on the web: the name and email, then the code, then a password to make or skip |
+| `/accounts/settings` | `accounts/AccountsSettingsPage.svelte`, the person's own account: their email and the way to their password |
+| `/accounts/password` | `accounts/AccountsPasswordEditPage.svelte`, their first password or a new one; asks the server, so online only in the apps |
 | `/support` | `support/SupportIndexPage.svelte`, the support app: a placeholder |
 | `/forum` | `forum/ForumIndexPage.svelte`, the forum app: a placeholder |
 | `/ops` | not the router's: the ops app, a build of its own (`svelte/dist-ops`) with `ops/OpsHomePage.svelte`, for staff and a 404 to anyone else: a placeholder. `cargo run -p app_web -- ops staff create <email>` makes an account staff |
@@ -423,7 +436,7 @@ opens the system browser on the web's sign-in page
 page, done, shows a code; the person pastes it into the dialog
 (`accounts/AccountsSignInDialog.svelte`), and the app exchanges the code
 and the verifier for its token, which goes into the file of the user
-the server names. The app never sees a password, and the browser is not
+the server names. The app sees no password at a sign-in, and the browser is not
 signed in afterwards. Where the page is comes from `BROWSER_SIGN_IN_URL`, else
 `browserSignInUrl` in the config beside `syncServerUrl`, which `bin/dev`
 sets to the dev server's, else the sync server's own `/accounts/sign-in`. A sign-out

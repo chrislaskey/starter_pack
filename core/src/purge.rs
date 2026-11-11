@@ -193,8 +193,7 @@ mod tests {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
             let mailer = crate::mailer::Mailer::memory();
-            let password = "correct horse battery";
-            crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password, "Bob")
+            crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", "Bob")
                 .await
                 .expect("bob signed up and stopped there");
             let mut tx = deployment.begin().await.expect("a transaction");
@@ -222,7 +221,7 @@ mod tests {
                     .await
                     .expect("looked")
                     .is_none(),
-                "bob is gone, with his password and his pending sign-in"
+                "bob is gone, with his pending sign-in"
             );
             assert!(
                 users::get_in(&mut tx, bob.id)
@@ -240,7 +239,7 @@ mod tests {
             );
             tx.commit().await.expect("committed");
             assert!(
-                crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password, "Bob")
+                crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", "Bob")
                     .await
                     .is_ok(),
                 "and the email is free again"

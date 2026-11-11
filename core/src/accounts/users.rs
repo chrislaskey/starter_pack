@@ -116,7 +116,7 @@ pub(crate) async fn delete_without_user(tx: &mut Transaction) -> Result<u64, Acc
 
 /// The email as it is kept: `normalized_email`, with an @ and no
 /// spaces, and not too long.
-fn checked_email(email: &str) -> Result<String, AccountUserError> {
+pub(crate) fn checked_email(email: &str) -> Result<String, AccountUserError> {
     let email = normalized_email(email);
     let (before, after) = email
         .split_once('@')

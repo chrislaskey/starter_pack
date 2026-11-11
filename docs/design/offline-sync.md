@@ -87,7 +87,7 @@ Credentials never leave the server either: `accounts_credentials` holds the
 password hash (`core/src/credentials.rs`) and `accounts_tokens` the API
 tokens (`core/src/tokens.rs`), as hashes, good for a year, both by the
 user's id. The flows are `core/src/accounts.rs`: `sign_up`, `sign_in`
-and `sign_out` on the server, with an email and a password, each a
+and `sign_out` on the server, with an email and its emailed code, each a
 plain server write and never an event; and `sign_up_on_device`,
 `sign_in_on_device` and `sign_out_on_device`, which ask the server
 through the sync `Transport`, so a test signs a device in without HTTP.

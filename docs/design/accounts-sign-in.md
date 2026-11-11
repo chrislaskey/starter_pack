@@ -14,7 +14,66 @@ under `svelte/src/accounts/`. Every item under "To decide" is
 **Agreed**; each carries the recommendation and what else was weighed; the sections after it describe the design as recommended, so
 it can be read whole, and change where a decision goes the other way.
 
-Today a sign-up or a sign-in is one request with an email and a
+## Since 2026-11-11: the code first, a password optional
+
+The emailed code is now what signs a person in, and a password is an
+optional second factor asked for after it. This section is the flow as
+built; where "To decide" below speaks of a password checked before the
+code, or made at sign-up (items 4, 5 and 22), read it as moved here.
+
+- **Sign-up** takes a name and an email, no password. **Sign-in** takes
+  an email. Both mail a code and answer the pending token. A sign-in
+  with an email that has no account answers the same way, and that
+  address is mailed that it has none, as a sign-up with a taken email
+  always was.
+- **The code** proves the email, then the server looks at the account's
+  second factors, `accounts::second_factors`, a list with one possible
+  entry, `password`:
+  - the account has a password: the code answers
+    `{ next: "password", pending, can_reset_password }`, and the password finishes the
+    sign-in, `sign_in_with_password`;
+  - the account has none and this code is its first, the one that
+    confirms the email: the code answers
+    `{ next: "new_password", pending }`, and the page offers "Create a
+    password" with Skip, `sign_in_with_new_password`, a password or
+    none;
+  - otherwise the code finishes the sign-in as before.
+- **The step's pending token** is a new `sign_in_password` row in
+  `accounts_tokens`, ten minutes, made when the code matched. A wrong
+  password counts against it as a wrong code does, and the fifth
+  deletes it, so guessing a password costs a new emailed code every
+  five tries. Nobody is signed in until the step is taken: closing the
+  page at "Create a password" leaves a confirmed account with no
+  password and no session, and the next sign-in is the code alone.
+- **A device's sign-in** is the same pages with its challenge; whichever
+  step finishes answers the device code.
+- **Later**, signed in, `/accounts/password`
+  (`AccountsPasswordEditPage.svelte`) makes the first password or
+  changes it, the current one required when there is one,
+  `accounts::password_update`. In the apps the page asks the server
+  through `accounts_second_factors` and `accounts_password_update`, so
+  it needs a connection, and it is the one place a password passes
+  through an app.
+
+- **A forgotten password** is the app's choice,
+  `accounts::FORGOTTEN_PASSWORD`, a constant to change in a fork:
+  - `Reset`, the default: the password step shows "Forgot your
+    password?", and the person, whose code just matched, makes a new
+    one in its place and is signed in, `sign_in_with_reset_password`.
+    Their email is told "Your password was changed". The password then
+    guards only against someone who cannot read the inbox, so it is no
+    true second factor; that is the price of nobody being locked out.
+  - `LockedOut`: no link, the route answers 403, and an account stays
+    closed without its password. A fork that chooses this needs another
+    way back, recovery codes or staff clearing it, see
+    `docs/suggestions/accounts.md`.
+
+  The code's answer carries `can_reset_password`, so the page shows the
+  link only when it would work.
+
+## Before that
+
+A sign-up or a sign-in was one request with an email and a
 password, on the web from the sign-in page and in the apps from the
 same page through a Tauri command, which sends the password to the
 server over the sync transport (`core/src/accounts.rs`,
@@ -321,8 +380,8 @@ email or password, rate limiting in front of the server, see
 
 ## The flows
 
-**Sign-up on the web.** The page posts the email and the password. The
-server makes the user, unconfirmed, and the password, deletes any
+**Sign-up on the web.** The page posts the name and the email. The
+server makes the account, unconfirmed, and the user's row, deletes any
 earlier pending sign-in of theirs, makes a `sign_in_code` row with a
 random pending token and the hash of a six-digit code, commits, mails
 the code, and answers the pending token. For an email that already
@@ -331,14 +390,18 @@ owner that they already have one, see "To decide" 5. The page shows "We sent a c
 to alice@example.com" and the code field. The page posts the pending
 token and the code. The server finds the row by the token's hash,
 refuses one expired, counts the attempt, compares the code's hash,
-deletes the row, sets `confirmed_at`, makes an `api` token, sets the
-cookie and answers the session. Done, the person sees the posts.
+deletes the row, sets `confirmed_at`, and answers the next step,
+`new_password`, with a new pending token. The page shows "Create a
+password" and Skip, and posts the pending token with the password, or
+none; the server keeps the password if there is one, makes a `session`
+token, sets the cookie and answers the session. Done, the person sees
+the posts.
 
-**Sign-in on the web.** The same, except the first request checks the
-password against the user's hash, after the same work for an unknown
-email as today, and the second confirms the email only if it was not
-yet. The email is lowercased before the lookup, as it was when the
-user was made.
+**Sign-in on the web.** The page posts the email, and the code goes
+the same way. Once it matches, an account with a password is answered
+the next step, `password`, and the page asks for it; an account
+without one is signed in at once. The email is lowercased before the
+lookup, as it was when the account was made.
 
 **Sign-in from a device.** On the accounts page, Add account or Sign in
 on a signed-out account. The app makes the verifier and its challenge,
@@ -455,9 +518,14 @@ and over is the per-address limit, see "Rate limits".
 
 | route | body | answers |
 | --- | --- | --- |
-| `POST /api/accounts/sign-up` | `email`, `password` | 202 `{ pending }` whether the email is new or not, 422 bad email or password |
-| `POST /api/accounts/sign-in` | `email`, `password` | 202 `{ pending }`, 401 |
-| `POST /api/accounts/code` | `pending`, `code`, `challenge?` | 200 session with the cookie, or with `challenge` 200 `{ code }` and no cookie; 401 wrong, expired, or too many |
+| `POST /api/accounts/sign-up` | `email`, `name` | 202 `{ pending }` whether the email is new or not, 422 bad email or name |
+| `POST /api/accounts/sign-in` | `email` | 202 `{ pending }` whether the email has an account or not, 422 bad email |
+| `POST /api/accounts/code` | `pending`, `code`, `challenge?` | 200 session with the cookie, or with `challenge` 200 `{ code }` and no cookie; or 200 `{ next, pending }`, `next` being `password` or `new_password`; 401 wrong, expired, or too many |
+| `POST /api/accounts/sign-in/password` | `pending`, `password`, `challenge?` | 200 as a finished code; 422 wrong password; 401 expired or too many |
+| `POST /api/accounts/sign-in/reset-password` | `pending`, `password`, `challenge?` | 200 as a finished code, the old password replaced and its owner emailed; 403 when the app locks out; 422 a password too short or long; 401 expired |
+| `POST /api/accounts/sign-in/new-password` | `pending`, `password` or null to skip, `challenge?` | 200 as a finished code; 422 a password too short or long; 401 expired |
+| `GET /api/accounts/second-factors` | | 200 `["password"]` or `[]`, of the signed-in user |
+| `PUT /api/accounts/password` | `current` or null, `password` | 204; 422 wrong current password, or one too short or long |
 | `POST /api/accounts/code/resend` | `pending` | 202, a new code mailed; 429 within a minute of the last, see "Rate limits" |
 | `POST /api/accounts/device-token` | `code`, `verifier` | 200 session, no cookie; 401 |
 | `DELETE /api/accounts/sign-out` | | 204, unchanged |

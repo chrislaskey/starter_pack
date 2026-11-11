@@ -25,8 +25,38 @@ pub fn already_signed_up(to: &str) -> Mail {
         subject: "You already have an account".to_string(),
         text: format!(
             "Someone, likely you, tried to sign up for {APP_NAME} with this email. \
-             You already have an account: sign in with your password.\n\n\
+             You already have an account: sign in with this email.\n\n\
              If this was not you, ignore this email."
+        ),
+    }
+}
+
+/// To an email someone signed in with that has no account; the sign-in
+/// answered as if it had one, see `accounts::sign_in`.
+pub fn no_account(to: &str) -> Mail {
+    Mail {
+        to: to.to_string(),
+        subject: format!("No {APP_NAME} account for this email"),
+        text: format!(
+            "Someone, likely you, tried to sign in to {APP_NAME} with this email. \
+             There is no account for it: sign up to make one, or sign in with \
+             the email you signed up with.\n\n\
+             If this was not you, ignore this email."
+        ),
+    }
+}
+
+/// To an account whose forgotten password was replaced at a sign-in,
+/// see `accounts::sign_in_with_reset_password`.
+pub fn password_reset(to: &str) -> Mail {
+    Mail {
+        to: to.to_string(),
+        subject: "Your password was changed".to_string(),
+        text: format!(
+            "The password of your {APP_NAME} account was just reset after signing in \
+             with a code sent to this email.\n\n\
+             If this was not you, someone can read your email: secure it, then \
+             sign in and change the password."
         ),
     }
 }

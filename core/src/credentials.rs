@@ -1,6 +1,6 @@
 //! Passwords: a user's password hash in `accounts_credentials`, server
-//! only, written at sign-up and checked at sign-in, see `accounts`.
-//! A user who signs in another way, later, has no row here.
+//! only. A password is optional, a second factor checked after the
+//! emailed code, see `accounts`; a user who made none has no row here.
 //! Argon2id with the crate's defaults; hashing and checking run off the
 //! async runtime's threads, since each takes a moment by design.
 
@@ -16,9 +16,8 @@ use crate::deployment::now;
 pub const MIN_PASSWORD_LENGTH: usize = 12;
 pub const MAX_PASSWORD_LENGTH: usize = 72;
 
-/// The hash of a password nobody has: checked against when the email is
-/// unknown, so a sign-in takes as long either way and tells nothing by
-/// its timing.
+/// The hash of a password nobody has: checked against when the user
+/// has none, so a check takes as long either way.
 const NOBODYS_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$VDToes2uMjjUIjjyc6cYUw$osBqQQ/i0dGiz8Z96SZjgzMpXKhznbnS4HD6Z+h5NX4";
 
 #[derive(Debug, Error)]
@@ -47,10 +46,13 @@ pub(crate) async fn set(
     Ok(())
 }
 
-/// The hash of the password, once checked for length: the work a
-/// sign-up does, for a sign-up that must take as long without keeping
-/// anything.
-pub(crate) async fn checked_hash(password: &str) -> Result<String, CredentialError> {
+/// Whether the user has a password.
+pub(crate) async fn is_set(tx: &mut Transaction, user_id: Uuid) -> Result<bool, CredentialError> {
+    Ok(sql!(&mut *tx, credentials::get_password_hash(user_id))?.is_some())
+}
+
+/// The hash of the password, once checked for length.
+async fn checked_hash(password: &str) -> Result<String, CredentialError> {
     let password = checked_password(password)?;
     off_the_runtime(move || {
         Argon2::default()
