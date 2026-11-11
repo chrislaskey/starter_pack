@@ -1,4 +1,4 @@
-<!-- The home page, at / -->
+<!-- The app's home page, at /home -->
 <script>
   import AppNav from "./lib/AppNav.svelte";
   import { postsIndexUrl } from "./lib/routes.js";

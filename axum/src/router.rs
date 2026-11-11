@@ -1,5 +1,6 @@
-//! Every route: the JSON API under `/api`, then the Svelte pages. A path the
-//! API and the built files don't know gets `index.html`, so the pages'
+//! Every route: the JSON API under `/api`, the public website's pages, see
+//! `public`, then the Svelte pages. A path none of them and the built files
+//! don't know gets `index.html`, so the pages'
 //! router (`svelte/src/lib/router.js`) shows the page at that path, and
 //! every page is reloadable and linkable.
 
@@ -18,7 +19,7 @@ use crate::api_error::ApiError;
 use crate::rate_limits::{self, RateLimits};
 use crate::{
     accounts, avatars, communities, current_community, current_user, files, memberships, posts,
-    sync,
+    public, sync,
 };
 
 /// What every handler may take from the server: the database with its
@@ -102,6 +103,7 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .with_state(state)
+        .merge(public::router(svelte_dist))
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
 }
@@ -149,6 +151,9 @@ mod tests {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
+        fs::create_dir_all(dist.join("public")).expect("a public dir");
+        fs::write(dist.join("public/index.html"), "<html>public home</html>").expect("the home");
+        fs::write(dist.join("public/about.html"), "<html>public about</html>").expect("about");
         let database = app_core::database::Database::open_sqlite_in_memory()
             .await
             .expect("a database");
@@ -1182,8 +1187,24 @@ mod tests {
     #[tokio::test]
     async fn pages_answer_any_path_with_index_html() {
         let (router, _) = test_router().await;
-        let (status, body) = get(&router, "/posts/new").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, json!("<html>pages</html>"));
+        for path in ["/home", "/posts/new"] {
+            let (status, body) = get(&router, path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!("<html>pages</html>"));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_pages_answer_at_their_file_names() {
+        let (router, _) = test_router().await;
+        let cookie = format!("token={}", router.token);
+        for cookie in [None, Some(cookie.as_str())] {
+            for (path, page) in [("/", "public home"), ("/about", "public about")] {
+                let (status, _headers, body) =
+                    send_with(&router.router, None, cookie, Method::GET, path, None).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(body, json!(format!("<html>{page}</html>")));
+            }
+        }
     }
 }

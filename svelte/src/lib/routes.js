@@ -4,7 +4,10 @@
 // the way a web server would read it, so a page is a plain link, from
 // another page or from a bookmark.
 
-export const HOME_PATH = "/";
+// The public website's home page on the web (src/public); the app has no
+// page there, so its router sends `/` to the app's home.
+export const PUBLIC_HOME_PATH = "/";
+export const HOME_PATH = "/home";
 export const ACCOUNTS_INDEX_PATH = "/accounts";
 export const ACCOUNTS_SIGN_UP_PATH = "/accounts/sign-up";
 export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";

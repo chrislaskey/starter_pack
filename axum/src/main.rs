@@ -1,6 +1,7 @@
 //! The web server: `app_core` over a JSON API under `/api`, the sync
-//! endpoints the apps converge with under `/api/sync`, and the Svelte
-//! pages (`../svelte/dist`) at every other path. Every request is from a
+//! endpoints the apps converge with under `/api/sync`, the public website's
+//! pages, see `public`, and the Svelte pages (`../svelte/dist`) at every
+//! other path. Every request is from a
 //! user, see `current_user`. Listens on `PORT`, 4000 when unset, and
 //! opens the database `DATABASE_URL` names: a SQLite file, under `data/`
 //! beside this crate when unset, or a PostgreSQL database. The email it
@@ -25,6 +26,7 @@ mod jobs;
 mod mailer;
 mod memberships;
 mod posts;
+mod public;
 mod rate_limits;
 mod router;
 mod storage;

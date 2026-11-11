@@ -33,8 +33,10 @@ import {
   POSTS_NEW_PATH,
   POSTS_SHOW_PATH,
   PROFILE_EDIT_PATH,
+  PUBLIC_HOME_PATH,
   accountsIndexUrl,
   accountsSignInUrl,
+  homeUrl,
 } from "./routes.js";
 
 const { navigate, route } = createRouter({
@@ -42,6 +44,8 @@ const { navigate, route } = createRouter({
   hooks: {
     async beforeLoad({ pathname }) {
       pageLoadErrorClear();
+      // `/` is the public website's on the web; the app's home is its own path
+      if (pathname === PUBLIC_HOME_PATH) throw navigateToUrl(homeUrl());
       // In the app a sign-in happens in the browser, from the accounts page
       if (hasDeviceAccounts && (pathname === ACCOUNTS_SIGN_IN_PATH || pathname === ACCOUNTS_SIGN_UP_PATH)) {
         throw navigateToUrl(accountsIndexUrl());
@@ -62,6 +66,7 @@ const { navigate, route } = createRouter({
       pageLoadErrorShow(`This page could not load: ${problem instanceof Error ? problem.message : problem}`);
     },
   },
+  [PUBLIC_HOME_PATH]: () => import("../HomePage.svelte"),
   [HOME_PATH]: () => import("../HomePage.svelte"),
   [ACCOUNTS_INDEX_PATH]: () => import("../accounts/AccountsIndexPage.svelte"),
   [ACCOUNTS_SIGN_UP_PATH]: () => import("../accounts/AccountsSignUpPage.svelte"),

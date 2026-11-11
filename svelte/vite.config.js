@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
@@ -25,6 +25,45 @@ function themeScript() {
   };
 }
 
+// The public website (src/public): plain HTML pages, one file each, built
+// as entries of their own to dist/public. The web server (../axum) answers
+// `/about` with `public/about.html` and `/` with `public/index.html`; the
+// dev server does the same here. The
+// `<!-- public-header -->` and `<!-- public-footer -->` markers become the
+// files in src/public/partials. See docs/design/public-pages.md.
+const PUBLIC_PAGES = resolve(import.meta.dirname, "src/public");
+const PUBLIC_PARTIALS = { "public-header": "header.html", "public-footer": "footer.html" };
+
+function publicPageNames() {
+  return readdirSync(PUBLIC_PAGES)
+    .filter((file) => file.endsWith(".html"))
+    .map((file) => file.slice(0, -".html".length));
+}
+
+function publicPages() {
+  return {
+    name: "public-pages",
+    transformIndexHtml(html) {
+      for (const [marker, file] of Object.entries(PUBLIC_PARTIALS)) {
+        html = html.replace(`<!-- ${marker} -->`, () => readFileSync(resolve(PUBLIC_PAGES, "partials", file), "utf8"));
+      }
+      return html;
+    },
+    configureServer(server) {
+      server.watcher.on("change", (file) => {
+        if (file.startsWith(resolve(PUBLIC_PAGES, "partials"))) server.ws.send({ type: "full-reload" });
+      });
+      server.middlewares.use((request, _response, next) => {
+        const { pathname, search } = new URL(request.url ?? "/", "http://localhost");
+        const name = pathname === "/" ? "index" : pathname.slice(1);
+        const isPublicPage = /^[\w-]+$/.test(name) && existsSync(resolve(PUBLIC_PAGES, `${name}.html`));
+        if (isPublicPage) request.url = `/public/${name}.html${search}`;
+        next();
+      });
+    },
+  };
+}
+
 // Where `pnpm dev` sends `/api` requests: the web server (../axum).
 // Inside the Tauri app the pages call commands instead, see src/lib/core/.
 const WEB_SERVER_URL = process.env.WEB_SERVER_URL ?? "http://localhost:4000";
@@ -35,13 +74,16 @@ const TAURI_DEV_HOST = process.env.TAURI_DEV_HOST;
 
 // One HTML entry per window: src/index.html, whose router
 // (src/lib/router.js) shows the page at the address, and
-// src/quick-picker.html for the desktop app's quick picker. The dev server
+// src/quick-picker.html for the desktop app's quick picker; and one per
+// page of the public website. Files served as they are, the fonts, are in
+// src/static. The dev server
 // answers any other path with index.html, and so do the web server
 // (../axum) and the Tauri app, so every page is reloadable. `pnpm build` writes dist/, which the web server
 // serves and the Tauri app bundles.
 export default defineConfig({
   root: "src",
-  plugins: [themeScript(), tailwindcss(), svelte()],
+  publicDir: "static",
+  plugins: [themeScript(), publicPages(), tailwindcss(), svelte()],
   clearScreen: false,
   server: {
     port: 1420,
@@ -57,6 +99,9 @@ export default defineConfig({
       input: {
         main: resolve(import.meta.dirname, "src/index.html"),
         quick_picker: resolve(import.meta.dirname, "src/quick-picker.html"),
+        ...Object.fromEntries(
+          publicPageNames().map((name) => [`public_${name}`, resolve(PUBLIC_PAGES, `${name}.html`)]),
+        ),
       },
     },
   },

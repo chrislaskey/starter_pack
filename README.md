@@ -2,8 +2,9 @@
 
 One application in Rust, with Svelte pages, deployed three ways:
 
-* **web**: `axum/`, a web server with the application behind a JSON API
-  and the Svelte pages at every other path
+* **web**: `axum/`, a web server with the application behind a JSON API,
+  the public website's pages (`svelte/src/public/`, plain HTML, see
+  `docs/design/public-pages.md`) and the Svelte pages at every other path
 * **desktop**: `tauri/`, a Tauri app with the application behind Tauri
   commands and the Svelte pages in its window
 * **mobile**: the same Tauri app, built for iOS and Android
@@ -438,7 +439,7 @@ The pages are styled with Tailwind v4 and daisyUI, with all of daisyUI's
 themes (`svelte/src/lib/theme.css`), and the `hero-*` icon classes come
 from the `heroicons` npm package (`svelte/vendor/heroicons.js`) for the
 `Icon` component. The theme sets the font, Plus Jakarta Sans, vendored in
-`svelte/src/public/fonts` (OFL licence alongside) and served from `/fonts`,
+`svelte/src/static/fonts` (OFL licence alongside) and served from `/fonts`,
 so it works offline on every deployment.
 
 The theme is `data-theme` on `<html>`. `svelte/src/lib/theme_script.js`

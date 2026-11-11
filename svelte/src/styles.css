@@ -64,6 +64,19 @@ body {
   gap: 1.25rem;
 }
 
+/* The public website's pages (src/public) */
+.public-page {
+  max-width: 880px;
+}
+
+/* The header's links for a visitor or for someone signed in, see
+   public/partials/header.html. Important, to win over a button's display
+   from this base layer. */
+[data-signed-in] .public-signed-out,
+:root:not([data-signed-in]) .public-signed-in {
+  display: none !important;
+}
+
 h1 {
   font-size: 1.4rem;
   font-weight: bold;
