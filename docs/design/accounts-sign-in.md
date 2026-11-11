@@ -1,7 +1,11 @@
 # Signing in: the emailed code, and devices through the browser
 
 **Status: built, 2026-11-08, steps 1 to 6 of the build order; the
-later returns are not.** The code is `core/src/accounts.rs`,
+later returns are not.** Since `multi-app.md` the email and
+`confirmed_at` are on `accounts_users`, a server-only row with the
+user's id, and a sign-up takes a name, the only thing of a person that
+`app_users` syncs besides their picture; read `app_users` below as
+that pair. The code is `core/src/accounts.rs`,
 `core/src/tokens.rs`, `core/src/mailer.rs` and `core/src/mails.rs`,
 `axum/src/accounts.rs`, `axum/src/mailer.rs` and
 `axum/src/rate_limits.rs`, `tauri/src/accounts.rs` with the
@@ -39,7 +43,7 @@ email or password, rate limiting in front of the server, see
 
 ## To decide
 
-1. **Reuse `users_tokens` for every secret, with a `context` column**,
+1. **Reuse `accounts_tokens` for every secret, with a `context` column**,
    as `mix phx.gen.auth` does, rather than a table per kind of secret.
    Three contexts: `api` for today's rows, the apps' bearer tokens and
    the browser's cookie; `sign_in_code` for a sign-in that passed the
@@ -48,7 +52,7 @@ email or password, rate limiting in front of the server, see
    context has its own validity and the purge deletes by it. The
    `sign_in_code` rows need two more columns, `code_hash` and
    `attempts`, see "The tokens table". The alternative, a
-   `users_sign_ins` table for the pending ones, keeps `users_tokens` as
+   `users_sign_ins` table for the pending ones, keeps `accounts_tokens` as
    it is but is a second pattern for the same thing. **Agreed: one
    table.** Phoenix's `sent_to` column is left out until an email can be
    changed, which is what it is for.
@@ -388,7 +392,7 @@ server, no column.
 
 ## The tokens table
 
-`users_tokens` gains three columns:
+`accounts_tokens` gains three columns:
 
 | column | for |
 | --- | --- |

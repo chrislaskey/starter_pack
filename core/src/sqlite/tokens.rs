@@ -1,4 +1,4 @@
-//! The `users_tokens` table: a token's hash per row, matched exactly,
+//! The `accounts_tokens` table: a token's hash per row, matched exactly,
 //! in its context.
 
 use chrono::{DateTime, Utc};
@@ -40,7 +40,7 @@ impl TryFrom<TokenRow> for Token {
 
 pub async fn insert(connection: &mut SqliteConnection, token: &Token) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO users_tokens (id, user_id, context, token_hash, code_hash, attempts, inserted_at)
+        "INSERT INTO accounts_tokens (id, user_id, context, token_hash, code_hash, attempts, inserted_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(token.id.hyphenated())
@@ -63,7 +63,7 @@ pub async fn get_by_hash(
     made_after: DateTime<Utc>,
 ) -> Result<Option<Token>, sqlx::Error> {
     let row: Option<TokenRow> = sqlx::query_as(
-        "SELECT id, user_id, context, token_hash, code_hash, attempts, inserted_at FROM users_tokens
+        "SELECT id, user_id, context, token_hash, code_hash, attempts, inserted_at FROM accounts_tokens
          WHERE token_hash = $1 AND context = $2 AND inserted_at > $3",
     )
     .bind(token_hash)
@@ -80,7 +80,7 @@ pub async fn increment_attempts(
     id: Uuid,
 ) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as(
-        "UPDATE users_tokens SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts",
+        "UPDATE accounts_tokens SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts",
     )
     .bind(id.hyphenated())
     .fetch_one(connection)
@@ -96,7 +96,7 @@ pub async fn set_code(
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE users_tokens SET code_hash = $2, inserted_at = $3, attempts = 0 WHERE id = $1",
+        "UPDATE accounts_tokens SET code_hash = $2, inserted_at = $3, attempts = 0 WHERE id = $1",
     )
     .bind(id.hyphenated())
     .bind(code_hash)
@@ -107,7 +107,7 @@ pub async fn set_code(
 }
 
 pub async fn delete_by_id(connection: &mut SqliteConnection, id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM users_tokens WHERE id = $1")
+    sqlx::query("DELETE FROM accounts_tokens WHERE id = $1")
         .bind(id.hyphenated())
         .execute(connection)
         .await?;
@@ -119,7 +119,7 @@ pub async fn delete_of_user(
     user_id: Uuid,
     context: Context,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM users_tokens WHERE user_id = $1 AND context = $2")
+    let result = sqlx::query("DELETE FROM accounts_tokens WHERE user_id = $1 AND context = $2")
         .bind(user_id.hyphenated())
         .bind(context.as_str())
         .execute(connection)
@@ -134,7 +134,7 @@ pub async fn delete_signed_in_by_hash(
     token_hash: &str,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "DELETE FROM users_tokens WHERE token_hash = $1 AND context IN ('api', 'session')",
+        "DELETE FROM accounts_tokens WHERE token_hash = $1 AND context IN ('api', 'session')",
     )
     .bind(token_hash)
     .execute(connection)
@@ -149,7 +149,7 @@ pub async fn delete_made_before(
     context: Context,
     time: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM users_tokens WHERE context = $1 AND inserted_at < $2")
+    let result = sqlx::query("DELETE FROM accounts_tokens WHERE context = $1 AND inserted_at < $2")
         .bind(context.as_str())
         .bind(time)
         .execute(connection)

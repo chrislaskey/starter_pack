@@ -1,5 +1,6 @@
-//! Every route: the JSON API under `/api`, the public website's pages, see
-//! `public`, then the Svelte pages. A path none of them and the built files
+//! Every route: the JSON API under `/api`, with the ops app's under
+//! `/api/ops`, see `ops`, the public website's pages, see `public`, the
+//! ops app's pages, then the Svelte pages. A path none of them and the built files
 //! don't know gets `index.html`, so the pages'
 //! router (`svelte/src/lib/router.js`) shows the page at that path, and
 //! every page is reloadable and linkable.
@@ -18,8 +19,8 @@ use tower_http::trace::TraceLayer;
 use crate::api_error::ApiError;
 use crate::rate_limits::{self, RateLimits};
 use crate::{
-    accounts, avatars, communities, current_community, current_user, files, memberships, posts,
-    public, sync,
+    accounts, avatars, communities, current_community, current_user, files, memberships, ops,
+    posts, public, sync,
 };
 
 /// What every handler may take from the server: the database with its
@@ -64,6 +65,7 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
 
     Router::new()
         .merge(accounts)
+        .merge(ops::api(state.clone()))
         .route("/api/current-user", get(current_user::get))
         .route(
             "/api/current-community",
@@ -104,6 +106,7 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
         .route("/api/{*path}", any(api_not_found))
         .with_state(state)
         .merge(public::router(svelte_dist))
+        .merge(ops::pages(svelte_dist))
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
 }
@@ -142,6 +145,7 @@ mod tests {
     /// a test puts the file a page would have.
     struct TestRouter {
         router: Router,
+        deployment: Deployment,
         token: String,
         mailer: Mailer,
         storage: Storage,
@@ -151,6 +155,7 @@ mod tests {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
+        fs::write(dist.join("ops.html"), "<html>ops</html>").expect("ops.html");
         fs::create_dir_all(dist.join("public")).expect("a public dir");
         fs::write(dist.join("public/index.html"), "<html>public home</html>").expect("the home");
         fs::write(dist.join("public/about.html"), "<html>public about</html>").expect("about");
@@ -171,13 +176,14 @@ mod tests {
             .expect("the post");
         let post = serde_json::to_value(post).expect("json");
         let state = AppState {
-            deployment,
+            deployment: deployment.clone(),
             mailer: mailer.clone(),
             rate_limits: RateLimits::new(),
             trust_proxy_headers: false,
         };
         let test_router = TestRouter {
             router: router(&dist, state),
+            deployment,
             token: alice.token,
             mailer,
             storage,
@@ -187,7 +193,7 @@ mod tests {
 
     /// A user signed up on the server and finished with their code.
     async fn signed_up(deployment: &Deployment, mailer: &Mailer, email: &str) -> Session {
-        let sent = app_core::accounts::sign_up(deployment, mailer, email, PASSWORD)
+        let sent = app_core::accounts::sign_up(deployment, mailer, email, PASSWORD, "Alice")
             .await
             .expect("signed up");
         let code = code_sent_to(mailer, email);
@@ -274,7 +280,12 @@ mod tests {
         let (status, body) = get(&router, "/api/posts").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!([post]));
-        assert_eq!(post["owner"]["email"], json!("alice@example.com"));
+        assert_eq!(post["owner"]["name"], json!("Alice"));
+        assert_eq!(
+            post["owner"]["email"],
+            Value::Null,
+            "an email is the account's"
+        );
         assert_eq!(post["communities"], json!([]));
     }
 
@@ -332,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn accounts_sign_up_then_the_code_sign_in_and_sign_out_over_the_cookie() {
         let (router, _) = test_router().await;
-        let bob = json!({ "email": "Bob@example.com", "password": PASSWORD });
+        let bob = json!({ "email": "Bob@example.com", "password": PASSWORD, "name": "Bob" });
         let (status, body) = send_as(
             &router.router,
             None,
@@ -382,8 +393,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["user"]["email"], json!("bob@example.com"));
-        assert!(body["user"]["confirmed_at"].is_string());
+        assert_eq!(body["email"], json!("bob@example.com"));
+        assert_eq!(body["user"]["name"], json!("Bob"));
         let set_cookie = headers[header::SET_COOKIE].to_str().expect("a cookie");
         assert!(set_cookie.starts_with(&format!("token={}", body["token"].as_str().unwrap())));
         assert!(set_cookie.contains("HttpOnly"));
@@ -469,7 +480,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["user"]["email"], json!("bob@example.com"));
+        assert_eq!(body["email"], json!("bob@example.com"));
 
         let sent_before = router.mailer.sent().len();
         let (status, body) = send_as(
@@ -477,7 +488,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-up",
-            Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
+            Some(json!({ "email": "bob@example.com", "password": PASSWORD, "name": "Bob" })),
         )
         .await;
         assert_eq!(
@@ -500,7 +511,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-up",
-            Some(json!({ "email": "carol@example.com", "password": "short" })),
+            Some(json!({ "email": "carol@example.com", "password": "short", "name": "Carol" })),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -684,7 +695,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(headers.get(header::SET_COOKIE).is_none());
-        assert_eq!(session["user"]["email"], json!("alice@example.com"));
+        assert_eq!(session["email"], json!("alice@example.com"));
         let token = session["token"].as_str().unwrap();
         let (status, me) = send_as(
             &router.router,
@@ -933,7 +944,7 @@ mod tests {
             None,
             Method::POST,
             "/api/accounts/sign-up",
-            Some(json!({ "email": "bob@example.com", "password": PASSWORD })),
+            Some(json!({ "email": "bob@example.com", "password": PASSWORD, "name": "Bob" })),
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -1191,6 +1202,49 @@ mod tests {
             let (status, body) = get(&router, path).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body, json!("<html>pages</html>"));
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_get_shows_their_email_and_whether_they_are_staff() {
+        let (router, _) = test_router().await;
+        let (status, me) = get(&router, "/api/current-user").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["name"], json!("Alice"));
+        assert_eq!(me["email"], json!("alice@example.com"));
+        assert_eq!(me["is_staff"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn ops_api_is_for_staff_alone() {
+        let (router, _) = test_router().await;
+        let path = "/api/ops/current-staff";
+        let (status, _) = send_as(&router.router, None, Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "nobody signed in");
+        let (status, body) = get(&router, path).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "signed in, not staff");
+        assert_eq!(body, json!({ "error": "Only staff can use this" }));
+
+        let staff = app_core::ops::staff::create(&router.deployment, "alice@example.com")
+            .await
+            .expect("alice is staff");
+        let (status, body) = get(&router, path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["user_id"], json!(staff.user_id));
+        let (_, me) = get(&router, "/api/current-user").await;
+        assert_eq!(me["is_staff"], json!(true));
+
+        let (status, _) = get(&router, "/api/ops/nothing-here").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ops_pages_answer_with_the_ops_entry() {
+        let (router, _) = test_router().await;
+        for path in ["/ops", "/ops/users"] {
+            let (status, body) = get(&router, path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!("<html>ops</html>"));
         }
     }
 

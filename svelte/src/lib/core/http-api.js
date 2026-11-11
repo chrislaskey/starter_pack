@@ -92,10 +92,11 @@ export function avatarsUpdate(key) {
 /**
  * @param {string} email
  * @param {string} password
+ * @param {string} name what the pages show the person by
  * @returns {Promise<{pending: string}>}
  */
-export function accountsSignUp(email, password) {
-  return send("POST", "/api/accounts/sign-up", { email, password });
+export function accountsSignUp(email, password, name) {
+  return send("POST", "/api/accounts/sign-up", { email, password, name });
 }
 
 /**
@@ -111,7 +112,7 @@ export function accountsSignIn(email, password) {
  * @param {string} pending
  * @param {string} code the six digits emailed
  * @param {string} [challenge] the device's, when it opened this page
- * @returns {Promise<{user: {id: string, email: string}, token: string} | {code: string}>}
+ * @returns {Promise<{user: {id: string, name: string}, email: string, token: string} | {code: string}>}
  */
 export function accountsCode(pending, code, challenge) {
   return send("POST", "/api/accounts/code", { pending, code, challenge: challenge || null });

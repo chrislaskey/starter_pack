@@ -28,6 +28,7 @@ pub mod jobs;
 pub mod mailer;
 pub mod mails;
 pub mod memberships;
+pub mod ops;
 pub mod pending_changes;
 #[cfg(feature = "postgres")]
 mod postgres;

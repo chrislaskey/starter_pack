@@ -78,10 +78,13 @@ in-memory databases.
 ## Who the user is
 
 Every core function takes the `users::User` acting. `app_users` is the
-app's view of each account, one row per person, written by the server at
-sign-up and synced like any row, so a post can show who wrote it.
-Credentials never leave the server: `users_credentials` holds the
-password hash (`core/src/credentials.rs`) and `users_tokens` the API
+app's view of each person, their name and picture, one row per person,
+written by the server at sign-up and synced like any row, so a post can
+show who wrote it. Their email is their account's, `accounts_users`
+(`core/src/accounts/users.rs`), a row with the same id that never
+leaves the server: only `app_` tables sync, see `multi-app.md`.
+Credentials never leave the server either: `accounts_credentials` holds the
+password hash (`core/src/credentials.rs`) and `accounts_tokens` the API
 tokens (`core/src/tokens.rs`), as hashes, good for a year, both by the
 user's id. The flows are `core/src/accounts.rs`: `sign_up`, `sign_in`
 and `sign_out` on the server, with an email and a password, each a
@@ -276,7 +279,7 @@ takes them away. So, as in Phoenix:
   counting what was brought along.
 - **Joining is the device asking for everything in that community.** When
   a device applies a live membership of its own user that it did not
-  have, or had left, it records the community in `sync_backfills` and,
+  have, or had left, it records the community in `app_sync_backfills` and,
   after the pull, asks `POST /api/sync/backfill` for every live post row
   in the community, paged, with the same rows brought along, until the
   last page, then forgets the community. A backfill cut short by the
@@ -346,7 +349,7 @@ As the user signed in, with the device's token:
 2. **Pull** pages from the stored cursor until `next` is empty, upserting
    each row unless it has a pending event, and storing `cursor` after each
    page. A page that says `resync` starts over, see below.
-3. **Backfill** each community in `sync_backfills`, page by page.
+3. **Backfill** each community in `app_sync_backfills`, page by page.
 4. **Prune** the posts the user no longer sees.
 5. **Upload** the bytes of the files held back, then push their events.
    Last, so nothing else waits on bytes.
@@ -359,7 +362,7 @@ still runs. One sync runs at a time. A sync runs when the app starts,
 when it comes to the foreground, after every local write, from the Sync
 now button, and every half minute.
 
-The device keeps its cursor in `sync_state`, one row, which the server has
+The device keeps its cursor in `app_sync_state`, one row, which the server has
 too and leaves empty, since every deployment has the same tables.
 
 ### How a sync is started and run
@@ -382,7 +385,7 @@ and no websocket, and another device sees a change on its own next pull.
 A second task that arrives while one is running waits on the lock, then
 runs a full sync of its own. Nothing is coalesced or cancelled, and
 nothing is lost by that: the only queue is the data, the pending events
-in `app_events` and the communities in `sync_backfills`, which a sync
+in `app_events` and the communities in `app_sync_backfills`, which a sync
 reads when it runs. Three writes in a row spawn three syncs; the first
 pushes all three events and the next two find nothing to push and only
 pull.
@@ -474,11 +477,11 @@ Each phase ends in a state that works, is tested and is worth keeping.
 
 | Phase | Builds | Proves |
 | --- | --- | --- |
-| 1 | the columns, `app_events`, `sync_state`, the role, every write through `events` | the web behaves as before; versions climb on the server and stay on a device; a deleted post is hidden; a retried event gets the same answer |
+| 1 | the columns, `app_events`, `app_sync_state`, the role, every write through `events` | the web behaves as before; versions climb on the server and stay on a device; a deleted post is hidden; a retried event gets the same answer |
 | 2 | `sync::push` and `sync::pull` in core and on the server, the in-process transport, the tests | two devices converge; the same field edited on both keeps the first and returns the other as a conflict; different fields both apply; two offline edits on one device do not conflict with each other; a pulled row never replaces one with a pending event |
 | 3 | the device: queueing, `sync::run`, the HTTP transport, the timer, the status in the nav | a post written offline reaches the web and the other device |
 | 4 | the conflicts page, Reapply and Let it go | a conflict reapplied reaches both devices; one let go sends nothing |
-| 5 | `app_users`, `users_tokens`, the owner on a post and `deleted_by_id`, the user on every function, the bearer token, the dev user | a user sees only their posts; another user's change is refused with the server's row; a token the server does not know is 401 |
+| 5 | `app_users`, `accounts_tokens`, the owner on a post and `deleted_by_id`, the user on every function, the bearer token, the dev user | a user sees only their posts; another user's change is refused with the server's row; a token the server does not know is 401 |
 | 6 | communities, memberships, a post's community rows, visibility, rows brought along, backfill, prune, the pages | a post is seen in the communities its owner chose and nowhere else; leaving takes the member's posts along and rejoining brings back exactly what left; joining on the web fills a device and leaving empties it; a device's own join pushes and backfills; a row the server holds under another id replaces the device's |
 | 7 | the purge, the horizon, the resync | what was deleted before the horizon goes with its rows and events; a device away too long starts over and matches; a pending change survives a resync; a change to a purged row is a conflict to let go |
 

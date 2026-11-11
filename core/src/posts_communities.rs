@@ -566,16 +566,16 @@ mod tests {
     async fn posts_communities_a_post_is_seen_in_the_communities_its_owner_chose() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
-            let carol = users::create(&deployment, "carol@example.com")
+            let carol = users::create(&deployment, "carol@example.com", "Carol")
                 .await
                 .expect("a user");
-            let dave = users::create(&deployment, "dave@example.com")
+            let dave = users::create(&deployment, "dave@example.com", "Dave")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -614,7 +614,7 @@ mod tests {
             let listed = posts::get(&deployment, &bob, shared.id)
                 .await
                 .expect("in gardening");
-            assert_eq!(listed.owner.email, "alice@example.com");
+            assert_eq!(listed.owner.name, "Alice");
             let names: Vec<&str> = listed
                 .communities
                 .iter()
@@ -629,10 +629,10 @@ mod tests {
     async fn posts_communities_add_needs_the_owner_in_the_community() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -671,13 +671,13 @@ mod tests {
      {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
-            let carol = users::create(&deployment, "carol@example.com")
+            let carol = users::create(&deployment, "carol@example.com", "Carol")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -738,10 +738,10 @@ mod tests {
     async fn posts_communities_deleting_the_post_deletes_its_rows_with_it() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")

@@ -7,7 +7,7 @@
   import { FormError, avatarsUpload, currentUserGet } from "../lib/core/index.js";
   import { currentUserForget } from "../lib/current_user.js";
 
-  /** @type {{email: string, avatar_url: string | null} | null} */
+  /** @type {{name: string, avatar_url?: string | null} | null} */
   let currentUser = $state(null);
   /** @type {File | null} */
   let file = $state(null);
@@ -61,13 +61,13 @@
   {#if currentUser}
     <div class="flex items-center gap-4">
       {#if currentUser.avatar_url}
-        <img src={currentUser.avatar_url} alt={currentUser.email} class="size-20 rounded-full object-cover" />
+        <img src={currentUser.avatar_url} alt={currentUser.name} class="size-20 rounded-full object-cover" />
       {:else}
         <div class="bg-base-300 flex size-20 items-center justify-center rounded-full text-2xl uppercase">
-          {currentUser.email.slice(0, 1)}
+          {currentUser.name.slice(0, 1)}
         </div>
       {/if}
-      <span class="muted">{currentUser.email}</span>
+      <span>{currentUser.name}</span>
     </div>
     <form onsubmit={save} class="flex flex-col gap-3">
       <label class="flex flex-col gap-1">

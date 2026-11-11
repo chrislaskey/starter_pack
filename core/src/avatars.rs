@@ -360,7 +360,7 @@ mod tests {
         let storage = Storage::memory();
         let deployment =
             Deployment::new(database, Role::Server).with_avatar_bucket(storage.clone());
-        let alice = users::create(&deployment, "alice@example.com")
+        let alice = users::create(&deployment, "alice@example.com", "Alice")
             .await
             .expect("alice");
         (deployment, storage, alice)
@@ -458,7 +458,7 @@ mod tests {
     {
         with_each_database(|database| async move {
             let (deployment, storage, alice) = server_with_alice(database).await;
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("bob");
 

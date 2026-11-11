@@ -62,7 +62,7 @@ Inside the Tauri app each is a command of the same name
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
 | `avatarsUpdate(key)` | `PUT /api/avatars` with `{"key": "..."}`, the user with their `avatar_url` |
 | `avatarsUpload(file, onProgress?)` | both, with the file PUT straight to the bucket between them, see [Forms and uploads](#forms-and-uploads) |
-| `accountsSignUp(email, password)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
+| `accountsSignUp(email, password, name)` | `POST /api/accounts/sign-up`, 202 with the pending token, a code emailed |
 | `accountsSignIn(email, password)` | `POST /api/accounts/sign-in`, the same |
 | `accountsCode(pending, code, challenge?)` | `POST /api/accounts/code`, the user and the token, and the cookie; with a device's challenge, the device code and no cookie |
 | `accountsCodeResend(pending)` | `POST /api/accounts/code/resend`, 202, a new code emailed |
@@ -95,12 +95,16 @@ converge is under "Sync".
 Every core function takes the `users::User` acting (`core/src/users.rs`):
 what they write is theirs, `user_id` on a post, and what they read is
 what they own or what is in a community of theirs, see
-[Communities](#communities). `app_users` is the app's view of each account, one row
-per person with their email, written by the server at sign-up and
-synced to devices like any row, with `confirmed_at` once the person
-proved the email. Credentials never leave the server: the password hash
-is in `users_credentials` (`core/src/credentials.rs`, Argon2id) and
-every secret the server hands out in `users_tokens`
+[Communities](#communities). `app_users` is the app's view of each person, one row
+with their name and picture, written by the server at sign-up and
+synced to devices like any row. Their email, with `confirmed_at` once
+they proved it, is their account's, `accounts_users`
+(`core/src/accounts/users.rs`), a row with the same id that stays on the
+server, so an email never reaches another person's device; see
+`docs/design/multi-app.md` for the apps one deployment carries and
+which tables are whose. Credentials never leave the server either: the password hash
+is in `accounts_credentials` (`core/src/credentials.rs`, Argon2id) and
+every secret the server hands out in `accounts_tokens`
 (`core/src/tokens.rs`), kept as hashes, each in a context that sets how
 long it lives: `api` for the apps' bearer tokens, a year; `session` for
 the browser's cookie, sixty days; `sign_in_code` for a sign-in waiting
@@ -110,7 +114,7 @@ sign-in a device collects, five minutes.
 Signing up, in and out is `core/src/accounts.rs`, on the server, and
 every sign-up and sign-in ends with a six-digit code emailed to the
 person, the design in `docs/design/accounts-sign-in.md`. A sign-up
-writes the user, unconfirmed, and the password, a sign-in checks the
+writes the account, unconfirmed, the user with their name, and the password, a sign-in checks the
 password; both then make a pending sign-in, email its code
 (`core/src/mails.rs` through `core/src/mailer.rs`) and answer the
 pending token. The code, five wrong tries at most, confirms the email
@@ -144,7 +148,7 @@ server's log:
 
 ```sh
 curl -H "Content-Type: application/json" \
-  -d '{"email":"alice@example.com","password":"correct horse battery"}' \
+  -d '{"email":"alice@example.com","password":"correct horse battery","name":"Alice"}' \
   localhost:4000/api/accounts/sign-up   # answers {"pending": ...}; the code is in the log
 curl -H "Content-Type: application/json" \
   -d '{"pending":"<pending>","code":"<code>"}' \
@@ -341,7 +345,7 @@ status.
 
 The device holds exactly what its user sees. The pull brings each row
 after the rows it points at, so the foreign keys hold; joining a
-community records it in `sync_backfills` and the sync asks the server
+community records it in `app_sync_backfills` and the sync asks the server
 for everything in it; leaving, or a post taken out of a community, is
 followed by a prune of the posts no longer visible.
 
@@ -363,8 +367,13 @@ shows the page at the path, swapped in place:
 
 | Path | Shows |
 | --- | --- |
-| `/` | `HomePage.svelte` |
-| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte`, on the web: the email and password, then the code |
+| `/` | on the web the public website's home page, `public/index.html`, not the router's; in the apps the router sends it to `/home` |
+| `/home` | `HomePage.svelte` |
+| `/accounts/sign-up` | `accounts/AccountsSignUpPage.svelte`, on the web: the name, email and password, then the code |
+| `/accounts/settings` | `accounts/AccountsSettingsPage.svelte`, the person's own account: a placeholder with their email |
+| `/support` | `support/SupportIndexPage.svelte`, the support app: a placeholder |
+| `/forum` | `forum/ForumIndexPage.svelte`, the forum app: a placeholder |
+| `/ops` | not the router's: the ops app, an entry of its own, `ops.html` with `ops/OpsHomePage.svelte`, for staff: a placeholder. `cargo run -p app_web -- ops staff create <email>` makes an account staff |
 | `/accounts/sign-in` | `accounts/AccountsSignInPage.svelte`, where a signed-out visitor is sent on the web; with `?challenge=`, a device's sign-in, ending with the code to paste into the app |
 | `/posts` | `posts/PostsIndexPage.svelte` |
 | `/posts/new` | `posts/PostsNewPage.svelte` |

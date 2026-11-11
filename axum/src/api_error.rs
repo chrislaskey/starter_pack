@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use app_core::accounts::AccountError;
+use app_core::accounts::users::AccountUserError;
 use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
 use app_core::credentials::CredentialError;
@@ -142,12 +143,24 @@ impl From<UserError> for ApiError {
         let status = match error {
             UserError::NotFound { .. } => StatusCode::NOT_FOUND,
             UserError::UnknownToken | UserError::NotSignedIn => StatusCode::UNAUTHORIZED,
-            UserError::InvalidEmail | UserError::EmailTaken | UserError::Invalid(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            UserError::InvalidName | UserError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            UserError::AccountUser(error) => return error.into(),
             UserError::ServerOnly | UserError::DeviceSettings(_) | UserError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<AccountUserError> for ApiError {
+    fn from(error: AccountUserError) -> Self {
+        let status = match error {
+            AccountUserError::NotFound { .. } => StatusCode::NOT_FOUND,
+            AccountUserError::InvalidEmail | AccountUserError::EmailTaken => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            AccountUserError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
     }
@@ -198,6 +211,7 @@ impl From<AccountError> for ApiError {
     fn from(error: AccountError) -> Self {
         let status = match error {
             AccountError::User(error) => return error.into(),
+            AccountError::AccountUser(error) => return error.into(),
             AccountError::Sync(error) => return error.into(),
             AccountError::InvalidEmailOrPassword
             | AccountError::CodeDoesNotMatch

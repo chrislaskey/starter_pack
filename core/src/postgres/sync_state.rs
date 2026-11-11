@@ -1,4 +1,4 @@
-//! The `sync_state` table: a device's pull cursor, one row, written by
+//! The `app_sync_state` table: a device's pull cursor, one row, written by
 //! the first pull. The server never writes it; this is the counterpart
 //! of `sqlite::sync_state`.
 
@@ -10,7 +10,7 @@ use crate::sync::Cursor;
 
 pub async fn cursor(connection: &mut PgConnection) -> Result<Option<Cursor>, sqlx::Error> {
     let row: Option<(DateTime<Utc>, Uuid)> =
-        sqlx::query_as("SELECT cursor_last_synced_at, cursor_id FROM sync_state WHERE id = 1")
+        sqlx::query_as("SELECT cursor_last_synced_at, cursor_id FROM app_sync_state WHERE id = 1")
             .fetch_optional(connection)
             .await?;
     Ok(row.map(|(last_synced_at, id)| Cursor { last_synced_at, id }))
@@ -21,7 +21,7 @@ pub async fn save_cursor(
     cursor: &Cursor,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO sync_state (id, cursor_last_synced_at, cursor_id) VALUES (1, $1, $2)
+        "INSERT INTO app_sync_state (id, cursor_last_synced_at, cursor_id) VALUES (1, $1, $2)
          ON CONFLICT (id) DO UPDATE SET
            cursor_last_synced_at = excluded.cursor_last_synced_at, cursor_id = excluded.cursor_id",
     )
@@ -50,8 +50,8 @@ pub async fn reset(connection: &mut PgConnection, user_id: Uuid) -> Result<(), s
            (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_users_communities')",
         "DELETE FROM app_communities WHERE id NOT IN
            (SELECT row_id FROM app_events WHERE status = 'pending' AND table_name = 'app_communities')",
-        "DELETE FROM sync_state",
-        "DELETE FROM sync_backfills",
+        "DELETE FROM app_sync_state",
+        "DELETE FROM app_sync_backfills",
     ] {
         sqlx::query(statement).execute(&mut *connection).await?;
     }

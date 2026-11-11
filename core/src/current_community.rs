@@ -147,7 +147,7 @@ mod tests {
     async fn current_community_get_is_the_choice_while_a_member_else_the_first_by_name() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             assert_eq!(get(&deployment, &alice, None).await.expect("none"), None);
@@ -204,7 +204,7 @@ mod tests {
             Database::open_sqlite_in_memory().await.expect("a database"),
             Role::Server,
         );
-        let alice = users::create(&server, "alice@example.com")
+        let alice = users::create(&server, "alice@example.com", "Alice")
             .await
             .expect("a user");
         let device = users::tests::device_of(&alice, "a token").await;

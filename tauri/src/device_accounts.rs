@@ -212,7 +212,7 @@ impl DeviceAccounts {
              ON CONFLICT (user_id) DO UPDATE SET email = excluded.email",
         )
         .bind(user_id.hyphenated())
-        .bind(&session.user.email)
+        .bind(&session.email)
         .bind(file_name(user_id))
         .bind(now())
         .execute(&self.list)
@@ -575,7 +575,7 @@ mod tests {
     /// answered. Once the email has an account, a sign-in instead.
     async fn signed_up(server: &Deployment, email: &str) -> Session {
         let mailer = Mailer::memory();
-        let sent = accounts::sign_up(server, &mailer, email, PASSWORD)
+        let sent = accounts::sign_up(server, &mailer, email, PASSWORD, "Alice")
             .await
             .expect("signed up");
         let mail = mailer.last_sent_to(email).expect("mailed");

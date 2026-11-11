@@ -1984,7 +1984,7 @@ pub(crate) mod tests {
     async fn files_delete_unreferenced_sweeps_the_bucket_of_bytes_no_row_points_at() {
         with_each_database(|database| async move {
             let (server, storage) = server(database);
-            let alice = users::create(&server, "alice@example.com")
+            let alice = users::create(&server, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let kept = uploaded(&server, &storage, &alice, "kept.txt", b"kept").await;
@@ -2102,7 +2102,7 @@ pub(crate) mod tests {
     async fn files_create_needs_the_bytes_in_the_bucket() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let new = new_file("notes.txt", b"some notes");
@@ -2152,7 +2152,7 @@ pub(crate) mod tests {
     async fn files_create_trims_the_name_and_refuses_what_is_outside_the_rules() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let file = uploaded(&deployment, &storage, &alice, "  spaced.txt ", b"x").await;
@@ -2194,10 +2194,10 @@ pub(crate) mod tests {
     async fn files_list_and_get_show_a_user_their_own_files_only() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let first = uploaded(&deployment, &storage, &alice, "first.txt", b"1").await;
@@ -2239,7 +2239,7 @@ pub(crate) mod tests {
     async fn files_update_changes_the_name_only() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let file = uploaded(&deployment, &storage, &alice, "before.txt", b"x").await;
@@ -2280,7 +2280,7 @@ pub(crate) mod tests {
     async fn files_delete_hides_the_file_and_records_who() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let file = uploaded(&deployment, &storage, &alice, "going.txt", b"x").await;
@@ -2317,7 +2317,7 @@ pub(crate) mod tests {
     async fn files_create_upload_signs_a_url_until_the_bytes_are_there() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let request = FileUploadNew {
@@ -2364,7 +2364,7 @@ pub(crate) mod tests {
     async fn files_content_url_is_signed_for_the_owner() {
         with_each_database(|database| async move {
             let (deployment, storage) = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let file = uploaded(&deployment, &storage, &alice, "notes.txt", b"x").await;
@@ -2384,7 +2384,7 @@ pub(crate) mod tests {
     async fn files_without_a_bucket_the_server_refuses_to_create() {
         let database = Database::open_sqlite_in_memory().await.expect("a database");
         let deployment = Deployment::new(database, Role::Server);
-        let alice = users::create(&deployment, "alice@example.com")
+        let alice = users::create(&deployment, "alice@example.com", "Alice")
             .await
             .expect("a user");
         let error = create(&deployment, &alice, &new_file("notes.txt", b"x"))

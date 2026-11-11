@@ -58,6 +58,11 @@ function publicPages() {
         const name = pathname === "/" ? "index" : pathname.slice(1);
         const isPublicPage = /^[\w-]+$/.test(name) && existsSync(resolve(PUBLIC_PAGES, `${name}.html`));
         if (isPublicPage) request.url = `/public/${name}.html${search}`;
+        // The ops app's pages are its own entry, as on the web server
+        if (pathname === "/ops" || pathname.startsWith("/ops/")) {
+          const isPage = !/\.\w+$/.test(pathname);
+          if (isPage) request.url = `/ops.html${search}`;
+        }
         next();
       });
     },
@@ -74,8 +79,9 @@ const TAURI_DEV_HOST = process.env.TAURI_DEV_HOST;
 
 // One HTML entry per window: src/index.html, whose router
 // (src/lib/router.js) shows the page at the address, and
-// src/quick-picker.html for the desktop app's quick picker; and one per
-// page of the public website. Files served as they are, the fonts, are in
+// src/quick-picker.html for the desktop app's quick picker; src/ops.html
+// for the ops app, at /ops and under it; and one per page of the public
+// website. Files served as they are, the fonts, are in
 // src/static. The dev server
 // answers any other path with index.html, and so do the web server
 // (../axum) and the Tauri app, so every page is reloadable. `pnpm build` writes dist/, which the web server
@@ -99,6 +105,7 @@ export default defineConfig({
       input: {
         main: resolve(import.meta.dirname, "src/index.html"),
         quick_picker: resolve(import.meta.dirname, "src/quick-picker.html"),
+        ops: resolve(import.meta.dirname, "src/ops.html"),
         ...Object.fromEntries(
           publicPageNames().map((name) => [`public_${name}`, resolve(PUBLIC_PAGES, `${name}.html`)]),
         ),

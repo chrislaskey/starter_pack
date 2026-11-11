@@ -11,6 +11,7 @@ export const HOME_PATH = "/home";
 export const ACCOUNTS_INDEX_PATH = "/accounts";
 export const ACCOUNTS_SIGN_UP_PATH = "/accounts/sign-up";
 export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
+export const ACCOUNTS_SETTINGS_PATH = "/accounts/settings";
 export const POSTS_INDEX_PATH = "/posts";
 export const POSTS_NEW_PATH = "/posts/new";
 export const POSTS_SHOW_PATH = "/posts/:id";
@@ -25,6 +26,12 @@ export const COMMUNITIES_SHOW_PATH = "/communities/:id";
 export const COMMUNITIES_EDIT_PATH = "/communities/:id/edit";
 export const CONFLICTS_INDEX_PATH = "/conflicts";
 export const PROFILE_EDIT_PATH = "/profile";
+// The other apps, each under its own path, see docs/design/multi-app.md.
+export const SUPPORT_INDEX_PATH = "/support";
+export const FORUM_INDEX_PATH = "/forum";
+// The ops app is an entry of its own (ops.html), so a link to it loads
+// the page in full: it is never one of this router's paths.
+export const OPS_HOME_PATH = "/ops";
 
 /** The pages anyone sees; every other page needs someone signed in. */
 export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH];
@@ -143,4 +150,22 @@ export function conflictsIndexUrl() {
 
 export function profileEditUrl() {
   return PROFILE_EDIT_PATH;
+}
+
+/** The signed-in person's account: their email, and later their plan. */
+export function accountsSettingsUrl() {
+  return ACCOUNTS_SETTINGS_PATH;
+}
+
+export function supportIndexUrl() {
+  return SUPPORT_INDEX_PATH;
+}
+
+export function forumIndexUrl() {
+  return FORUM_INDEX_PATH;
+}
+
+/** The ops app's home, on the web, for staff. */
+export function opsHomeUrl() {
+  return OPS_HOME_PATH;
 }

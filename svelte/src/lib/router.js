@@ -15,6 +15,7 @@ import { currentUserLoad } from "./current_user.js";
 import { pageLoadErrorClear, pageLoadErrorShow } from "./page_load_error.svelte.js";
 import {
   ACCOUNTS_INDEX_PATH,
+  ACCOUNTS_SETTINGS_PATH,
   ACCOUNTS_SIGN_IN_PATH,
   ACCOUNTS_SIGN_UP_PATH,
   COMMUNITIES_EDIT_PATH,
@@ -26,6 +27,7 @@ import {
   FILES_INDEX_PATH,
   FILES_NEW_PATH,
   FILES_SHOW_PATH,
+  FORUM_INDEX_PATH,
   HOME_PATH,
   OPEN_PATHS,
   POSTS_EDIT_PATH,
@@ -34,6 +36,7 @@ import {
   POSTS_SHOW_PATH,
   PROFILE_EDIT_PATH,
   PUBLIC_HOME_PATH,
+  SUPPORT_INDEX_PATH,
   accountsIndexUrl,
   accountsSignInUrl,
   homeUrl,
@@ -85,6 +88,9 @@ const { navigate, route } = createRouter({
   [COMMUNITIES_EDIT_PATH]: () => import("../communities/CommunitiesEditPage.svelte"),
   [CONFLICTS_INDEX_PATH]: () => import("../conflicts/ConflictsIndexPage.svelte"),
   [PROFILE_EDIT_PATH]: () => import("../profile/ProfileEditPage.svelte"),
+  [ACCOUNTS_SETTINGS_PATH]: () => import("../accounts/AccountsSettingsPage.svelte"),
+  [SUPPORT_INDEX_PATH]: () => import("../support/SupportIndexPage.svelte"),
+  [FORUM_INDEX_PATH]: () => import("../forum/ForumIndexPage.svelte"),
 });
 
 /**

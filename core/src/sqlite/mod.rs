@@ -4,6 +4,7 @@
 
 use sqlx::migrate::Migrator;
 
+pub mod accounts_users;
 pub mod communities;
 pub mod credentials;
 pub mod device_settings;
@@ -11,6 +12,7 @@ pub mod events;
 pub mod files;
 pub mod jobs;
 pub mod memberships;
+pub mod ops_staff;
 pub mod posts;
 pub mod posts_communities;
 pub mod purges;

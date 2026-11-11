@@ -1,5 +1,5 @@
-<!-- Signing up, at /accounts/sign-up, on the web: the email and the
-     password, then the code that was emailed, which proves the email;
+<!-- Signing up, at /accounts/sign-up, on the web: the name, the email
+     and the password, then the code that was emailed, which proves the email;
      done, the person is signed in and sees the posts. Opened by a device
      with ?challenge=, the code ends in a code for the device instead; the
      email is filled in from ?email=. -->
@@ -18,6 +18,7 @@
 
   let email = $state(query.get("email") ?? "");
   let password = $state("");
+  let name = $state("");
   let pending = $state("");
   let code = $state("");
   let deviceCode = $state("");
@@ -40,7 +41,7 @@
 
   function signUp() {
     return attempt(async () => {
-      const sent = await accountsSignUp(email, password);
+      const sent = await accountsSignUp(email, password, name);
       pending = sent.pending;
       password = "";
       code = "";
@@ -87,7 +88,7 @@
   {:else if pending}
     <AccountsCodeForm {email} bind:code {error} {busy} {resent} onsubmit={finish} onresend={resend} onstartover={startOver} />
   {:else}
-    <AccountsForm bind:email bind:password submitText="Sign up" passwordAutocomplete="new-password" {error} {busy} onsubmit={signUp} />
+    <AccountsForm bind:email bind:password bind:name withName submitText="Sign up" passwordAutocomplete="new-password" {error} {busy} onsubmit={signUp} />
     <p class="muted">Already have an account? <a href={accountsSignInUrl(email || undefined)} class="link">Sign in</a></p>
   {/if}
 </main>

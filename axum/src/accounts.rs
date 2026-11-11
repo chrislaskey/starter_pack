@@ -48,18 +48,27 @@ pub struct DeviceCodeExchange {
     pub verifier: String,
 }
 
+#[derive(Deserialize)]
+pub struct SignUp {
+    pub email: String,
+    pub password: String,
+    /// What the pages show the person by.
+    pub name: String,
+}
+
 pub async fn sign_up(
     State(deployment): State<Deployment>,
     State(mailer): State<Mailer>,
     State(limits): State<RateLimits>,
-    Json(credentials): Json<Credentials>,
+    Json(sign_up): Json<SignUp>,
 ) -> Result<(StatusCode, Json<CodeSent>), ApiError> {
-    limits.check_email(&credentials.email)?;
+    limits.check_email(&sign_up.email)?;
     let sent = accounts::sign_up(
         &deployment,
         &mailer,
-        &credentials.email,
-        &credentials.password,
+        &sign_up.email,
+        &sign_up.password,
+        &sign_up.name,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(sent)))

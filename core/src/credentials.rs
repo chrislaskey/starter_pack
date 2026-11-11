@@ -1,4 +1,4 @@
-//! Passwords: a user's password hash in `users_credentials`, server
+//! Passwords: a user's password hash in `accounts_credentials`, server
 //! only, written at sign-up and checked at sign-in, see `accounts`.
 //! A user who signs in another way, later, has no row here.
 //! Argon2id with the crate's defaults; hashing and checking run off the
@@ -114,7 +114,7 @@ mod tests {
     async fn credentials_set_and_verify_and_set_again() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
@@ -159,7 +159,7 @@ mod tests {
     async fn credentials_create_refuses_a_short_or_long_password() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");

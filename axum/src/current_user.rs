@@ -4,13 +4,16 @@
 //! set, see `accounts`. A request with no token, or one the server does
 //! not know, is answered 401, whatever it asks for.
 
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{FromRef, FromRequestParts, State};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
+use serde::Serialize;
 
+use app_core::accounts::users as accounts_users;
 use app_core::deployment::Deployment;
+use app_core::ops::staff::{self, StaffError};
 use app_core::users::{self, User};
 
 use crate::api_error::ApiError;
@@ -66,7 +69,31 @@ fn token_of(parts: &Parts) -> Result<String, ApiError> {
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Sign in first"))
 }
 
+/// The request's user as their own pages show them: with their
+/// account's email, which nobody else is sent, and whether they are
+/// staff, for the link to the ops app.
+#[derive(Serialize)]
+pub struct CurrentUserShown {
+    #[serde(flatten)]
+    pub user: User,
+    pub email: String,
+    pub is_staff: bool,
+}
+
 /// `GET /api/current-user`: the user the request is from.
-pub async fn get(CurrentUser(user): CurrentUser) -> axum::Json<User> {
-    axum::Json(user)
+pub async fn get(
+    State(deployment): State<Deployment>,
+    CurrentUser(user): CurrentUser,
+) -> Result<axum::Json<CurrentUserShown>, ApiError> {
+    let account = accounts_users::get(&deployment, user.id).await?;
+    let is_staff = match staff::get(&deployment, &user).await {
+        Ok(_) => true,
+        Err(StaffError::NotStaff) => false,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(axum::Json(CurrentUserShown {
+        user,
+        email: account.email,
+        is_staff,
+    }))
 }

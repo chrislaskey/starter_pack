@@ -67,8 +67,8 @@ export function avatarsUpdate(key) {
 // browser, on the web's sign-in page, which ends by showing a code the
 // person pastes into the app, see accountsSignInStart.
 
-/** @param {string} _email @param {string} _password */
-export function accountsSignUp(_email, _password) {
+/** @param {string} _email @param {string} _password @param {string} _name */
+export function accountsSignUp(_email, _password, _name) {
   return Promise.reject(new Error("in the app, sign in from the accounts page"));
 }
 

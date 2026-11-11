@@ -469,7 +469,9 @@ mod tests {
     }
 
     async fn user(deployment: &Deployment, email: &str) -> User {
-        users::create(deployment, email).await.expect("a user")
+        users::create(deployment, email, email.split('@').next().unwrap_or(email))
+            .await
+            .expect("a user")
     }
 
     #[tokio::test]

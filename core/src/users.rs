@@ -1,8 +1,9 @@
-//! Users: the app's view of each account, one row per person, written
-//! by the server at sign-up and synced to devices like any row, so a
-//! post can show who wrote it. Credentials never leave the server: the
-//! password is in `credentials`, the tokens in `tokens`, both with the
-//! user's id, and the flows are in `accounts`. Every core function takes
+//! Users: the app's view of each person, their name and picture, one
+//! row per person, written by the server at sign-up and synced to
+//! devices like any row, so a post can show who wrote it. Their email
+//! is their account's, `accounts::users`, a row with the same id that
+//! never leaves the server, as their password, `credentials`, and
+//! tokens, `tokens`, do not; the flows are in `accounts`. Every core function takes
 //! the `User` acting: the server resolves it from the request's token,
 //! `get_by_token`, and a device keeps who is signed in as a device
 //! setting, `signed_in`. Nobody acts until someone signs in.
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::accounts::users::{self as accounts_users, AccountUserError};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::device_settings::{self, DeviceSettingsError, SIGNED_IN};
@@ -22,25 +24,21 @@ use crate::tokens;
 
 pub const TABLE: &str = "app_users";
 
-/// Phoenix's rule.
-pub const MAX_EMAIL_LENGTH: usize = 160;
+pub const MAX_NAME_LENGTH: usize = 80;
 
 /// A user as the pages show one, with the sync columns every synced row
 /// carries, see `docs/design/offline-sync.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
-    pub email: String,
+    /// What the pages show them by.
+    pub name: String,
     pub inserted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub version: i64,
     pub last_synced_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_id: Option<Uuid>,
-    /// When the user first proved their email with a code sent to it;
-    /// none until then, and such a user has no token, see `accounts`.
-    #[serde(default)]
-    pub confirmed_at: Option<DateTime<Utc>>,
     /// The public URL of their picture in object storage, see `avatars`.
     #[serde(default)]
     pub avatar_url: Option<String>,
@@ -59,10 +57,10 @@ pub struct SignedIn {
 pub enum UserError {
     #[error("user {id} not found")]
     NotFound { id: Uuid },
-    #[error("an email needs an @ and no spaces, {MAX_EMAIL_LENGTH} characters at most")]
-    InvalidEmail,
-    #[error("that email already has an account")]
-    EmailTaken,
+    #[error("A name is needed, {MAX_NAME_LENGTH} characters at most")]
+    InvalidName,
+    #[error(transparent)]
+    AccountUser(#[from] AccountUserError),
     #[error("only the server creates users")]
     ServerOnly,
     #[error("The server did not accept this token")]
@@ -91,50 +89,64 @@ pub async fn get(deployment: &Deployment, id: Uuid) -> Result<User, UserError> {
     Ok(user)
 }
 
-/// Makes a user on the server with their email taken as proved, a plain
-/// server write, never an event, since a device never creates one: for
-/// a seed or a test. A sign-up goes through `accounts::sign_up`, which
-/// makes the user unconfirmed with `create_in` until their code matches.
-pub async fn create(deployment: &Deployment, email: &str) -> Result<User, UserError> {
+/// Makes a user on the server with their account, its email taken as
+/// proved: plain server writes, never an event, since a device never
+/// creates one: for a seed or a test. A sign-up goes through
+/// `accounts::sign_up`, whose account is unconfirmed until its code
+/// matches.
+pub async fn create(deployment: &Deployment, email: &str, name: &str) -> Result<User, UserError> {
     if deployment.role != Role::Server {
         return Err(UserError::ServerOnly);
     }
     let mut tx = deployment.begin().await?;
-    let user = insert_in(&mut tx, email, true).await?;
+    let id = Uuid::now_v7();
+    accounts_users::create_in(&mut tx, id, email, true).await?;
+    let user = create_in(&mut tx, id, name).await?;
     tx.commit().await?;
     Ok(user)
 }
 
-/// The user's row, unconfirmed, with their email as `checked_email`
-/// keeps it.
-pub(crate) async fn create_in(tx: &mut Transaction, email: &str) -> Result<User, UserError> {
-    insert_in(tx, email, false).await
-}
-
-async fn insert_in(tx: &mut Transaction, email: &str, confirmed: bool) -> Result<User, UserError> {
-    let email = checked_email(email)?;
+/// The user's row, with the id of their account and their name as
+/// `checked_name` keeps it.
+pub(crate) async fn create_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    name: &str,
+) -> Result<User, UserError> {
     let now = now();
     let user = User {
-        id: Uuid::now_v7(),
-        email,
+        id,
+        name: checked_name(name)?,
         inserted_at: now,
         updated_at: now,
         version: 1,
         last_synced_at: Some(now),
         deleted_at: None,
         deleted_by_id: None,
-        confirmed_at: confirmed.then_some(now),
         avatar_url: None,
     };
-    sql!(&mut *tx, users::insert(&user)).map_err(email_taken)?;
+    sql!(&mut *tx, users::insert(&user))?;
     Ok(user)
 }
 
-/// Marks the user's email as proved, now, and answers them as they are
-/// then; a server write the devices pull like any other.
-pub(crate) async fn confirm_in(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
-    sql!(&mut *tx, users::set_confirmed_at(id, now()))?;
-    get_live(tx, id).await
+/// Sets the user's name, a server write the devices pull like any
+/// other, for a sign-up that is tried again before its code was entered.
+pub(crate) async fn update_name_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    name: &str,
+) -> Result<User, UserError> {
+    let user = get_live(tx, id).await?;
+    let now = now();
+    let updated = User {
+        name: checked_name(name)?,
+        updated_at: now,
+        version: user.version + 1,
+        last_synced_at: Some(now),
+        ..user
+    };
+    sql!(&mut *tx, users::update(&updated))?;
+    Ok(updated)
 }
 
 /// Sets the user's picture, on the server, as an event in its log like
@@ -181,13 +193,16 @@ pub(crate) async fn list_avatar_urls_in(tx: &mut Transaction) -> Result<Vec<Stri
     Ok(sql!(tx, users::list_avatar_urls())?)
 }
 
-/// Deletes the users who never proved their email and were made before
-/// the time, with their credentials and tokens, for the purge; how many.
-pub(crate) async fn delete_unconfirmed_before(
+/// Deletes the users whose account never proved its email and was made
+/// before the time, for the purge, ahead of the accounts themselves.
+pub(crate) async fn delete_of_unconfirmed_accounts_before(
     tx: &mut Transaction,
     time: DateTime<Utc>,
-) -> Result<u64, UserError> {
-    Ok(sql!(&mut *tx, users::delete_unconfirmed_before(time))?)
+) -> Result<(), UserError> {
+    Ok(sql!(
+        &mut *tx,
+        users::delete_of_unconfirmed_accounts_before(time)
+    )?)
 }
 
 /// The live user the token stands for, on the server; a token the
@@ -201,18 +216,6 @@ pub async fn get_by_token(deployment: &Deployment, token: &str) -> Result<User, 
     )?;
     tx.commit().await?;
     user.ok_or(UserError::UnknownToken)
-}
-
-/// The live user with the email as `checked_email` would keep it, on
-/// the server, for a sign-in.
-pub(crate) async fn get_by_email_in(
-    tx: &mut Transaction,
-    email: &str,
-) -> Result<Option<User>, UserError> {
-    Ok(sql!(
-        &mut *tx,
-        users::get_by_email(&normalized_email(email))
-    )?)
 }
 
 /// The user signed in on this device, a device setting.
@@ -285,32 +288,13 @@ async fn get_live(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
     }
 }
 
-/// The email as it is kept: `normalized_email`, with an @ and no
-/// spaces, and not too long.
-fn checked_email(email: &str) -> Result<String, UserError> {
-    let email = normalized_email(email);
-    let (before, after) = email.split_once('@').ok_or(UserError::InvalidEmail)?;
-    if before.is_empty()
-        || after.is_empty()
-        || email.chars().any(char::is_whitespace)
-        || email.chars().count() > MAX_EMAIL_LENGTH
-    {
-        return Err(UserError::InvalidEmail);
+/// The name as it is kept: trimmed, not empty and not too long.
+pub(crate) fn checked_name(name: &str) -> Result<String, UserError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME_LENGTH {
+        return Err(UserError::InvalidName);
     }
-    Ok(email)
-}
-
-/// Trimmed and lowercased, so two spellings of one address are one
-/// account, one inbox the code goes to, and one key the server limits.
-fn normalized_email(email: &str) -> String {
-    email.trim().to_lowercase()
-}
-
-fn email_taken(error: sqlx::Error) -> UserError {
-    match &error {
-        sqlx::Error::Database(database) if database.is_unique_violation() => UserError::EmailTaken,
-        _ => UserError::Database(error),
-    }
+    Ok(name.to_string())
 }
 
 #[cfg(test)]
@@ -357,14 +341,13 @@ pub(crate) mod tests {
         let now = now();
         User {
             id: Uuid::now_v7(),
-            email: "alice@example.com".to_string(),
+            name: "Alice".to_string(),
             inserted_at: now,
             updated_at: now,
             version: 1,
             last_synced_at: Some(now),
             deleted_at: None,
             deleted_by_id: None,
-            confirmed_at: Some(now),
             avatar_url: None,
         }
     }
@@ -373,14 +356,19 @@ pub(crate) mod tests {
     async fn users_create_on_the_server_is_version_one_and_found_by_id() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let user = create(&deployment, "  Alice@Example.com ")
+            let user = create(&deployment, "  Alice@Example.com ", "  Alice ")
                 .await
                 .expect("a user");
-            assert_eq!(user.email, "alice@example.com", "trimmed and lowercased");
+            assert_eq!(user.name, "Alice", "trimmed");
             assert_eq!(user.version, 1);
-            assert_eq!(user.confirmed_at, Some(user.inserted_at));
             assert_eq!(user.last_synced_at, Some(user.updated_at));
             assert_eq!(get(&deployment, user.id).await.expect("the user"), user);
+
+            let account = accounts_users::get(&deployment, user.id)
+                .await
+                .expect("their account");
+            assert_eq!(account.email, "alice@example.com", "trimmed and lowercased");
+            assert_eq!(account.confirmed_at, Some(account.inserted_at));
 
             let error = get(&deployment, Uuid::now_v7()).await.expect_err("missing");
             assert!(matches!(error, UserError::NotFound { .. }));
@@ -389,24 +377,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn users_create_refuses_an_invalid_or_taken_email() {
+    async fn users_create_refuses_an_invalid_or_taken_email_and_an_invalid_name() {
         with_each_database(|database| async move {
             let deployment = server(database);
             for email in [" ", "alice", "@example.com", "alice@", "al ice@example.com"] {
-                let error = create(&deployment, email).await.expect_err("invalid");
-                assert!(matches!(error, UserError::InvalidEmail), "{email}");
+                let error = create(&deployment, email, "Alice")
+                    .await
+                    .expect_err("invalid");
+                assert!(
+                    matches!(
+                        error,
+                        UserError::AccountUser(AccountUserError::InvalidEmail)
+                    ),
+                    "{email}"
+                );
             }
-            let long = format!("{}@example.com", "a".repeat(MAX_EMAIL_LENGTH));
-            let error = create(&deployment, &long).await.expect_err("too long");
-            assert!(matches!(error, UserError::InvalidEmail));
+            let long = format!(
+                "{}@example.com",
+                "a".repeat(accounts_users::MAX_EMAIL_LENGTH)
+            );
+            let error = create(&deployment, &long, "Alice")
+                .await
+                .expect_err("too long");
+            assert!(matches!(
+                error,
+                UserError::AccountUser(AccountUserError::InvalidEmail)
+            ));
+            for name in [" ", &"a".repeat(MAX_NAME_LENGTH + 1)] {
+                let error = create(&deployment, "alice@example.com", name)
+                    .await
+                    .expect_err("invalid");
+                assert!(matches!(error, UserError::InvalidName), "{name}");
+            }
 
-            create(&deployment, "alice@example.com")
+            create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let error = create(&deployment, "alice@example.com")
+            let error = create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect_err("taken");
-            assert!(matches!(error, UserError::EmailTaken));
+            assert!(matches!(
+                error,
+                UserError::AccountUser(AccountUserError::EmailTaken)
+            ));
         })
         .await;
     }
@@ -414,7 +427,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn users_create_is_the_servers_alone() {
         let deployment = device().await;
-        let error = create(&deployment, "alice@example.com")
+        let error = create(&deployment, "alice@example.com", "Alice")
             .await
             .expect_err("a device");
         assert!(matches!(error, UserError::ServerOnly));

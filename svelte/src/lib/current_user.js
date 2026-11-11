@@ -10,7 +10,11 @@
 // and Sign up. Only a hint, so a stale one costs a click.
 import { currentUserGet } from "./core/index.js";
 
-/** @typedef {{id: string, email: string, avatar_url?: string | null}} User */
+/**
+ * The user with what only they are shown: their account's email, and on
+ * the web whether they are staff.
+ * @typedef {{id: string, name: string, email: string, is_staff?: boolean, avatar_url?: string | null}} User
+ */
 
 /** @type {Promise<User | null> | null} */
 let current = null;

@@ -5,9 +5,9 @@
 //! pulled within the window has seen it go; children first, so a
 //! deleted post's community rows, deleted at the same moment, go with
 //! it; the events of rows that are gone go too, and so do the tokens
-//! that have expired, see `tokens`, and the users who signed up more
-//! than a day ago and never entered their code, see `accounts`, whom no
-//! device ever pulled. Each run records
+//! that have expired, see `tokens`, the users who signed up more than a
+//! day ago and never entered their code, see `accounts`, whom no device
+//! ever pulled, and the accounts of the users removed. Each run records
 //! its horizon, and a device whose cursor is older than the latest one
 //! may have missed a deletion, so the pull tells it to start over.
 //!
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::database::sql;
 use crate::deployment::{Deployment, Role};
-use crate::{communities, files, memberships, posts, posts_communities, tokens, users};
+use crate::{accounts, communities, files, memberships, posts, posts_communities, tokens, users};
 
 /// How long a deleted row is kept, and how long a device may stay away.
 pub const RETENTION_DAYS: i64 = 90;
@@ -62,6 +62,8 @@ pub enum PurgeError {
     ServerOnly,
     #[error(transparent)]
     User(#[from] crate::users::UserError),
+    #[error(transparent)]
+    AccountUser(#[from] crate::accounts::users::AccountUserError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -82,10 +84,14 @@ pub async fn run(deployment: &Deployment, now: DateTime<Utc>) -> Result<PurgeRep
     let events = sql!(&mut tx, events::delete_of_missing_rows())?;
     removed.insert("app_events".to_string(), events);
     let expired_tokens = tokens::delete_expired(&mut tx, now).await?;
-    removed.insert("users_tokens".to_string(), expired_tokens);
+    removed.insert("accounts_tokens".to_string(), expired_tokens);
+    let unconfirmed_before = now - Duration::days(UNCONFIRMED_DAYS);
+    users::delete_of_unconfirmed_accounts_before(&mut tx, unconfirmed_before).await?;
     let unconfirmed =
-        users::delete_unconfirmed_before(&mut tx, now - Duration::days(UNCONFIRMED_DAYS)).await?;
-    removed.insert("app_users unconfirmed".to_string(), unconfirmed);
+        accounts::users::delete_unconfirmed_before(&mut tx, unconfirmed_before).await?;
+    removed.insert("accounts_users unconfirmed".to_string(), unconfirmed);
+    let accounts = accounts::users::delete_without_user(&mut tx).await?;
+    removed.insert(accounts::users::TABLE.to_string(), accounts);
     let purge = Purge {
         id: Uuid::now_v7(),
         horizon,
@@ -116,7 +122,7 @@ mod tests {
     async fn purge_removes_what_was_deleted_before_the_horizon_with_its_rows_and_events() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -188,26 +194,42 @@ mod tests {
             let deployment = Deployment::new(database, Role::Server);
             let mailer = crate::mailer::Mailer::memory();
             let password = "correct horse battery";
-            crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password)
+            crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password, "Bob")
                 .await
                 .expect("bob signed up and stopped there");
+            let mut tx = deployment.begin().await.expect("a transaction");
+            let bob = crate::accounts::users::get_by_email_in(&mut tx, "bob@example.com")
+                .await
+                .expect("looked")
+                .expect("bob's account");
+            tx.commit().await.expect("committed");
             let alice =
                 crate::accounts::tests::signed_up_for_a_device(&deployment, "alice@example.com")
                     .await
                     .user;
 
             let report = run(&deployment, now()).await.expect("purged");
-            assert_eq!(report.removed["app_users unconfirmed"], 0, "bob has a day");
+            assert_eq!(
+                report.removed["accounts_users unconfirmed"], 0,
+                "bob has a day"
+            );
             let tomorrow = now() + Duration::days(UNCONFIRMED_DAYS + 1);
             let report = run(&deployment, tomorrow).await.expect("purged");
-            assert_eq!(report.removed["app_users unconfirmed"], 1);
+            assert_eq!(report.removed["accounts_users unconfirmed"], 1);
             let mut tx = deployment.begin().await.expect("a transaction");
             assert!(
-                users::get_by_email_in(&mut tx, "bob@example.com")
+                crate::accounts::users::get_by_email_in(&mut tx, "bob@example.com")
                     .await
                     .expect("looked")
                     .is_none(),
                 "bob is gone, with his password and his pending sign-in"
+            );
+            assert!(
+                users::get_in(&mut tx, bob.id)
+                    .await
+                    .expect("looked")
+                    .is_none(),
+                "and so is his user's row"
             );
             assert!(
                 users::get_in(&mut tx, alice.id)
@@ -218,7 +240,7 @@ mod tests {
             );
             tx.commit().await.expect("committed");
             assert!(
-                crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password)
+                crate::accounts::sign_up(&deployment, &mailer, "bob@example.com", password, "Bob")
                     .await
                     .is_ok(),
                 "and the email is free again"

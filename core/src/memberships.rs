@@ -479,10 +479,10 @@ mod tests {
     async fn memberships_leave_takes_own_posts_along_and_rejoin_brings_back_what_left() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -570,10 +570,10 @@ mod tests {
     async fn memberships_rejoin_leaves_a_post_deleted_meanwhile_deleted() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")
@@ -616,7 +616,7 @@ mod tests {
     async fn memberships_join_needs_a_community() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let error = join(&deployment, &alice, Uuid::now_v7())
@@ -633,10 +633,10 @@ mod tests {
     async fn memberships_apply_event_refuses_someone_elses_membership() {
         with_each_database(|database| async move {
             let deployment = server(database);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&deployment, "bob@example.com")
+            let bob = users::create(&deployment, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&deployment, &alice, "Gardening")

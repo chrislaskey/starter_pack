@@ -1,0 +1,147 @@
+//! A person's account: their email and when they proved it, one row of
+//! `accounts_users` per person. Server only, like every `accounts_`
+//! table: an email never reaches another person's device. What the
+//! apps sync of a person is `crate::users`, a row with the same id,
+//! written with this one at sign-up, see `docs/design/multi-app.md`.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::database::{Transaction, sql};
+use crate::deployment::{Deployment, now};
+
+pub const TABLE: &str = "accounts_users";
+
+/// Phoenix's rule.
+pub const MAX_EMAIL_LENGTH: usize = 160;
+
+/// An account as the server keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountUser {
+    pub id: Uuid,
+    pub email: String,
+    /// When the person first proved their email with a code sent to it;
+    /// none until then, and such an account has no token.
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub inserted_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Error)]
+pub enum AccountUserError {
+    #[error("account {id} not found")]
+    NotFound { id: Uuid },
+    #[error("an email needs an @ and no spaces, {MAX_EMAIL_LENGTH} characters at most")]
+    InvalidEmail,
+    #[error("that email already has an account")]
+    EmailTaken,
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+/// One account by its id, unless deleted.
+pub async fn get(deployment: &Deployment, id: Uuid) -> Result<AccountUser, AccountUserError> {
+    let mut tx = deployment.begin().await?;
+    let account = get_in(&mut tx, id).await?;
+    tx.commit().await?;
+    account.ok_or(AccountUserError::NotFound { id })
+}
+
+/// The account's row, with the email as `checked_email` keeps it.
+pub(crate) async fn create_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    email: &str,
+    confirmed: bool,
+) -> Result<AccountUser, AccountUserError> {
+    let now = now();
+    let account = AccountUser {
+        id,
+        email: checked_email(email)?,
+        confirmed_at: confirmed.then_some(now),
+        inserted_at: now,
+        updated_at: now,
+        deleted_at: None,
+    };
+    sql!(&mut *tx, accounts_users::insert(&account)).map_err(email_taken)?;
+    Ok(account)
+}
+
+/// Marks the account's email as proved, now.
+pub(crate) async fn confirm_in(tx: &mut Transaction, id: Uuid) -> Result<(), AccountUserError> {
+    Ok(sql!(&mut *tx, accounts_users::set_confirmed_at(id, now()))?)
+}
+
+/// The live account by its id.
+pub(crate) async fn get_in(
+    tx: &mut Transaction,
+    id: Uuid,
+) -> Result<Option<AccountUser>, AccountUserError> {
+    let account = sql!(&mut *tx, accounts_users::get(id))?;
+    Ok(account.filter(|account| account.deleted_at.is_none()))
+}
+
+/// The live account with the email as `checked_email` would keep it.
+pub(crate) async fn get_by_email_in(
+    tx: &mut Transaction,
+    email: &str,
+) -> Result<Option<AccountUser>, AccountUserError> {
+    Ok(sql!(
+        &mut *tx,
+        accounts_users::get_by_email(&normalized_email(email))
+    )?)
+}
+
+/// Deletes the accounts that never proved their email and were made
+/// before the time, with their credentials and tokens, for the purge;
+/// how many.
+pub(crate) async fn delete_unconfirmed_before(
+    tx: &mut Transaction,
+    time: DateTime<Utc>,
+) -> Result<u64, AccountUserError> {
+    Ok(sql!(
+        &mut *tx,
+        accounts_users::delete_unconfirmed_before(time)
+    )?)
+}
+
+/// Deletes the accounts whose user the purge removed, with their
+/// credentials and tokens; how many.
+pub(crate) async fn delete_without_user(tx: &mut Transaction) -> Result<u64, AccountUserError> {
+    Ok(sql!(&mut *tx, accounts_users::delete_without_user())?)
+}
+
+/// The email as it is kept: `normalized_email`, with an @ and no
+/// spaces, and not too long.
+fn checked_email(email: &str) -> Result<String, AccountUserError> {
+    let email = normalized_email(email);
+    let (before, after) = email
+        .split_once('@')
+        .ok_or(AccountUserError::InvalidEmail)?;
+    if before.is_empty()
+        || after.is_empty()
+        || email.chars().any(char::is_whitespace)
+        || email.chars().count() > MAX_EMAIL_LENGTH
+    {
+        return Err(AccountUserError::InvalidEmail);
+    }
+    Ok(email)
+}
+
+/// Trimmed and lowercased, so two spellings of one address are one
+/// account, one inbox the code goes to, and one key the server limits.
+fn normalized_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+fn email_taken(error: sqlx::Error) -> AccountUserError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AccountUserError::EmailTaken
+        }
+        _ => AccountUserError::Database(error),
+    }
+}

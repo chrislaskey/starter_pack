@@ -43,7 +43,7 @@
   {#if shown}
     <article class="post">
       <p class="muted">
-        {shown.owner.email} · {shown.post.inserted_at}
+        {shown.owner.name} · {shown.post.inserted_at}
         {#if shown.communities.length > 0}
           · in {shown.communities.map((community) => community.name).join(", ")}
         {/if}

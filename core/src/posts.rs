@@ -501,7 +501,9 @@ mod tests {
 
     /// A user registered on the server.
     pub(crate) async fn user(deployment: &Deployment, email: &str) -> User {
-        users::create(deployment, email).await.expect("a user")
+        users::create(deployment, email, email.split('@').next().unwrap_or(email))
+            .await
+            .expect("a user")
     }
 
     async fn events_with_status(deployment: &Deployment, status: EventStatus) -> i64 {

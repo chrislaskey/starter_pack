@@ -39,7 +39,7 @@
     {#each posts as { post, owner, communities } (post.id)}
       <li class="post">
         <p class="muted">
-          {owner.email} · {post.inserted_at}
+          {owner.name} · {post.inserted_at}
           {#if communities.length > 0}
             · in {communities.map((community) => community.name).join(", ")}
           {/if}

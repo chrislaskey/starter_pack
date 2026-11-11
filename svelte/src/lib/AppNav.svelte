@@ -1,7 +1,8 @@
-<!-- The links between the pages, the current community to switch, who
-     is signed in with Sign out, or Sign in and Sign up on the web and
-     Accounts in the app, the theme menu, and inside the app the sync
-     status. -->
+<!-- The links between the pages, the current community to switch, the
+     other apps (support, the forum, and ops for staff on the web), who
+     is signed in, by their email, a link to their account, with Sign
+     out, or Sign in and Sign up on the web and Accounts in the app, the
+     theme menu, and inside the app the sync status. -->
 <script>
   import CurrentCommunityMenu from "./CurrentCommunityMenu.svelte";
   import SyncStatus from "./SyncStatus.svelte";
@@ -11,16 +12,20 @@
   import { navigateToUrl } from "./router.js";
   import {
     accountsIndexUrl,
+    accountsSettingsUrl,
     accountsSignInUrl,
     accountsSignUpUrl,
     communitiesIndexUrl,
     filesIndexUrl,
+    forumIndexUrl,
     homeUrl,
+    opsHomeUrl,
     postsIndexUrl,
     profileEditUrl,
+    supportIndexUrl,
   } from "./routes.js";
 
-  /** @type {{email: string} | null} */
+  /** @type {import("./current_user.js").User | null} */
   let currentUser = $state(null);
   let busy = $state(false);
   let error = $state("");
@@ -53,13 +58,18 @@
     <a href={filesIndexUrl()} class="link">Files</a>
     <a href={communitiesIndexUrl()} class="link">Communities</a>
     <a href={profileEditUrl()} class="link">Profile</a>
+    <a href={supportIndexUrl()} class="link">Support</a>
+    <a href={forumIndexUrl()} class="link">Forum</a>
+    {#if currentUser.is_staff}
+      <!-- target, so the router leaves the link to the browser: ops is another entry -->
+      <a href={opsHomeUrl()} target="_self" class="link">Ops</a>
+    {/if}
   {/if}
   <span class="grow"></span>
   {#if currentUser}
+    <a href={accountsSettingsUrl()} class="link text-sm">{currentUser.email}</a>
     {#if hasDeviceAccounts}
-      <a href={accountsIndexUrl()} class="link text-sm">{currentUser.email}</a>
-    {:else}
-      <span class="muted text-sm">{currentUser.email}</span>
+      <a href={accountsIndexUrl()} class="link text-sm">Accounts</a>
     {/if}
     <button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={busy}>Sign out</button>
   {:else if hasDeviceAccounts}

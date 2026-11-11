@@ -2054,7 +2054,7 @@ pub(crate) mod tests {
     async fn sync_pull_pages_in_cursor_order_and_resends_the_overlap() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let alice = users::create(&server, "alice@example.com")
+            let alice = users::create(&server, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let first = posts::create(&server, &alice, "first", &[])
@@ -2251,7 +2251,7 @@ pub(crate) mod tests {
     async fn sync_push_rejects_an_event_of_an_unknown_table() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let alice = users::create(&server, "alice@example.com")
+            let alice = users::create(&server, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let event = Event::create("app_nothing", Uuid::now_v7(), events::Fields::new(), now());
@@ -2357,8 +2357,8 @@ pub(crate) mod tests {
                     .await
                     .expect("the post")
                     .owner
-                    .email,
-                "alice@example.com"
+                    .name,
+                "Alice"
             );
             let listed = communities::list(&b, &bob).await.expect("the communities");
             assert!(listed[0].membership.is_some());
@@ -2637,10 +2637,10 @@ pub(crate) mod tests {
     async fn sync_pull_sends_each_row_after_the_rows_it_points_at() {
         with_each_database(|database| async move {
             let server = Deployment::new(database, Role::Server);
-            let alice = users::create(&server, "alice@example.com")
+            let alice = users::create(&server, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let bob = users::create(&server, "bob@example.com")
+            let bob = users::create(&server, "bob@example.com", "Bob")
                 .await
                 .expect("a user");
             let gardening = communities::create(&server, &alice, "Gardening")
@@ -2757,7 +2757,7 @@ pub(crate) mod tests {
     async fn backdate_cursor(device: &Deployment) {
         backdate(
             device,
-            "UPDATE sync_state SET cursor_last_synced_at = $1 WHERE cursor_id != $2",
+            "UPDATE app_sync_state SET cursor_last_synced_at = $1 WHERE cursor_id != $2",
             Uuid::max(),
         )
         .await;
@@ -2911,7 +2911,7 @@ pub(crate) mod tests {
     ) -> Session {
         let mailer = crate::mailer::Mailer::memory();
         let password = "correct horse battery";
-        let sent = accounts::sign_up(servers_database, &mailer, email, password)
+        let sent = accounts::sign_up(servers_database, &mailer, email, password, "Alice")
             .await
             .expect("signed up");
         let sent = match crate::mails::code_in(&mailer.last_sent_to(email).expect("mailed")) {

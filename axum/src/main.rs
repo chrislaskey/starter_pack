@@ -12,7 +12,8 @@
 //!
 //! It runs the recurring jobs as they come due, see `jobs`. With
 //! arguments it runs a command on that database instead and exits:
-//! `jobs run` runs the jobs due, and `jobs run <name>` that job now.
+//! `jobs run` runs the jobs due, `jobs run <name>` that job now, and
+//! `ops staff create <email>` makes that account staff, see `ops`.
 
 mod accounts;
 mod api_error;
@@ -25,6 +26,7 @@ mod files;
 mod jobs;
 mod mailer;
 mod memberships;
+mod ops;
 mod posts;
 mod public;
 mod rate_limits;
@@ -133,6 +135,10 @@ async fn command(
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["jobs", rest @ ..] => jobs::command(deployment, rest).await,
-        _ => Err("commands: jobs run, jobs run <name>".to_string()),
+        ["ops", rest @ ..] => ops::command(deployment, rest).await,
+        _ => Err(
+            "commands: jobs run, jobs run <name>, ops staff create <email>, ops staff delete <email>"
+                .to_string(),
+        ),
     }
 }

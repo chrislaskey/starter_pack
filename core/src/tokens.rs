@@ -1,4 +1,4 @@
-//! Tokens: every secret the server hands out, one row of `users_tokens`
+//! Tokens: every secret the server hands out, one row of `accounts_tokens`
 //! each, kept as its hash so reading the table gives nothing that works,
 //! and told apart by its `Context`, which also sets how long it lives.
 //! The API token an app sends as a bearer token on every request and
@@ -81,7 +81,7 @@ impl Context {
     }
 }
 
-/// A token as `users_tokens` keeps it: by its hash.
+/// A token as `accounts_tokens` keeps it: by its hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub id: Uuid,
@@ -275,7 +275,7 @@ mod tests {
     async fn tokens_create_stands_for_its_user_until_deleted() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
@@ -315,7 +315,7 @@ mod tests {
     async fn tokens_are_kept_hashed_and_expire_each_by_its_context() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
-            let alice = users::create(&deployment, "alice@example.com")
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
             let mut tx = deployment.begin().await.expect("a transaction");
