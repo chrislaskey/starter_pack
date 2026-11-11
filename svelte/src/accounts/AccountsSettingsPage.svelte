@@ -3,6 +3,7 @@
      until it is built, see docs/design/multi-app.md. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
+  import AccountsNeeded from "./AccountsNeeded.svelte";
   import { currentUserLoad } from "../lib/current_user.js";
   import { accountsPasswordEditUrl } from "../lib/routes.js";
 
@@ -18,8 +19,12 @@
 <main class="page">
   <AppNav />
   <h1>Account</h1>
-  {#if currentUser}
-    <p>{currentUser.email}</p>
+  {#if currentUser && currentUser.kind !== "full"}
+    <AccountsNeeded kind={currentUser.kind} />
+  {:else}
+    {#if currentUser}
+      <p>{currentUser.email}</p>
+    {/if}
+    <p><a href={accountsPasswordEditUrl()} class="link">Password</a></p>
   {/if}
-  <p><a href={accountsPasswordEditUrl()} class="link">Password</a></p>
 </main>

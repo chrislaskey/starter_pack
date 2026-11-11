@@ -1,12 +1,12 @@
 <!-- Asked before an account is removed from this device: what removal
      means, and, when changes would be lost, how many and the choice to
-     remove anyway. -->
+     remove anyway. A local user's is the only copy, and says so. -->
 <script>
   import { conflictsIndexUrl } from "../lib/routes.js";
 
   /**
    * @typedef {Object} Props
-   * @property {{email: string, active: boolean} | null} account the account to remove; the dialog is open while set
+   * @property {{email: string, active: boolean, local?: boolean} | null} account the account to remove; the dialog is open while set
    * @property {{pending: number, conflicts: number} | null} loss what a removal would lose, once the first attempt said so
    * @property {boolean} [busy]
    * @property {(losingChanges: boolean) => void} onremove
@@ -32,8 +32,13 @@
 <dialog bind:this={dialog} class="modal" onclose={oncancel}>
   <div class="modal-box flex flex-col gap-3">
     {#if account}
-      <h2>Remove {account.email} from this device?</h2>
-      {#if loss}
+      <h2>Remove {account.local ? "the account that is only on this device" : account.email}?</h2>
+      {#if account.local}
+        <p>
+          <strong>This is the only copy.</strong> Everything in this account is on this device alone and is deleted
+          with it. This cannot be undone. To keep it, sign up or sign in first and move it into your account.
+        </p>
+      {:else if loss}
         <ul class="list-disc pl-5">
           {#if loss.pending > 0}
             <li>{counted(loss.pending, "change has", "changes have")} not reached the server yet.</li>
@@ -55,7 +60,7 @@
         {/if}
         <button type="button" class="btn btn-sm btn-ghost" onclick={oncancel} disabled={busy}>Keep</button>
         <button type="button" class="btn btn-sm btn-error" onclick={() => onremove(loss !== null)} disabled={busy}>
-          {loss ? "Remove anyway" : "Remove from device"}
+          {account.local ? "Delete it all" : loss ? "Remove anyway" : "Remove from device"}
         </button>
       </div>
     {/if}

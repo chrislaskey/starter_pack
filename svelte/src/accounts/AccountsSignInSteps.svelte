@@ -18,11 +18,12 @@
    * @property {string} email where the code went
    * @property {string} pending the pending sign-in the email step answered
    * @property {string} [challenge] the device's, when it opened the page
+   * @property {boolean} [keepSignedIn] whether the browser stays signed in after it closes
    * @property {() => void} onstartover back to the email
    */
 
   /** @type {Props} */
-  let { email, pending, challenge = "", onstartover } = $props();
+  let { email, pending, challenge = "", keepSignedIn = false, onstartover } = $props();
 
   /** The step after the code, once the code answered one. */
   let next = $state(/** @type {"password" | "new_password" | null} */ (null));
@@ -62,7 +63,7 @@
 
   function submitCode() {
     return attempt(async () => {
-      const answer = await accountsCode(pending, code, challenge);
+      const answer = await accountsCode(pending, code, challenge, keepSignedIn);
       if ("next" in answer) {
         next = answer.next;
         nextPending = answer.pending;
@@ -85,7 +86,7 @@
   function submitPassword() {
     return attempt(async () => {
       const send = next === "new_password" ? accountsSignInNewPassword : resetting ? accountsSignInResetPassword : accountsSignInPassword;
-      await finish(await send(nextPending, password, challenge));
+      await finish(await send(nextPending, password, challenge, keepSignedIn));
     });
   }
 
@@ -96,7 +97,7 @@
   }
 
   function skipPassword() {
-    return attempt(async () => finish(await accountsSignInNewPassword(nextPending, null, challenge)));
+    return attempt(async () => finish(await accountsSignInNewPassword(nextPending, null, challenge, keepSignedIn)));
   }
 </script>
 

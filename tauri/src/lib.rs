@@ -19,6 +19,7 @@ mod current_community;
 mod current_user;
 mod device_accounts;
 mod files;
+mod local_users;
 #[cfg(target_os = "macos")]
 mod macos;
 mod memberships;
@@ -102,6 +103,10 @@ pub fn run() {
             device_accounts::device_accounts_switch,
             device_accounts::device_accounts_deactivate,
             device_accounts::device_accounts_remove,
+            local_users::local_users_can_create,
+            local_users::local_users_create,
+            local_users::local_users_move,
+            local_users::local_users_keep_separate,
             quick_picker::quick_picker_list,
             quick_picker::quick_picker_paste,
             quick_picker::quick_picker_close,

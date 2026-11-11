@@ -55,6 +55,22 @@ code, or made at sign-up (items 4, 5 and 22), read it as moved here.
   it needs a connection, and it is the one place a password passes
   through an app.
 
+- **Staying signed in**: the web's Sign in and Sign up pages have
+  "Keep me signed in on this browser", checked to start with
+  (`svelte/src/accounts/keep_signed_in.js`). The page sends it as
+  `keep_signed_in` with whichever request finishes the sign-in, and
+  the cookie then gets a `Max-Age` of the `session` token's sixty
+  days; without it the cookie goes when the browser closes, as before.
+  Not offered for a device's sign-in, which sets no cookie.
+
+- **Before signing up**: a person may use the app as a local user on a
+  device or a trial user on the web, see
+  `accounts-local-and-trial-users.md`. `POST /api/accounts/trial`
+  makes a trial user, and a sign-up from a trial user's browser is
+  `accounts::sign_up_from_trial`: the code goes to the address typed,
+  kept on the pending row as `sent_to`, and the same user takes it
+  when the code matches.
+
 - **A forgotten password** is the app's choice,
   `accounts::FORGOTTEN_PASSWORD`, a constant to change in a fork:
   - `Reset`, the default: the password step shows "Forgot your

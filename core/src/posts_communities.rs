@@ -420,7 +420,7 @@ async fn apply_in(
                         post_id: post.id,
                         community_id,
                         users_communities_id: membership.id,
-                        inserted_at: now,
+                        inserted_at: event.row_inserted_at(now),
                         updated_at: now,
                         version,
                         last_synced_at,

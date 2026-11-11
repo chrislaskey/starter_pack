@@ -26,6 +26,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync", "time", "fs", "rt"] }
 uuid = { version = "1", features = ["serde"] }
+# The device's name, for the community a local user starts with
+whoami = "2"
 
 # The clipboard's image types, see src/clipboard/, and the quick picker,
 # see src/quick_picker/ and src/macos/

@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use app_core::accounts::users as accounts_users;
 use app_core::deployment::Deployment;
 use app_core::ops::staff::{self, StaffError};
-use app_core::users::{self, User};
+use app_core::users::{self, Kind, User};
+use chrono::{DateTime, Utc};
 
 use crate::api_error::ApiError;
 
@@ -70,14 +71,17 @@ fn token_of(parts: &Parts) -> Result<String, ApiError> {
 }
 
 /// The request's user as their own pages show them: with their
-/// account's email, which nobody else is sent, and whether they are
-/// staff, for the link to the ops app.
+/// account's email, which nobody else is sent, whether they are staff,
+/// for the link to the ops app, and whether they are a trial user, with
+/// when the trial ends, for the banner.
 #[derive(Serialize)]
 pub struct CurrentUserShown {
     #[serde(flatten)]
     pub user: User,
     pub email: String,
     pub is_staff: bool,
+    pub kind: Kind,
+    pub trial_expires_at: Option<DateTime<Utc>>,
 }
 
 /// `GET /api/current-user`: the user the request is from.
@@ -110,9 +114,15 @@ async fn shown(deployment: &Deployment, user: User) -> Result<CurrentUserShown, 
         Err(StaffError::NotStaff) => false,
         Err(error) => return Err(error.into()),
     };
+    let kind = match account.trial_expires_at {
+        Some(_) => Kind::Trial,
+        None => Kind::Full,
+    };
     Ok(CurrentUserShown {
         user,
         email: account.email,
         is_staff,
+        kind,
+        trial_expires_at: account.trial_expires_at,
     })
 }

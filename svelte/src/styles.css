@@ -77,6 +77,13 @@ body {
   display: none !important;
 }
 
+/* "Try it now" on the public home page, until the server says a trial
+   can start, see public/index.html. */
+:root:not([data-trial-available]) .public-trial,
+[data-signed-in] .public-trial {
+  display: none !important;
+}
+
 h1 {
   font-size: 1.4rem;
   font-weight: bold;

@@ -115,6 +115,8 @@ pub enum AvatarError {
     Invalid(FieldErrors),
     #[error("that upload is not one of yours")]
     NotYours,
+    #[error("A trial has no picture; sign up first")]
+    TrialUser,
     #[error("the picture did not arrive; try again")]
     UploadMissing,
     #[error("that upload is too old; pick the picture again")]
@@ -147,6 +149,9 @@ pub async fn create_upload(
     request: &AvatarUploadNew,
 ) -> Result<AvatarUpload, AvatarError> {
     FieldErrors::check(request).map_err(AvatarError::Invalid)?;
+    if crate::trial_users::is_trial(deployment, user).await? {
+        return Err(AvatarError::TrialUser);
+    }
     let storage = bucket(deployment)?;
     let image_type = image_type_of(&request.content_type).ok_or_else(|| {
         AvatarError::Invalid(FieldErrors::one("content_type", "is not a picture"))

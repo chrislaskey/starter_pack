@@ -23,6 +23,9 @@ pub enum Job {
     /// `purge::run`, before the sweeps, so the files of the rows it
     /// removes go in the same day.
     Purge,
+    /// `trial_users::delete_expired`, hourly, so a trial user is gone
+    /// within the hour after their time is up.
+    TrialUsersDelete,
     /// `avatars::delete_unreferenced`.
     AvatarsDeleteUnreferenced,
     /// `files::delete_unreferenced`.
@@ -31,8 +34,9 @@ pub enum Job {
 
 impl Job {
     /// Every job, in the order `run_due` runs them.
-    pub const ALL: [Job; 3] = [
+    pub const ALL: [Job; 4] = [
         Job::Purge,
+        Job::TrialUsersDelete,
         Job::AvatarsDeleteUnreferenced,
         Job::FilesDeleteUnreferenced,
     ];
@@ -41,6 +45,7 @@ impl Job {
     pub fn name(self) -> &'static str {
         match self {
             Job::Purge => "purge",
+            Job::TrialUsersDelete => "trial_users_delete",
             Job::AvatarsDeleteUnreferenced => "avatars_delete_unreferenced",
             Job::FilesDeleteUnreferenced => "files_delete_unreferenced",
         }
@@ -53,9 +58,10 @@ impl Job {
     /// The role of the deployments it runs on.
     pub fn role(self) -> Role {
         match self {
-            Job::Purge | Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
-                Role::Server
-            }
+            Job::Purge
+            | Job::TrialUsersDelete
+            | Job::AvatarsDeleteUnreferenced
+            | Job::FilesDeleteUnreferenced => Role::Server,
         }
     }
 
@@ -65,6 +71,7 @@ impl Job {
             Job::Purge | Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
                 Duration::days(1)
             }
+            Job::TrialUsersDelete => Duration::hours(1),
         }
     }
 
@@ -72,7 +79,7 @@ impl Job {
     /// its bucket.
     fn is_set_up(self, deployment: &Deployment) -> bool {
         match self {
-            Job::Purge => true,
+            Job::Purge | Job::TrialUsersDelete => true,
             #[cfg(feature = "object-storage")]
             Job::AvatarsDeleteUnreferenced => deployment.avatar_bucket.is_some(),
             #[cfg(feature = "object-storage")]
@@ -115,6 +122,8 @@ pub enum JobError {
     NotSetUp(Job),
     #[error(transparent)]
     Purge(#[from] PurgeError),
+    #[error(transparent)]
+    TrialUser(#[from] crate::trial_users::TrialUserError),
     #[error(transparent)]
     Avatar(#[from] AvatarError),
     #[error(transparent)]
@@ -174,6 +183,9 @@ pub async fn get(deployment: &Deployment, job: Job) -> Result<Option<JobRecord>,
 async fn perform(deployment: &Deployment, job: Job, now: DateTime<Utc>) -> Result<Value, JobError> {
     match job {
         Job::Purge => Ok(serde_json::to_value(purge::run(deployment, now).await?)?),
+        Job::TrialUsersDelete => Ok(serde_json::to_value(
+            crate::trial_users::delete_expired(deployment, now).await?,
+        )?),
         #[cfg(feature = "object-storage")]
         Job::AvatarsDeleteUnreferenced => Ok(serde_json::to_value(
             crate::avatars::delete_unreferenced(deployment, now).await?,
@@ -223,13 +235,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jobs_run_due_runs_the_purge_once_a_day_and_records_it() {
+    async fn jobs_run_due_runs_the_purge_once_a_day_and_the_trial_delete_hourly_and_records_them() {
         with_each_database(|database| async move {
             let deployment = server(database);
             let now = crate::deployment::now();
 
             let runs = run_due(&deployment, now).await.expect("the jobs");
-            assert_eq!(jobs_of(&runs), [Job::Purge], "no buckets, no sweeps");
+            assert_eq!(
+                jobs_of(&runs),
+                [Job::Purge, Job::TrialUsersDelete],
+                "no buckets, no sweeps"
+            );
             assert!(runs[0].result.is_ok());
             let record = get(&deployment, Job::Purge)
                 .await
@@ -240,13 +256,23 @@ mod tests {
             assert_eq!(record.last_error, None);
             assert!(record.last_report.expect("a report")["horizon"].is_string());
 
+            let almost_an_hour = now + Duration::minutes(59);
+            let runs = run_due(&deployment, almost_an_hour)
+                .await
+                .expect("the jobs");
+            assert!(runs.is_empty(), "not due yet");
+
             let almost_a_day = now + Duration::hours(23);
             let runs = run_due(&deployment, almost_a_day).await.expect("the jobs");
-            assert!(runs.is_empty(), "not due yet");
+            assert_eq!(jobs_of(&runs), [Job::TrialUsersDelete], "the hourly one");
+            assert_eq!(
+                runs[0].result.as_ref().expect("a report")["users"],
+                serde_json::json!(0)
+            );
 
             let a_day_later = now + Duration::days(1);
             let runs = run_due(&deployment, a_day_later).await.expect("the jobs");
-            assert_eq!(jobs_of(&runs), [Job::Purge]);
+            assert_eq!(jobs_of(&runs), [Job::Purge, Job::TrialUsersDelete]);
         })
         .await;
     }

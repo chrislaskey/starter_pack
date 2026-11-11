@@ -15,6 +15,14 @@ forget the token and wipes the file, see "Who the user is" in
 nothing on every switch. The web is one browser session, one cookie,
 and stays that way: nothing here applies to the web.
 
+Since 2026-11-11 one of the accounts may be a **local user**, made by
+Skip with no account on the server, see
+`accounts-local-and-trial-users.md`: `device_accounts.local`. It lists,
+switches and removes like any account and has no sign-out. When its
+records move into an account, the row becomes that account's and keeps
+its folder, so a folder is found by the row's `file`, no longer by the
+user's id, and the sweep keeps whatever folder a row names.
+
 ## Settled
 
 - **One SQLite file per account.** Each account on the device gets a

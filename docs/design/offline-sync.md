@@ -244,6 +244,17 @@ Applying locally on a device always succeeds without conflict, since the
 device's own row is the base. The conflict, if any, comes back from the
 server.
 
+A row made by a create keeps the time the person made it:
+`inserted_at` is the event's `made_at`, the device's clock, unless that
+is ahead of the clock of the deployment applying it, which then uses
+its own (`Event::row_inserted_at`). So a post written offline on Monday
+and pushed on Friday is Monday's.
+
+A local user, someone using a device without signing up, writes rows
+the same way and queues no event, `events::queue`, and their device
+never syncs; if they move to an account, every row is queued as a
+create then, see `accounts-local-and-trial-users.md`.
+
 ## Communities and what a user sees
 
 A user sees their own posts, and the posts in the communities they are a
@@ -331,7 +342,10 @@ As the user signed in, with the device's token:
 
 0. **Ask** the server which waiting files' bytes its bucket has. The
    events of a file whose bytes it has not are held back from the push.
-1. **Push** every pending event, in `made_at, id` order. Apply the answers:
+1. **Push** every event pending as the push begins, in `made_at, id`
+   order, 500 a request, `sync::PUSH_BATCH`, each request's answers
+   applied before the next is sent, so a push cut short has kept what
+   was answered. Apply the answers:
    `applied` deletes the event; `conflict` keeps it with the conflicts;
    a rejected `create` deletes the event and the row it made, and the
    server's row, if any, takes its place, except a file's, which is

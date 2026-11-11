@@ -91,6 +91,14 @@ One id, two tables, written together at sign-up:
   of accounts, which a sign-in's answer fills.
 - The purge removes an unconfirmed sign-up's two rows after a day, and
   the account of any user it removes.
+- A new user starts with a community of their own, `Personal`, made
+  when their email is confirmed, so an app may ask for a current
+  community everywhere.
+- A person may use the app before signing up: a local user on a
+  device, an `app_users` row with no account anywhere, or a trial user
+  on the web, an account with `trial_expires_at`. The pages read which
+  from the current user's `kind`, see
+  `accounts-local-and-trial-users.md`.
 - `forum` and `support` show the same name and picture, from
   `app_users`, and read `accounts_users` to email someone.
 

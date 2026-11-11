@@ -11,6 +11,7 @@ export const HOME_PATH = "/home";
 export const ACCOUNTS_INDEX_PATH = "/accounts";
 export const ACCOUNTS_SIGN_UP_PATH = "/accounts/sign-up";
 export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
+export const ACCOUNTS_TRIAL_PATH = "/accounts/trial";
 export const ACCOUNTS_SETTINGS_PATH = "/accounts/settings";
 export const ACCOUNTS_PASSWORD_EDIT_PATH = "/accounts/password";
 export const POSTS_INDEX_PATH = "/posts";
@@ -35,10 +36,15 @@ export const FORUM_INDEX_PATH = "/forum";
 export const OPS_HOME_PATH = "/ops";
 
 /** The pages anyone sees; every other page needs someone signed in. */
-export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH];
+export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH, ACCOUNTS_TRIAL_PATH];
 
 export function homeUrl() {
   return HOME_PATH;
+}
+
+/** "Try it now", on the web only: the app for a day with no sign-up. */
+export function accountsTrialUrl() {
+  return ACCOUNTS_TRIAL_PATH;
 }
 
 /** The accounts on this device, inside the app only. */

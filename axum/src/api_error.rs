@@ -142,7 +142,9 @@ impl From<UserError> for ApiError {
     fn from(error: UserError) -> Self {
         let status = match error {
             UserError::NotFound { .. } => StatusCode::NOT_FOUND,
-            UserError::UnknownToken | UserError::NotSignedIn => StatusCode::UNAUTHORIZED,
+            UserError::UnknownToken | UserError::NotSignedIn | UserError::LocalUser => {
+                StatusCode::UNAUTHORIZED
+            }
             UserError::InvalidName | UserError::Invalid(_) | UserError::Rejected(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
@@ -174,7 +176,7 @@ impl From<AvatarError> for ApiError {
             AvatarError::Invalid(field_errors) => return ApiError::from_field_errors(field_errors),
             AvatarError::User(error) => return error.into(),
             AvatarError::Sync(error) => return error.into(),
-            AvatarError::NotYours => StatusCode::FORBIDDEN,
+            AvatarError::NotYours | AvatarError::TrialUser => StatusCode::FORBIDDEN,
             AvatarError::NoAvatarBucket => StatusCode::SERVICE_UNAVAILABLE,
             AvatarError::UploadMissing
             | AvatarError::UploadExpired
@@ -214,11 +216,15 @@ impl From<AccountError> for ApiError {
         let status = match error {
             AccountError::User(error) => return error.into(),
             AccountError::AccountUser(error) => return error.into(),
+            AccountError::Community(error) => return error.into(),
             AccountError::Sync(error) => return error.into(),
             AccountError::SignInExpired
             | AccountError::CodeDoesNotMatch
             | AccountError::UnknownDeviceCode => StatusCode::UNAUTHORIZED,
-            AccountError::PasswordDoesNotMatch => StatusCode::UNPROCESSABLE_ENTITY,
+            AccountError::PasswordDoesNotMatch | AccountError::NotATrial => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            AccountError::TrialsFull => StatusCode::SERVICE_UNAVAILABLE,
             AccountError::PasswordResetNotAllowed => StatusCode::FORBIDDEN,
             AccountError::Credential(
                 CredentialError::PasswordTooShort | CredentialError::PasswordTooLong,

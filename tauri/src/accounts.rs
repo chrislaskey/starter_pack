@@ -17,12 +17,10 @@
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
-use app_core::accounts::{self, PasswordUpdate, SecondFactor};
-use app_core::users::User;
-
-use crate::device_accounts::{DeviceAccounts, PendingSignIn};
+use crate::device_accounts::{DeviceAccounts, PendingSignIn, SignInFinished};
 use crate::server_urls;
 use crate::sync::{self, SyncServer};
+use app_core::accounts::{self, PasswordUpdate, SecondFactor};
 
 /// Keeps a verifier and opens the browser on the sign-in page, with the
 /// email filled in for an account signed out on this device.
@@ -61,14 +59,16 @@ pub async fn accounts_sign_in_pending(
 }
 
 /// Exchanges the code the browser showed, with the verifier kept at the
-/// start, for the session, and keeps it as the active account.
+/// start, for the session, and keeps it as the active account; or, on a
+/// device with a local user, offers to move what they made into the
+/// account, see `local_users`.
 #[tauri::command]
 pub async fn accounts_sign_in_finish(
     app: AppHandle,
     device: State<'_, DeviceAccounts>,
     server: State<'_, SyncServer>,
     code: String,
-) -> Result<User, String> {
+) -> Result<SignInFinished, String> {
     let verifier = device
         .sign_in_verifier()
         .await
@@ -78,10 +78,10 @@ pub async fn accounts_sign_in_finish(
         accounts::sign_in_with_device_code_through(server.transport(), code.trim(), &verifier)
             .await
             .map_err(|error| error.to_string())?;
-    let user = {
+    let finished = {
         let _no_sync_meanwhile = server.hold().await;
         device
-            .keep_signed_in(session)
+            .sign_in_finished(session)
             .await
             .map_err(|error| error.to_string())?
     };
@@ -90,11 +90,12 @@ pub async fn accounts_sign_in_finish(
         .await
         .map_err(|error| error.to_string())?;
     sync::spawn(app);
-    Ok(user)
+    Ok(finished)
 }
 
 #[tauri::command]
 pub async fn accounts_sign_in_cancel(device: State<'_, DeviceAccounts>) -> Result<(), String> {
+    device.move_offered_forget().await;
     device
         .sign_in_clear()
         .await

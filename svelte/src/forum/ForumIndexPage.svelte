@@ -1,11 +1,26 @@
 <!-- The forum app's landing page, at /forum: a placeholder until the
-     forum is built, see docs/design/multi-app.md. -->
+     forum is built, see docs/design/multi-app.md. Online only, so a local user
+     or a trial user is told it needs an account. -->
 <script>
+  import AccountsNeeded from "../accounts/AccountsNeeded.svelte";
   import AppNav from "../lib/AppNav.svelte";
+  import { currentUserLoad } from "../lib/current_user.js";
+
+  /** @type {import("../lib/current_user.js").User | null} */
+  let currentUser = $state(null);
+
+  currentUserLoad().then(
+    (user) => (currentUser = user),
+    () => (currentUser = null),
+  );
 </script>
 
 <main class="page">
   <AppNav />
   <h1>Forum</h1>
-  <p class="muted">Nothing here yet.</p>
+  {#if currentUser && currentUser.kind !== "full"}
+    <AccountsNeeded kind={currentUser.kind} />
+  {:else}
+    <p class="muted">Nothing here yet.</p>
+  {/if}
 </main>

@@ -71,6 +71,18 @@ fn trust_proxy_headers() -> bool {
     )
 }
 
+/// How many trial users the server holds at once, `TRIAL_USERS_MAX`;
+/// unset or 0, there are no trials.
+fn trial_users_max() -> Result<router::TrialUsersMax, String> {
+    match env::var("TRIAL_USERS_MAX") {
+        Ok(max) => max
+            .parse()
+            .map(router::TrialUsersMax)
+            .map_err(|_| format!("TRIAL_USERS_MAX must be a number, not '{max}'")),
+        Err(_) => Ok(router::TrialUsersMax(0)),
+    }
+}
+
 fn port() -> Result<u16, String> {
     match env::var("PORT") {
         Ok(value) => value
@@ -118,6 +130,7 @@ async fn main() -> Result<(), String> {
         mailer,
         rate_limits,
         trust_proxy_headers: trust_proxy_headers(),
+        trial_users_max: trial_users_max()?,
     };
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));

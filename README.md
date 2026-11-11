@@ -146,6 +146,16 @@ client IP (`axum/src/rate_limits.rs`, the `governor` crate); behind a
 reverse proxy, `TRUST_PROXY_HEADERS=1` takes the client IP from
 `X-Forwarded-For`.
 
+A person can use the app before signing up
+(`docs/design/accounts-local-and-trial-users.md`). In the desktop and
+phone apps, Skip on the accounts page makes a local user, on that
+device only, who never syncs; signing up or in later offers to move
+what they made into the account. On the web, with `TRIAL_USERS_MAX`
+set, "Try it now" makes a trial user for 24 hours, deleted with
+everything of theirs 48 hours after it was made unless they sign up,
+which keeps the same user. The pages tell the kinds apart by the
+current user's `kind`: `full`, `local` or `trial`.
+
 A device asks for no password at a sign-in: it signs in in the system browser,
 on the web's own sign-in page, and exchanges the code the page shows
 for its token, see "Accounts on a device". It keeps who signed in and
@@ -536,7 +546,8 @@ build, for staff), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`,
 (for files) with `STORAGE_ENDPOINT`, `STORAGE_REGION`,
 `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` and
 `STORAGE_PUBLIC_URL` (`bin/storage env` prints Garage's), and
-`TRUST_PROXY_HEADERS`, and logs with `RUST_LOG` (default
+`TRUST_PROXY_HEADERS`, `TRIAL_USERS_MAX` (how many trial users the
+server holds at once; unset or 0, "Try it now" is off), and logs with `RUST_LOG` (default
 `app_web=info,app_core=info,tower_http=info`, which includes the emails
 the log mailer writes). The app reads `DATA_DIR`, `SYNC_SERVER_URL` and
 `BROWSER_SIGN_IN_URL`, the two URLs also from `tauri/tauri.conf.json`

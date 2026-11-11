@@ -1,14 +1,17 @@
 <!-- The person's profile, at /profile: their name and their picture. A
      name is written where the page runs, so the app changes it offline
      and syncs it later; a picture goes straight to object storage, see
-     avatarsUpload in lib/core/. -->
+     avatarsUpload in lib/core/. A local user is told their account is
+     only on this device; they and a trial user have no picture, which
+     needs an account on the server. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import FieldErrors from "../lib/FieldErrors.svelte";
   import { FormError, avatarsUpload, currentUserGet, currentUserUpdate } from "../lib/core/index.js";
   import { currentUserForget } from "../lib/current_user.js";
+  import { accountsIndexUrl } from "../lib/routes.js";
 
-  /** @type {{name: string, avatar_url?: string | null} | null} */
+  /** @type {{name: string, kind?: string, avatar_url?: string | null} | null} */
   let currentUser = $state(null);
   /** @type {File | null} */
   let file = $state(null);
@@ -80,6 +83,16 @@
   <AppNav />
   <h1>Profile</h1>
   {#if currentUser}
+    {#if currentUser.kind === "local"}
+      <div class="alert alert-warning flex flex-col items-start gap-2" data-local-user>
+        <p>
+          <strong>This account is only on this device.</strong> Nothing is backed up: if the device is lost or reset,
+          or the app is removed, what you made is gone. Sign up or sign in to keep it safe and use it on your other
+          devices.
+        </p>
+        <a href={accountsIndexUrl()} class="btn btn-sm">Sign up or sign in</a>
+      </div>
+    {/if}
     <div class="flex items-center gap-4">
       {#if currentUser.avatar_url}
         <img src={currentUser.avatar_url} alt={currentUser.name} class="size-20 rounded-full object-cover" />
@@ -102,28 +115,30 @@
         <button type="submit" class="btn btn-primary" disabled={nameBusy || name.trim() === currentUser.name}>Save name</button>
       </div>
     </form>
-    <form onsubmit={save} class="flex flex-col gap-3">
-      <label class="flex flex-col gap-1">
-        <span>Picture</span>
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
-          class="file-input w-full"
-          onchange={pick}
-          disabled={busy}
-        />
-        <FieldErrors {errors} fields={["content_type", "size"]} />
-      </label>
-      {#if progress !== null}
-        <progress class="progress w-full" value={progress} max="1"></progress>
-      {/if}
-      {#if error && Object.keys(errors).length === 0}
-        <p class="error">{error}</p>
-      {/if}
-      <div>
-        <button type="submit" class="btn btn-primary" disabled={busy || !file}>Save picture</button>
-      </div>
-    </form>
+    {#if currentUser.kind === "full"}
+      <form onsubmit={save} class="flex flex-col gap-3">
+        <label class="flex flex-col gap-1">
+          <span>Picture</span>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            class="file-input w-full"
+            onchange={pick}
+            disabled={busy}
+          />
+          <FieldErrors {errors} fields={["content_type", "size"]} />
+        </label>
+        {#if progress !== null}
+          <progress class="progress w-full" value={progress} max="1"></progress>
+        {/if}
+        {#if error && Object.keys(errors).length === 0}
+          <p class="error">{error}</p>
+        {/if}
+        <div>
+          <button type="submit" class="btn btn-primary" disabled={busy || !file}>Save picture</button>
+        </div>
+      </form>
+    {/if}
   {:else if error}
     <p class="error">{error}</p>
   {/if}

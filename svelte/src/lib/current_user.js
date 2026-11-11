@@ -11,9 +11,12 @@
 import { currentUserGet } from "./core/index.js";
 
 /**
- * The user with what only they are shown: their account's email, and on
- * the web whether they are staff.
- * @typedef {{id: string, name: string, email: string, is_staff?: boolean, avatar_url?: string | null}} User
+ * The user with what only they are shown: their account's email, on the
+ * web whether they are staff, and what kind of user they are: `full`,
+ * signed up; `local`, on this device only, in the app; `trial`, on the
+ * web until `trial_expires_at` unless they sign up. See
+ * docs/design/accounts-local-and-trial-users.md.
+ * @typedef {{id: string, name: string, email: string, kind: "full" | "local" | "trial", trial_expires_at?: string | null, is_staff?: boolean, avatar_url?: string | null}} User
  */
 
 /** @type {Promise<User | null> | null} */

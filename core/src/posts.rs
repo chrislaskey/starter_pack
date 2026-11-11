@@ -362,7 +362,7 @@ pub(crate) async fn apply_in(
                 id: event.row_id,
                 user_id: user.id,
                 body: String::new(),
-                inserted_at: now,
+                inserted_at: event.row_inserted_at(now),
                 updated_at: now,
                 version,
                 last_synced_at,

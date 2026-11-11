@@ -378,6 +378,11 @@ pub async fn create_upload(
     user: &User,
     request: &FileUploadNew,
 ) -> Result<FileUpload, FileError> {
+    if crate::trial_users::is_trial(deployment, user).await? {
+        return Err(FileError::Rejected(
+            "a trial has no files; sign up first".to_string(),
+        ));
+    }
     let storage = bucket(deployment)?;
     let content_type = content_type_or_unknown(&request.content_type);
     let request = FileUploadNew {
@@ -1008,7 +1013,7 @@ pub(crate) async fn apply_in(
                 name: String::new(),
                 content_type: String::new(),
                 size: 0,
-                inserted_at: now,
+                inserted_at: event.row_inserted_at(now),
                 updated_at: now,
                 version,
                 last_synced_at,

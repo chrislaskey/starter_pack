@@ -14,6 +14,7 @@ how often, and the order: `Job::ALL`. Today they are the server's:
 | Job | Runs | Order |
 |---|---|---|
 | `purge` | `purge::run` | first, so the bytes of the rows it removes go the same day |
+| `trial_users_delete` | `trial_users::delete_expired`, hourly, the others daily | after the purge |
 | `avatars_delete_unreferenced` | `avatars::delete_unreferenced` | after the purge |
 | `files_delete_unreferenced` | `files::delete_unreferenced` | after the purge |
 

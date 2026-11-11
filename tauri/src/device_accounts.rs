@@ -8,7 +8,10 @@
 //! than one. The app data directory, `DATA_DIR` in dev, holds them all.
 //! At start the list is swept of orphans, every database is brought up
 //! to date, and the last active account is opened again if it is still
-//! signed in.
+//! signed in. One of the accounts may be a local user, made by Skip
+//! with no account on the server, see `local_users`: it lists, switches
+//! and removes like any other, has no sign-out, and becomes an account's
+//! own when the person signs up or in and moves what they made.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -19,7 +22,7 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use tauri::{App, AppHandle, Manager, State};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 use uuid::fmt::Hyphenated;
 
@@ -27,6 +30,7 @@ use app_core::accounts::{self, AccountError, Session};
 use app_core::database::{Database, DatabaseError};
 use app_core::deployment::{Deployment, FileStore, Role, now};
 use app_core::device_settings::{self, DeviceSettingsError};
+use app_core::local_users::{self, LocalUserError, Moved};
 use app_core::sync::{self, SyncError, Transport};
 use app_core::users::{self, User, UserError};
 
@@ -49,8 +53,28 @@ pub struct DeviceAccount {
     /// The account's file holds a token: it switches to at once;
     /// otherwise it asks for the password first.
     pub signed_in: bool,
+    /// A local user: on this device only, with nothing to sign in to.
+    pub local: bool,
     pub active: bool,
     pub last_active_at: DateTime<Utc>,
+}
+
+/// What finishing a sign-in in the browser answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SignInFinished {
+    SignedIn {
+        user: User,
+    },
+    /// The device has a local user, and the account is new to it: the
+    /// person is asked whether what the local user made moves into the
+    /// account, `local_user_move`, or stays apart,
+    /// `local_user_keep_separate`. Nothing was done yet.
+    MoveOffered {
+        email: String,
+        /// The local user's posts and files.
+        items: i64,
+    },
 }
 
 /// What a removal answers.
@@ -77,6 +101,14 @@ pub enum DeviceAccountsError {
     NotSignedIn { email: String },
     #[error("This device holds {MAX_ACCOUNTS} accounts; remove one first")]
     TooManyAccounts,
+    #[error("This device already has an account; skipping is for a device with none")]
+    AccountsExist,
+    #[error("An account that is only on this device has nothing to sign out of")]
+    LocalUserHasNoSignOut,
+    #[error("No sign-in is waiting to be moved into; sign in again")]
+    NoMoveOffered,
+    #[error(transparent)]
+    LocalUser(#[from] LocalUserError),
     #[error(transparent)]
     Account(#[from] AccountError),
     #[error(transparent)]
@@ -101,6 +133,10 @@ pub struct DeviceAccounts {
     directory: PathBuf,
     list: SqlitePool,
     active: RwLock<Option<Active>>,
+    /// The session of a sign-in whose move was offered, until the
+    /// person answers; in memory only, so quitting the app means
+    /// signing in again.
+    move_offered: Mutex<Option<Session>>,
 }
 
 struct Active {
@@ -114,6 +150,7 @@ struct Row {
     email: String,
     file: String,
     signed_in: bool,
+    local: bool,
     active: bool,
     last_active_at: DateTime<Utc>,
 }
@@ -124,6 +161,7 @@ impl From<Row> for DeviceAccount {
             user_id: row.user_id.into_uuid(),
             email: row.email,
             signed_in: row.signed_in,
+            local: row.local,
             active: row.active,
             last_active_at: row.last_active_at,
         }
@@ -159,6 +197,7 @@ impl DeviceAccounts {
             directory: directory.to_path_buf(),
             list,
             active: RwLock::new(None),
+            move_offered: Mutex::new(None),
         };
         accounts.sweep().await?;
         accounts.migrate_every_file().await?;
@@ -169,7 +208,7 @@ impl DeviceAccounts {
     /// Every account, the most recently active first.
     pub async fn list(&self) -> Result<Vec<DeviceAccount>, DeviceAccountsError> {
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT user_id, email, file, signed_in, active, last_active_at
+            "SELECT user_id, email, file, signed_in, local, active, last_active_at
              FROM device_accounts ORDER BY last_active_at DESC, email",
         )
         .fetch_all(&self.list)
@@ -263,9 +302,17 @@ impl DeviceAccounts {
     }
 
     /// Signs the active account out: the server forgets the token, the
-    /// file keeps its data, and nobody is active.
+    /// file keeps its data, and nobody is active. Not for a local user,
+    /// who could never sign back in.
     pub async fn sign_out<T: Transport>(&self, transport: &T) -> Result<(), DeviceAccountsError> {
         let (user_id, deployment) = self.active_pair().await?;
+        if self
+            .get(user_id)
+            .await?
+            .is_some_and(|account| account.local)
+        {
+            return Err(DeviceAccountsError::LocalUserHasNoSignOut);
+        }
         accounts::sign_out_on_device(&deployment, transport).await?;
         self.mark(user_id, false, false).await?;
         self.deactivate().await
@@ -312,11 +359,12 @@ impl DeviceAccounts {
             self.deactivate().await?;
         }
         if removed {
+            let folder = self.folder_of(user_id).await?;
             sqlx::query("DELETE FROM device_accounts WHERE user_id = $1")
                 .bind(user_id.hyphenated())
                 .execute(&self.list)
                 .await?;
-            delete_folder(&self.folder_of(user_id))?;
+            delete_folder(&folder)?;
         }
         outcome
     }
@@ -337,7 +385,7 @@ impl DeviceAccounts {
                 });
             }
         }
-        if account.signed_in {
+        if account.signed_in && !account.local {
             match accounts::sign_out_on_device(deployment, transport).await {
                 Ok(()) | Err(AccountError::User(UserError::NotSignedIn)) => {}
                 Err(error) => return Err(error.into()),
@@ -345,6 +393,124 @@ impl DeviceAccounts {
             self.mark(account.user_id, false, false).await?;
         }
         Ok(Removal::Removed)
+    }
+
+    /// The device's local user, if it has one.
+    pub async fn local_account(&self) -> Result<Option<DeviceAccount>, DeviceAccountsError> {
+        Ok(self.list().await?.into_iter().find(|account| account.local))
+    }
+
+    /// Whether Skip is offered: the app allows local users and the
+    /// device has no account of any kind, so it is the way in for
+    /// someone new and is gone once they are in, and after a move.
+    pub async fn local_user_can_create(&self) -> Result<bool, DeviceAccountsError> {
+        Ok(local_users::ALLOWED && self.count().await? == 0)
+    }
+
+    /// Skip: makes the device's local user, with a folder of their own
+    /// and a community named for the device, and makes them active. No
+    /// request is made.
+    pub async fn local_user_create(&self, device_name: &str) -> Result<User, DeviceAccountsError> {
+        if !local_users::ALLOWED {
+            return Err(LocalUserError::NotAllowed.into());
+        }
+        if self.count().await? > 0 {
+            return Err(DeviceAccountsError::AccountsExist);
+        }
+        let user_id = Uuid::now_v7();
+        let name = local_users::new_name();
+        // The row first, as for a sign-in
+        sqlx::query(
+            "INSERT INTO device_accounts (user_id, email, file, signed_in, local, last_active_at, active)
+             VALUES ($1, $2, $3, 0, 1, $4, 0)",
+        )
+        .bind(user_id.hyphenated())
+        .bind(local_users::email_of(&name))
+        .bind(file_name(user_id))
+        .bind(now())
+        .execute(&self.list)
+        .await?;
+        let deployment = self.open_file(user_id).await?;
+        let user = local_users::create(&deployment, user_id, &name, device_name).await?;
+        self.mark(user_id, true, true).await?;
+        *self.active.write().await = Some(Active {
+            user_id,
+            deployment,
+        });
+        Ok(user)
+    }
+
+    /// What a sign-in the browser finished does on this device: kept as
+    /// an account of its own, as ever, unless the device has a local
+    /// user and the account is new to it. Then nothing is done, and
+    /// the session waits for the person's answer.
+    pub async fn sign_in_finished(
+        &self,
+        session: Session,
+    ) -> Result<SignInFinished, DeviceAccountsError> {
+        let local = self.local_account().await?;
+        let known = self.get(session.user.id).await?.is_some();
+        let Some(local) = local.filter(|_| !known) else {
+            let user = self.keep_signed_in(session).await?;
+            return Ok(SignInFinished::SignedIn { user });
+        };
+        let items = match self.active_user_id().await == Some(local.user_id) {
+            true => local_users::count_items(&self.active().await?).await?,
+            false => {
+                let deployment = self.open_file(local.user_id).await?;
+                let items = local_users::count_items(&deployment).await;
+                deployment.database.close().await;
+                items?
+            }
+        };
+        let email = session.email.clone();
+        *self.move_offered.lock().await = Some(session);
+        Ok(SignInFinished::MoveOffered { email, items })
+    }
+
+    /// The person chose to move: everything the local user made becomes
+    /// the account's, which takes the local user's place in the list
+    /// and is active. The next sync pushes it.
+    pub async fn local_user_move(&self) -> Result<User, DeviceAccountsError> {
+        let local = self
+            .local_account()
+            .await?
+            .ok_or(LocalUserError::NotLocal)?;
+        let session = self
+            .move_offered
+            .lock()
+            .await
+            .take()
+            .ok_or(DeviceAccountsError::NoMoveOffered)?;
+        if self.active_user_id().await != Some(local.user_id) {
+            self.activate(local.user_id).await?;
+        }
+        let deployment = self.active().await?;
+        let user = local_users::move_to_account(&deployment, session).await?;
+        self.name_moved_account(&deployment).await?;
+        self.mark(user.id, true, true).await?;
+        *self.active.write().await = Some(Active {
+            user_id: user.id,
+            deployment,
+        });
+        Ok(user)
+    }
+
+    /// The person chose to keep them apart: the account is added beside
+    /// the local user, which stays as it was.
+    pub async fn local_user_keep_separate(&self) -> Result<User, DeviceAccountsError> {
+        let session = self
+            .move_offered
+            .lock()
+            .await
+            .take()
+            .ok_or(DeviceAccountsError::NoMoveOffered)?;
+        self.keep_signed_in(session).await
+    }
+
+    /// Forgets a move that was offered and not answered.
+    pub async fn move_offered_forget(&self) {
+        *self.move_offered.lock().await = None;
     }
 
     async fn active_pair(&self) -> Result<(Uuid, Deployment), DeviceAccountsError> {
@@ -358,7 +524,7 @@ impl DeviceAccounts {
 
     async fn get(&self, user_id: Uuid) -> Result<Option<DeviceAccount>, DeviceAccountsError> {
         let row: Option<Row> = sqlx::query_as(
-            "SELECT user_id, email, file, signed_in, active, last_active_at
+            "SELECT user_id, email, file, signed_in, local, active, last_active_at
              FROM device_accounts WHERE user_id = $1",
         )
         .bind(user_id.hyphenated())
@@ -393,23 +559,29 @@ impl DeviceAccounts {
         Ok(())
     }
 
-    /// The account's folder: its database and its files' bytes.
-    fn folder_of(&self, user_id: Uuid) -> PathBuf {
-        self.directory
+    /// The account's folder, its database and its files' bytes, as its
+    /// row names it: under the account's own id, or, once a local user
+    /// moved into the account, still under the local user's.
+    async fn folder_of(&self, user_id: Uuid) -> Result<PathBuf, DeviceAccountsError> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT file FROM device_accounts WHERE user_id = $1")
+                .bind(user_id.hyphenated())
+                .fetch_optional(&self.list)
+                .await?;
+        let (file,) = row.ok_or(DeviceAccountsError::UnknownAccount { user_id })?;
+        Ok(self
+            .directory
             .join(ACCOUNTS_DIRECTORY)
-            .join(user_id.hyphenated().to_string())
-    }
-
-    fn path_of(&self, user_id: Uuid) -> PathBuf {
-        self.folder_of(user_id).join(DATABASE_FILE)
+            .join(folder_named_in(&file)))
     }
 
     /// Opens an account's database as a device, bringing it and its
     /// settings up to date, with the folder its files' bytes are in.
     async fn open_file(&self, user_id: Uuid) -> Result<Deployment, DeviceAccountsError> {
-        let files = self.folder_of(user_id).join(FILES_DIRECTORY);
+        let folder = self.folder_of(user_id).await?;
+        let files = folder.join(FILES_DIRECTORY);
         std::fs::create_dir_all(&files)?;
-        let database = Database::open_sqlite_file(&self.path_of(user_id)).await?;
+        let database = Database::open_sqlite_file(&folder.join(DATABASE_FILE)).await?;
         let deployment =
             Deployment::new(database, Role::Device).with_file_store(FileStore::Folder(files));
         device_settings::upgrade(&deployment).await?;
@@ -421,7 +593,7 @@ impl DeviceAccounts {
     /// removal.
     async fn sweep(&self) -> Result<(), DeviceAccountsError> {
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT user_id, email, file, signed_in, active, last_active_at FROM device_accounts",
+            "SELECT user_id, email, file, signed_in, local, active, last_active_at FROM device_accounts",
         )
         .fetch_all(&self.list)
         .await?;
@@ -429,8 +601,8 @@ impl DeviceAccounts {
         let mut named = Vec::new();
         for row in rows {
             let user_id = row.user_id.into_uuid();
-            if row.file == file_name(user_id) && accounts_directory.join(&row.file).exists() {
-                named.push(user_id.hyphenated().to_string());
+            if accounts_directory.join(&row.file).exists() {
+                named.push(folder_named_in(&row.file).to_string());
             } else {
                 log::warn!("account {} has no file; removed from the list", row.email);
                 sqlx::query("DELETE FROM device_accounts WHERE user_id = $1")
@@ -451,13 +623,48 @@ impl DeviceAccounts {
     }
 
     /// Opens and closes every account's file, so a migration that fails
-    /// does so now, on the update, and not on a switch weeks later.
+    /// does so now, on the update, and not on a switch weeks later. A
+    /// local user whose move was cut short after its file changed has
+    /// its row brought up to date here.
     async fn migrate_every_file(&self) -> Result<(), DeviceAccountsError> {
         for account in self.list().await? {
             let deployment = self.open_file(account.user_id).await?;
+            let moved = match account.local {
+                true => self.name_moved_account(&deployment).await,
+                false => Ok(None),
+            };
             deployment.database.close().await;
+            moved?;
         }
         Ok(())
+    }
+
+    /// Makes the local user's row the account's, when the file says its
+    /// records moved to one: the account's id and email, signed in, in
+    /// the same folder. The account's id, if so.
+    async fn name_moved_account(
+        &self,
+        deployment: &Deployment,
+    ) -> Result<Option<Uuid>, DeviceAccountsError> {
+        let Some(Moved {
+            from_user_id,
+            user_id,
+            email,
+        }) = local_users::moved(deployment).await?
+        else {
+            return Ok(None);
+        };
+        sqlx::query(
+            "UPDATE device_accounts SET user_id = $2, email = $3, local = 0, signed_in = 1
+             WHERE user_id = $1",
+        )
+        .bind(from_user_id.hyphenated())
+        .bind(user_id.hyphenated())
+        .bind(email)
+        .execute(&self.list)
+        .await?;
+        local_users::moved_forget(deployment).await?;
+        Ok(Some(user_id))
     }
 
     async fn open_last_active(&self) -> Result<(), DeviceAccountsError> {
@@ -477,9 +684,15 @@ impl DeviceAccounts {
     }
 }
 
-/// The account's database, as its row names it: under `accounts/`.
+/// The database of an account new to the device, as its row names it:
+/// under `accounts/`, in a folder with the user's id.
 fn file_name(user_id: Uuid) -> String {
     format!("{}/{DATABASE_FILE}", user_id.hyphenated())
+}
+
+/// The folder a row's `file` is in.
+fn folder_named_in(file: &str) -> &str {
+    file.split('/').next().unwrap_or(file)
 }
 
 /// Deletes an account's folder with everything in it, or a stray file.
@@ -601,8 +814,18 @@ mod tests {
             .expect("exchanged")
     }
 
+    /// The folder an account new to the device was given.
+    fn folder_made_for(device: &DeviceAccounts, user_id: Uuid) -> PathBuf {
+        device
+            .directory
+            .join(ACCOUNTS_DIRECTORY)
+            .join(user_id.hyphenated().to_string())
+    }
+
     fn file_exists(device: &DeviceAccounts, user_id: Uuid) -> bool {
-        device.path_of(user_id).exists()
+        folder_made_for(device, user_id)
+            .join(DATABASE_FILE)
+            .exists()
     }
 
     #[tokio::test]
@@ -671,10 +894,14 @@ mod tests {
         assert_eq!(removed, Removal::Removed);
         assert!(!file_exists(&device, bob.id));
         assert!(
-            !device.folder_of(bob.id).exists(),
+            !folder_made_for(&device, bob.id).exists(),
             "his folder went, the files' bytes with it"
         );
-        assert!(device.folder_of(alice.id).join(FILES_DIRECTORY).is_dir());
+        assert!(
+            folder_made_for(&device, alice.id)
+                .join(FILES_DIRECTORY)
+                .is_dir()
+        );
         assert_eq!(device.list().await.expect("listed").len(), 1);
         let error = device
             .remove(&transport, bob.id, false)
@@ -688,6 +915,212 @@ mod tests {
             .expect("a signed-out account removes too");
         assert_eq!(removed, Removal::Removed);
         assert!(device.list().await.expect("listed").is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_accounts_skip_makes_a_local_user_once_with_no_sign_out_and_removes_it() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let server = server().await;
+        let transport = InProcess { server: &server };
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        assert!(device.local_user_can_create().await.expect("asked"));
+
+        let local = device
+            .local_user_create("Alice's Laptop")
+            .await
+            .expect("skipped");
+        assert_eq!(device.active_user_id().await, Some(local.id));
+        let listed = device.list().await.expect("listed");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].local && listed[0].signed_in && listed[0].active);
+        assert_eq!(listed[0].email, format!("{}@example.com", local.name));
+        assert!(!device.local_user_can_create().await.expect("asked"));
+        let error = device.local_user_create("again").await.expect_err("once");
+        assert!(matches!(error, DeviceAccountsError::AccountsExist));
+
+        let deployment = device.active().await.expect("the local user's");
+        posts::create(&deployment, &local, "only here", &[])
+            .await
+            .expect("a post");
+        let report = sync::run(&deployment, &transport).await.expect("a sync");
+        assert!(report.local, "nothing is sent");
+        let error = device.sign_out(&transport).await.expect_err("no sign-out");
+        assert!(matches!(error, DeviceAccountsError::LocalUserHasNoSignOut));
+
+        drop(deployment);
+        drop(device);
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened again");
+        assert_eq!(
+            device.active_user_id().await,
+            Some(local.id),
+            "still there after a restart"
+        );
+
+        let removed = device
+            .remove(&transport, local.id, false)
+            .await
+            .expect("removed");
+        assert_eq!(removed, Removal::Removed);
+        assert!(!folder_made_for(&device, local.id).exists());
+        assert!(device.local_user_can_create().await.expect("asked"));
+    }
+
+    #[tokio::test]
+    async fn device_accounts_a_local_user_moves_into_the_account_that_signs_in() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let server = server().await;
+        let transport = InProcess { server: &server };
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        let local = device.local_user_create("Laptop").await.expect("skipped");
+        let post = posts::create(
+            &device.active().await.expect("the local user's"),
+            &local,
+            "made before signing up",
+            &[],
+        )
+        .await
+        .expect("a post");
+        assert!(matches!(
+            device.local_user_move().await,
+            Err(DeviceAccountsError::NoMoveOffered)
+        ));
+
+        let session = signed_up(&server, "alice@example.com").await;
+        let alice_id = session.user.id;
+        let offered = device.sign_in_finished(session).await.expect("finished");
+        assert_eq!(
+            offered,
+            SignInFinished::MoveOffered {
+                email: "alice@example.com".to_string(),
+                items: 1,
+            }
+        );
+        assert_eq!(
+            device.list().await.expect("listed").len(),
+            1,
+            "nothing was done yet"
+        );
+
+        let alice = device.local_user_move().await.expect("moved");
+        assert_eq!(alice.id, alice_id);
+        assert_eq!(device.active_user_id().await, Some(alice.id));
+        let listed = device.list().await.expect("listed");
+        assert_eq!(listed.len(), 1, "the account took the local user's place");
+        assert_eq!(listed[0].user_id, alice.id);
+        assert_eq!(listed[0].email, "alice@example.com");
+        assert!(!listed[0].local && listed[0].signed_in && listed[0].active);
+        assert!(file_exists(&device, local.id), "in the same folder");
+        assert!(!device.local_user_can_create().await.expect("asked"));
+
+        let deployment = device.active().await.expect("alice's");
+        let report = sync::run(&deployment, &transport).await.expect("a sync");
+        assert_eq!(report.pending, 0);
+        let on_server = posts::get(&server, &alice, post.id)
+            .await
+            .expect("on the server");
+        assert_eq!(on_server.post.inserted_at, post.inserted_at);
+
+        drop(deployment);
+        drop(device);
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened again");
+        assert_eq!(device.active_user_id().await, Some(alice.id));
+        assert!(
+            file_exists(&device, local.id),
+            "the sweep keeps a folder its row names"
+        );
+        let hers = posts::list(&device.active().await.expect("alice's"), &alice)
+            .await
+            .expect("her posts");
+        assert_eq!(hers.len(), 1);
+
+        let removed = device
+            .remove(&transport, alice.id, false)
+            .await
+            .expect("removed");
+        assert_eq!(removed, Removal::Removed);
+        assert!(!folder_made_for(&device, local.id).exists());
+    }
+
+    #[tokio::test]
+    async fn device_accounts_a_local_user_kept_separate_stays_beside_the_account() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let server = server().await;
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        let local = device.local_user_create("Laptop").await.expect("skipped");
+        posts::create(
+            &device.active().await.expect("the local user's"),
+            &local,
+            "stays here",
+            &[],
+        )
+        .await
+        .expect("a post");
+
+        let session = signed_up(&server, "alice@example.com").await;
+        let offered = device.sign_in_finished(session).await.expect("finished");
+        assert!(matches!(offered, SignInFinished::MoveOffered { .. }));
+        let alice = device.local_user_keep_separate().await.expect("kept apart");
+        assert_eq!(device.active_user_id().await, Some(alice.id));
+        let listed = device.list().await.expect("listed");
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|account| account.local));
+        let hers = posts::list(&device.active().await.expect("alice's"), &alice)
+            .await
+            .expect("her posts");
+        assert!(hers.is_empty(), "nothing moved");
+
+        let again = signed_up(&server, "alice@example.com").await;
+        let finished = device.sign_in_finished(again).await.expect("finished");
+        assert!(
+            matches!(finished, SignInFinished::SignedIn { .. }),
+            "an account already on the device is not offered a move"
+        );
+
+        let back = device.activate(local.id).await.expect("switched back");
+        assert_eq!(back, local);
+        let theirs = posts::list(&device.active().await.expect("the local user's"), &local)
+            .await
+            .expect("their posts");
+        assert_eq!(theirs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn device_accounts_a_move_cut_short_after_the_file_changed_is_finished_at_start() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let server = server().await;
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        let local = device.local_user_create("Laptop").await.expect("skipped");
+        let session = signed_up(&server, "alice@example.com").await;
+        let alice_id = session.user.id;
+        let deployment = device.active().await.expect("the local user's");
+        local_users::move_to_account(&deployment, session)
+            .await
+            .expect("the file changed, and the app stopped there");
+        drop(deployment);
+        drop(device);
+
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened again");
+        let listed = device.list().await.expect("listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].user_id, alice_id);
+        assert_eq!(listed[0].email, "alice@example.com");
+        assert!(!listed[0].local);
+        assert_eq!(device.active_user_id().await, Some(alice_id));
+        assert!(file_exists(&device, local.id));
     }
 
     #[tokio::test]

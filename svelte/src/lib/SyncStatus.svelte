@@ -1,7 +1,7 @@
 <!-- Inside the app: whether it is working offline, what waits to reach
      the server, the changes it did not keep, and the buttons to sync now
      and to work offline or go online. The web shows nothing: it is the
-     server. -->
+     server; and nothing for a local user, who has nothing to sync with. -->
 <script>
   import { onSynced, syncRun, syncSetOffline, syncStatus } from "./core/index.js";
   import { conflictsIndexUrl } from "./routes.js";
@@ -43,7 +43,7 @@
   load();
 </script>
 
-{#if status && status.signed_in}
+{#if status && status.signed_in && !status.local}
   <div class="flex flex-wrap items-center gap-3 text-sm">
     {#if status.offline}
       <span class="badge badge-warning badge-sm">Working offline</span>

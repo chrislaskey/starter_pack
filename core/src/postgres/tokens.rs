@@ -14,6 +14,7 @@ struct TokenRow {
     token_hash: String,
     code_hash: Option<String>,
     attempts: i32,
+    sent_to: Option<String>,
     inserted_at: DateTime<Utc>,
 }
 
@@ -31,6 +32,7 @@ impl TryFrom<TokenRow> for Token {
             token_hash: row.token_hash,
             code_hash: row.code_hash,
             attempts: i64::from(row.attempts),
+            sent_to: row.sent_to,
             inserted_at: row.inserted_at,
         })
     }
@@ -38,8 +40,8 @@ impl TryFrom<TokenRow> for Token {
 
 pub async fn insert(connection: &mut PgConnection, token: &Token) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO accounts_tokens (id, user_id, context, token_hash, code_hash, attempts, inserted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO accounts_tokens (id, user_id, context, token_hash, code_hash, attempts, sent_to, inserted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(token.id)
     .bind(token.user_id)
@@ -47,6 +49,7 @@ pub async fn insert(connection: &mut PgConnection, token: &Token) -> Result<(), 
     .bind(&token.token_hash)
     .bind(&token.code_hash)
     .bind(i32::try_from(token.attempts).unwrap_or(i32::MAX))
+    .bind(&token.sent_to)
     .bind(token.inserted_at)
     .execute(connection)
     .await?;
@@ -61,7 +64,7 @@ pub async fn get_by_hash(
     made_after: DateTime<Utc>,
 ) -> Result<Option<Token>, sqlx::Error> {
     let row: Option<TokenRow> = sqlx::query_as(
-        "SELECT id, user_id, context, token_hash, code_hash, attempts, inserted_at FROM accounts_tokens
+        "SELECT id, user_id, context, token_hash, code_hash, attempts, sent_to, inserted_at FROM accounts_tokens
          WHERE token_hash = $1 AND context = $2 AND inserted_at > $3",
     )
     .bind(token_hash)

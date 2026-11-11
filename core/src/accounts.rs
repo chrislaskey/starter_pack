@@ -13,7 +13,9 @@
 //! session token for the browser's cookie, or, for a sign-in a device
 //! started in the browser, a device code the device exchanges for its
 //! API token, `sign_in_with_device_code`, with the verifier only it
-//! holds. A sign-out deletes the token.
+//! holds. A sign-out deletes the token. A trial user, `trial_users`,
+//! signs up with `sign_up_from_trial`, which keeps their user and gives
+//! their account the address once its code matches.
 //!
 //! A device never sees a password: it keeps the session the exchange
 //! answered, `keep_signed_in`, as the `signed_in` device setting, and a
@@ -27,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::communities::{self, CommunityError};
 use crate::credentials::{self, CredentialError};
 use crate::database::Transaction;
 use crate::deployment::{Deployment, Role, now};
@@ -55,6 +58,12 @@ pub enum ForgottenPassword {
 
 /// The app's choice, to change in a fork.
 pub const FORGOTTEN_PASSWORD: ForgottenPassword = ForgottenPassword::Reset;
+
+/// The name of the community a person who signs up starts with: every
+/// new user has one of their own, so an app may ask for a current
+/// community everywhere. An ordinary community, theirs to rename or
+/// delete.
+pub const SIGN_UP_COMMUNITY_NAME: &str = "Personal";
 
 /// A second proof of who someone is, asked for after the emailed code
 /// when their account has it. A password is the only one.
@@ -138,12 +147,18 @@ pub enum AccountError {
     CodeDoesNotMatch,
     #[error("That code is wrong or has expired; sign in again")]
     UnknownDeviceCode,
+    #[error("Only a trial signs up this way")]
+    NotATrial,
+    #[error("Trials are full right now; sign up instead")]
+    TrialsFull,
     #[error(transparent)]
     User(#[from] UserError),
     #[error(transparent)]
     AccountUser(#[from] AccountUserError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
+    #[error(transparent)]
+    Community(#[from] CommunityError),
     #[error("Could not send the email; try again")]
     Mail(#[from] MailError),
     #[error(transparent)]
@@ -187,13 +202,13 @@ pub async fn sign_up(
         }
         Some(account) => {
             crate::users::update_name_in(&mut tx, account.id, name).await?;
-            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id, None).await?;
             (mails::sign_in_code(&account.email, &code), pending)
         }
         None => {
             let account = users::create_in(&mut tx, Uuid::now_v7(), email, false).await?;
             crate::users::create_in(&mut tx, account.id, name).await?;
-            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id, None).await?;
             (mails::sign_in_code(&account.email, &code), pending)
         }
     };
@@ -216,11 +231,56 @@ pub async fn sign_in(
     let email = users::checked_email(email)?;
     let mut tx = deployment.begin().await?;
     let (mail, pending) = match users::get_by_email_in(&mut tx, &email).await? {
+        // A trial user's address is made up: nothing to send, nobody to tell
+        Some(account) if account.trial_expires_at.is_some() => (None, tokens::random_hex(32)),
         Some(account) => {
-            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id).await?;
-            (mails::sign_in_code(&account.email, &code), pending)
+            let (pending, code) = tokens::create_sign_in_code(&mut tx, account.id, None).await?;
+            (Some(mails::sign_in_code(&account.email, &code)), pending)
         }
-        None => (mails::no_account(&email), tokens::random_hex(32)),
+        None => (Some(mails::no_account(&email)), tokens::random_hex(32)),
+    };
+    tx.commit().await?;
+    if let Some(mail) = mail {
+        mailer.send(mail).await?;
+    }
+    Ok(CodeSent { pending })
+}
+
+/// A trial user signing up, on the server: a code is mailed to the
+/// address they gave, and when it matches, `sign_in_with_code`, their
+/// account takes that address and is a trial no longer; the user and
+/// everything they made stay as they are. Their name is kept at once.
+/// An address that already has a confirmed account is answered the
+/// same way, and its owner is emailed that they have one; the trial is
+/// unchanged.
+pub async fn sign_up_from_trial(
+    deployment: &Deployment,
+    mailer: &Mailer,
+    trial: &User,
+    email: &str,
+    name: &str,
+) -> Result<CodeSent, AccountError> {
+    if deployment.role != Role::Server {
+        return Err(AccountError::ServerOnly);
+    }
+    crate::users::checked_name(name)?;
+    let email = users::checked_email(email)?;
+    let mut tx = deployment.begin().await?;
+    let account = live_account_in(&mut tx, trial.id).await?;
+    if account.trial_expires_at.is_none() {
+        return Err(AccountError::NotATrial);
+    }
+    let (mail, pending) = match users::get_by_email_in(&mut tx, &email).await? {
+        Some(taken) if taken.confirmed_at.is_some() => {
+            let mail = mails::already_signed_up(&taken.email);
+            (mail, tokens::random_hex(32))
+        }
+        _ => {
+            crate::users::update_name_in(&mut tx, trial.id, name).await?;
+            let (pending, code) =
+                tokens::create_sign_in_code(&mut tx, trial.id, Some(&email)).await?;
+            (mails::sign_in_code(&email, &code), pending)
+        }
     };
     tx.commit().await?;
     mailer.send(mail).await?;
@@ -246,9 +306,8 @@ pub async fn resend_code(
     let account = live_account_in(&mut tx, row.user_id).await?;
     let code = tokens::reset_code(&mut tx, row.id).await?;
     tx.commit().await?;
-    mailer
-        .send(mails::sign_in_code(&account.email, &code))
-        .await?;
+    let sent_to = row.sent_to.unwrap_or(account.email);
+    mailer.send(mails::sign_in_code(&sent_to, &code)).await?;
     Ok(())
 }
 
@@ -267,7 +326,7 @@ pub async fn resend_code_to(
         .ok_or(AccountError::CodeDoesNotMatch)?;
     let account = live_account_in(&mut tx, row.user_id).await?;
     tx.commit().await?;
-    Ok(account.email)
+    Ok(row.sent_to.unwrap_or(account.email))
 }
 
 /// Takes the code that was emailed for the pending sign-in, on the
@@ -521,7 +580,7 @@ pub async fn keep_signed_in(
     crate::users::upsert_in(&mut tx, &session.user).await?;
     let signed_in = SignedIn {
         user_id: session.user.id,
-        token: session.token,
+        token: Some(session.token),
     };
     device_settings::set(&mut tx, SIGNED_IN, &Some(signed_in)).await?;
     tx.commit().await?;
@@ -658,8 +717,8 @@ fn finished<Finished>(step: SignInStep<Finished>) -> Result<Finished, AccountErr
 }
 
 /// The account of the pending sign-in, once the code matches, and the
-/// step still to take: the pending sign-in is deleted and the email
-/// confirmed if it was not yet. A wrong code is counted, and the one
+/// step still to take: the pending sign-in is deleted and, if it was
+/// not yet, the email confirmed and the person's first community made. A wrong code is counted, and the one
 /// that reaches `MAX_CODE_ATTEMPTS` deletes the pending sign-in.
 async fn match_code_in(
     tx: &mut Transaction,
@@ -676,15 +735,49 @@ async fn match_code_in(
     tokens::delete_by_id(tx, row.id).await?;
     let account = live_account_in(tx, row.user_id).await?;
     let first_sign_in = account.confirmed_at.is_none();
-    if first_sign_in {
-        users::confirm_in(tx, account.id).await?;
-    }
+    let account = match row.sent_to.as_deref() {
+        Some(email) => sign_up_trial_in(tx, account, email).await?,
+        None if first_sign_in => {
+            users::confirm_in(tx, account.id).await?;
+            let user = live_user_in(tx, account.id)
+                .await?
+                .ok_or(AccountError::CodeDoesNotMatch)?;
+            communities::create_in(tx, Role::Server, &user, SIGN_UP_COMMUNITY_NAME).await?;
+            account
+        }
+        None => account,
+    };
     let next = match second_factors_in(tx, account.id).await?.first() {
         Some(SecondFactor::Password) => Some(NextStep::Password),
         None if first_sign_in => Some(NextStep::NewPassword),
         None => None,
     };
     Ok((account, next))
+}
+
+/// A trial user's account as the person's own, once the code sent to
+/// their address matched: the address, confirmed, the trial over, their
+/// communities shown to everyone, and the trial's session forgotten
+/// for the one this sign-in ends in. A sign-up that never proved the
+/// same address gives way; a confirmed account with it does not.
+async fn sign_up_trial_in(
+    tx: &mut Transaction,
+    account: AccountUser,
+    email: &str,
+) -> Result<AccountUser, AccountError> {
+    if account.trial_expires_at.is_none() {
+        return Err(AccountError::CodeDoesNotMatch);
+    }
+    if let Some(other) = users::get_by_email_in(tx, email).await? {
+        if other.confirmed_at.is_some() {
+            return Err(AccountError::CodeDoesNotMatch);
+        }
+        users::delete_unconfirmed_in(tx, other.id).await?;
+    }
+    users::sign_up_trial_in(tx, account.id, email).await?;
+    crate::trial_users::show_communities_in(tx, account.id).await?;
+    tokens::delete_of_user(tx, account.id, Context::Session).await?;
+    live_account_in(tx, account.id).await
 }
 
 /// The account of the sign-in whose code matched, once the password

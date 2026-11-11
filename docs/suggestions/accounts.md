@@ -7,6 +7,14 @@ browser, are the smallest flow that puts a real, confirmed user on every
 deployment. The Phoenix app has the rest, and each is a layer on top of
 this one:
 
+- **Local users and trial users**, what
+  `docs/design/accounts-local-and-trial-users.md` left out: moving a
+  local user's records into an account that already has a folder on
+  the device; exporting or backing up a local user's data without
+  signing up; going back from a full user to a local one; files and a
+  picture for trial users, with a quota; extending a trial; ops
+  listing users with their kind; a device with an account whose plan
+  has no sync, which belongs with purchasing.
 - **Magic links.** Phoenix logs a user in by a link sent to the email;
   here the email carries a code. A link is the same pending sign-in
   with the pending token and the code in the URL, and on a phone it

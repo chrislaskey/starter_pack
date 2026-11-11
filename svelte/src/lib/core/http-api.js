@@ -125,10 +125,11 @@ export function accountsSignIn(email) {
  * @param {string} pending
  * @param {string} code the six digits emailed
  * @param {string} [challenge] the device's, when it opened this page
+ * @param {boolean} [keepSignedIn] whether the browser stays signed in after it closes
  * @returns {Promise<SignInFinished | {next: "password" | "new_password", pending: string, can_reset_password: boolean}>}
  */
-export function accountsCode(pending, code, challenge) {
-  return send("POST", "/api/accounts/code", { pending, code, challenge: challenge || null });
+export function accountsCode(pending, code, challenge, keepSignedIn = false) {
+  return send("POST", "/api/accounts/code", { pending, code, challenge: challenge || null, keep_signed_in: keepSignedIn });
 }
 
 /**
@@ -136,10 +137,11 @@ export function accountsCode(pending, code, challenge) {
  * @param {string} pending the one the code answered
  * @param {string} password
  * @param {string} [challenge]
+ * @param {boolean} [keepSignedIn]
  * @returns {Promise<SignInFinished>}
  */
-export function accountsSignInPassword(pending, password, challenge) {
-  return send("POST", "/api/accounts/sign-in/password", { pending, password, challenge: challenge || null });
+export function accountsSignInPassword(pending, password, challenge, keepSignedIn = false) {
+  return send("POST", "/api/accounts/sign-in/password", { pending, password, challenge: challenge || null, keep_signed_in: keepSignedIn });
 }
 
 /**
@@ -148,10 +150,11 @@ export function accountsSignInPassword(pending, password, challenge) {
  * @param {string} pending the one the code answered
  * @param {string} password
  * @param {string} [challenge]
+ * @param {boolean} [keepSignedIn]
  * @returns {Promise<SignInFinished>}
  */
-export function accountsSignInResetPassword(pending, password, challenge) {
-  return send("POST", "/api/accounts/sign-in/reset-password", { pending, password, challenge: challenge || null });
+export function accountsSignInResetPassword(pending, password, challenge, keepSignedIn = false) {
+  return send("POST", "/api/accounts/sign-in/reset-password", { pending, password, challenge: challenge || null, keep_signed_in: keepSignedIn });
 }
 
 /**
@@ -159,10 +162,11 @@ export function accountsSignInResetPassword(pending, password, challenge) {
  * @param {string} pending the one the code answered
  * @param {string | null} password
  * @param {string} [challenge]
+ * @param {boolean} [keepSignedIn]
  * @returns {Promise<SignInFinished>}
  */
-export function accountsSignInNewPassword(pending, password, challenge) {
-  return send("POST", "/api/accounts/sign-in/new-password", { pending, password, challenge: challenge || null });
+export function accountsSignInNewPassword(pending, password, challenge, keepSignedIn = false) {
+  return send("POST", "/api/accounts/sign-in/new-password", { pending, password, challenge: challenge || null, keep_signed_in: keepSignedIn });
 }
 
 /**
@@ -236,6 +240,44 @@ export function deviceAccountsDeactivate() {
 /** @param {string} _userId @param {boolean} _losingChanges */
 export function deviceAccountsRemove(_userId, _losingChanges) {
   return Promise.reject(new Error("no accounts are kept on the web"));
+}
+
+// A trial user: someone using the app on the web without signing up,
+// for a day, see docs/design/accounts-local-and-trial-users.md.
+
+/**
+ * Whether "Try it now" would make a trial user: the server has trials
+ * on and room for one.
+ * @returns {Promise<boolean>}
+ */
+export async function accountsTrialGet() {
+  return (await send("GET", "/api/accounts/trial")).available;
+}
+
+/**
+ * "Try it now": makes a trial user and signs this browser in as them.
+ * A browser already signed in stays as it is.
+ */
+export function accountsTrialCreate() {
+  return send("POST", "/api/accounts/trial");
+}
+
+// Local users are a device's; the web has trial users instead.
+
+export function localUsersCanCreate() {
+  return Promise.resolve(false);
+}
+
+export function localUsersCreate() {
+  return Promise.reject(new Error("only the app has local users"));
+}
+
+export function localUsersMove() {
+  return Promise.reject(new Error("only the app has local users"));
+}
+
+export function localUsersKeepSeparate() {
+  return Promise.reject(new Error("only the app has local users"));
 }
 
 export function postsList() {

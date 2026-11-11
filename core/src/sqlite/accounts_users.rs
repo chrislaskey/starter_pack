@@ -13,6 +13,7 @@ struct AccountUserRow {
     id: Hyphenated,
     email: String,
     confirmed_at: Option<DateTime<Utc>>,
+    trial_expires_at: Option<DateTime<Utc>>,
     inserted_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     deleted_at: Option<DateTime<Utc>>,
@@ -24,6 +25,7 @@ impl From<AccountUserRow> for AccountUser {
             id: row.id.into_uuid(),
             email: row.email,
             confirmed_at: row.confirmed_at,
+            trial_expires_at: row.trial_expires_at,
             inserted_at: row.inserted_at,
             updated_at: row.updated_at,
             deleted_at: row.deleted_at,
@@ -34,7 +36,7 @@ impl From<AccountUserRow> for AccountUser {
 macro_rules! select {
     ($rest:expr) => {
         concat!(
-            "SELECT id, email, confirmed_at, inserted_at, updated_at, deleted_at FROM accounts_users ",
+            "SELECT id, email, confirmed_at, trial_expires_at, inserted_at, updated_at, deleted_at FROM accounts_users ",
             $rest
         )
     };
@@ -70,12 +72,13 @@ pub async fn insert(
     account: &AccountUser,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO accounts_users (id, email, confirmed_at, inserted_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO accounts_users (id, email, confirmed_at, trial_expires_at, inserted_at, updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(account.id.hyphenated())
     .bind(&account.email)
     .bind(account.confirmed_at)
+    .bind(account.trial_expires_at)
     .bind(account.inserted_at)
     .bind(account.updated_at)
     .bind(account.deleted_at)
@@ -106,7 +109,7 @@ pub async fn delete_unconfirmed_before(
     time: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
     let result =
-        sqlx::query("DELETE FROM accounts_users WHERE confirmed_at IS NULL AND inserted_at < $1")
+        sqlx::query("DELETE FROM accounts_users WHERE confirmed_at IS NULL AND trial_expires_at IS NULL AND inserted_at < $1")
             .bind(time)
             .execute(connection)
             .await?;
@@ -121,4 +124,39 @@ pub async fn delete_without_user(connection: &mut SqliteConnection) -> Result<u6
             .execute(connection)
             .await?;
     Ok(result.rows_affected())
+}
+
+/// Makes a trial user's account the person's own: the email they
+/// proved, now, and no longer a trial.
+pub async fn set_signed_up(
+    connection: &mut SqliteConnection,
+    id: Uuid,
+    email: &str,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE accounts_users
+         SET email = $2, confirmed_at = $3, trial_expires_at = NULL, updated_at = $3 WHERE id = $1",
+    )
+    .bind(id.hyphenated())
+    .bind(email)
+    .bind(now)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Deletes an account outright, with its credentials and tokens: an
+/// unconfirmed sign-up whose email someone else then proved. Its
+/// `app_users` row goes first.
+pub async fn delete_row(connection: &mut SqliteConnection, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM app_users WHERE id = $1")
+        .bind(id.hyphenated())
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("DELETE FROM accounts_users WHERE id = $1")
+        .bind(id.hyphenated())
+        .execute(connection)
+        .await?;
+    Ok(())
 }

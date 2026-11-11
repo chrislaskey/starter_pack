@@ -99,6 +99,9 @@ pub struct Token {
     pub code_hash: Option<String>,
     /// Wrong codes so far, for a pending sign-in.
     pub attempts: i64,
+    /// The address the code went to when it is not yet the account's:
+    /// a trial user signing up, see `accounts::sign_up_from_trial`.
+    pub sent_to: Option<String>,
     pub inserted_at: DateTime<Utc>,
 }
 
@@ -110,16 +113,18 @@ pub(crate) async fn create(
     context: Context,
 ) -> Result<String, sqlx::Error> {
     let token = random_hex(32);
-    insert(tx, user_id, context, hash(&token), None).await?;
+    insert(tx, user_id, context, hash(&token), None, None).await?;
     Ok(token)
 }
 
 /// Makes the user's pending sign-in, replacing any earlier one, and
 /// returns the pending token the page holds and the six-digit code to
-/// email them, both kept as hashes.
+/// email them, both kept as hashes; with the address the code goes to
+/// when it is not the account's own.
 pub(crate) async fn create_sign_in_code(
     tx: &mut Transaction,
     user_id: Uuid,
+    sent_to: Option<&str>,
 ) -> Result<(String, String), sqlx::Error> {
     delete_of_user(tx, user_id, Context::SignInCode).await?;
     let pending = random_hex(32);
@@ -130,6 +135,7 @@ pub(crate) async fn create_sign_in_code(
         Context::SignInCode,
         hash(&pending),
         Some(hash(&code)),
+        sent_to,
     )
     .await?;
     Ok((pending, code))
@@ -160,6 +166,7 @@ pub(crate) async fn create_device_code(
         user_id,
         Context::DeviceCode,
         device_code_hash(&code, challenge),
+        None,
         None,
     )
     .await?;
@@ -257,6 +264,14 @@ pub(crate) fn random_hex(bytes: usize) -> String {
     buffer.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Random letters and digits, for a name a person may read.
+pub(crate) fn random_letters_and_digits(length: usize) -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    (0..length)
+        .map(|_| ALPHABET[rand::random_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
 /// Six digits, leading zeros included.
 fn random_code() -> String {
     format!("{:06}", rand::random_range(0..1_000_000u32))
@@ -268,6 +283,7 @@ async fn insert(
     context: Context,
     token_hash: String,
     code_hash: Option<String>,
+    sent_to: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let row = Token {
         id: Uuid::now_v7(),
@@ -276,6 +292,7 @@ async fn insert(
         token_hash,
         code_hash,
         attempts: 0,
+        sent_to: sent_to.map(str::to_string),
         inserted_at: now(),
     };
     sql!(&mut *tx, tokens::insert(&row))
@@ -342,7 +359,7 @@ mod tests {
             let session = create(&mut tx, alice.id, Context::Session)
                 .await
                 .expect("a session token");
-            let (pending, code) = create_sign_in_code(&mut tx, alice.id)
+            let (pending, code) = create_sign_in_code(&mut tx, alice.id, None)
                 .await
                 .expect("a pending sign-in");
             let device_code = create_device_code(&mut tx, alice.id, "the challenge")

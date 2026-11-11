@@ -3,7 +3,8 @@
 //! `memberships`, and a post is in the communities its owner chose, see
 //! `posts_communities`. Any user creates a community and joins it as
 //! they do; every user sees every community, so a device can list them
-//! and join. Any live member renames or deletes one, `member` being the
+//! and join, but a trial user's, which nobody else sees or joins, see
+//! `trial_users`. Any live member renames or deletes one, `member` being the
 //! only role yet. A delete takes every membership in the community along,
 //! and with them the posts' community rows, all at the one moment.
 
@@ -71,14 +72,15 @@ impl From<serde_json::Error> for CommunityError {
     }
 }
 
-/// Every community, by name, each with the user's membership when they
-/// are in it.
+/// Every community the user sees, by name, each with their membership
+/// when they are in it: all of them but a trial user's, which only
+/// that trial user sees, see `trial_users`.
 pub async fn list(
     deployment: &Deployment,
     user: &User,
 ) -> Result<Vec<CommunityAndMembership>, CommunityError> {
     let mut tx = deployment.begin().await?;
-    let communities = sql!(&mut tx, communities::list_live())?;
+    let communities = sql!(&mut tx, communities::list_live(user.id))?;
     let memberships = sql!(&mut tx, memberships::list_live_of_user(user.id))?;
     tx.commit().await?;
     Ok(communities
@@ -102,6 +104,9 @@ pub async fn get(
 ) -> Result<CommunityAndMembership, CommunityError> {
     let mut tx = deployment.begin().await?;
     let community = get_live(&mut tx, id).await?;
+    if sql!(&mut tx, trial_users::community_is_hidden_from(id, user.id))? {
+        return Err(CommunityError::NotFound { id });
+    }
     let membership = memberships::get_live_in(&mut tx, user.id, id).await?;
     tx.commit().await?;
     Ok(CommunityAndMembership {
@@ -116,6 +121,20 @@ pub async fn create(
     user: &User,
     name: &str,
 ) -> Result<Community, CommunityError> {
+    let mut tx = deployment.begin().await?;
+    let community = create_in(&mut tx, deployment.role, user, name).await?;
+    tx.commit().await?;
+    Ok(community)
+}
+
+/// `create` in the caller's transaction, for the community a new user
+/// starts with, see `accounts`.
+pub(crate) async fn create_in(
+    tx: &mut Transaction,
+    role: Role,
+    user: &User,
+    name: &str,
+) -> Result<Community, CommunityError> {
     let name = checked_name(name)?;
     let event = Event::create(
         TABLE,
@@ -123,12 +142,8 @@ pub async fn create(
         fields(json!({ "name": name })),
         now(),
     );
-    let mut tx = deployment.begin().await?;
-    let community = apply_in(&mut tx, deployment.role, user, &event)
-        .await?
-        .community()?;
-    memberships::join_in(&mut tx, deployment.role, user, community.id).await?;
-    tx.commit().await?;
+    let community = apply_in(tx, role, user, &event).await?.community()?;
+    memberships::join_in(tx, role, user, community.id).await?;
     Ok(community)
 }
 
@@ -221,10 +236,14 @@ pub(crate) async fn delete_row(tx: &mut Transaction, id: Uuid) -> Result<(), Com
 /// A page of the rows the server wrote after the cursor, deleted or not.
 pub(crate) async fn list_synced_after(
     tx: &mut Transaction,
+    user: &User,
     after: &Cursor,
     limit: usize,
 ) -> Result<Vec<Community>, CommunityError> {
-    Ok(sql!(tx, communities::list_synced_after(after, limit))?)
+    Ok(sql!(
+        tx,
+        communities::list_synced_after(user.id, after, limit)
+    )?)
 }
 
 pub(crate) async fn list_by_ids(
@@ -324,7 +343,7 @@ pub(crate) async fn apply_in(
             let blank = Community {
                 id: event.row_id,
                 name: String::new(),
-                inserted_at: now,
+                inserted_at: event.row_inserted_at(now),
                 updated_at: now,
                 version,
                 last_synced_at,

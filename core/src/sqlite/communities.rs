@@ -45,12 +45,30 @@ macro_rules! select {
     };
 }
 
-/// Every community not deleted, by name.
-pub async fn list_live(connection: &mut SqliteConnection) -> Result<Vec<Community>, sqlx::Error> {
-    let rows: Vec<CommunityRow> =
-        sqlx::query_as(select!("WHERE deleted_at IS NULL ORDER BY name, id"))
-            .fetch_all(connection)
-            .await?;
+/// Every community the user, `$1`, sees: all of them but a trial
+/// user's, which only that trial user sees, see `trial_users`.
+macro_rules! visible_to {
+    () => {
+        "id NOT IN (
+            SELECT uc.community_id FROM app_users_communities uc
+            JOIN accounts_users a ON a.id = uc.user_id
+            WHERE a.trial_expires_at IS NOT NULL AND uc.user_id != $1)"
+    };
+}
+
+/// Every community the user sees, not deleted, by name.
+pub async fn list_live(
+    connection: &mut SqliteConnection,
+    user_id: Uuid,
+) -> Result<Vec<Community>, sqlx::Error> {
+    let rows: Vec<CommunityRow> = sqlx::query_as(select!(
+        "WHERE deleted_at IS NULL AND ",
+        visible_to!(),
+        " ORDER BY name, id"
+    ))
+    .bind(user_id.hyphenated())
+    .fetch_all(connection)
+    .await?;
     Ok(rows.into_iter().map(Community::from).collect())
 }
 
@@ -84,16 +102,20 @@ pub async fn get(
 }
 
 /// The rows the server wrote after the cursor, in cursor order, deleted
-/// or not: a page of a pull. Every user sees every community.
+/// or not: a page of a pull, of the communities the user sees.
 pub async fn list_synced_after(
     connection: &mut SqliteConnection,
+    user_id: Uuid,
     after: &Cursor,
     limit: usize,
 ) -> Result<Vec<Community>, sqlx::Error> {
     let rows: Vec<CommunityRow> = sqlx::query_as(select!(
-        "WHERE last_synced_at IS NOT NULL AND (last_synced_at, id) > ($1, $2)
-         ORDER BY last_synced_at, id LIMIT $3"
+        "WHERE ",
+        visible_to!(),
+        " AND last_synced_at IS NOT NULL AND (last_synced_at, id) > ($2, $3)
+         ORDER BY last_synced_at, id LIMIT $4"
     ))
+    .bind(user_id.hyphenated())
     .bind(after.last_synced_at)
     .bind(after.id.hyphenated())
     .bind(i64::try_from(limit).unwrap_or(i64::MAX))

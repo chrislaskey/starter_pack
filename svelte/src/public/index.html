@@ -19,8 +19,18 @@
         </p>
         <p class="mt-8 flex flex-wrap gap-4">
           <a href="/accounts/sign-up" class="btn btn-primary">Sign up</a>
+          <a href="/accounts/trial" class="btn public-trial">Try it now</a>
           <a href="/about" class="btn btn-ghost">How it works</a>
         </p>
+        <!-- "Try it now" shows once the server says a trial can start (docs/design/accounts-local-and-trial-users.md) -->
+        <script>
+          fetch("/api/accounts/trial")
+            .then((response) => response.json())
+            .then((trial) => {
+              if (trial.available) document.documentElement.dataset.trialAvailable = "true";
+            })
+            .catch(() => {});
+        </script>
       </section>
       <section class="grid gap-8 sm:grid-cols-3">
         <div>

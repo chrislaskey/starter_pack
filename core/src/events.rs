@@ -88,6 +88,13 @@ impl Event {
         }
     }
 
+    /// When the row a create makes was made: the clock of the device
+    /// the person made it on, so a row made offline keeps its time, or
+    /// this deployment's `now` when the device's clock is ahead of it.
+    pub fn row_inserted_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        self.made_at.min(now)
+    }
+
     pub fn update(
         table: &str,
         row_id: Uuid,
@@ -326,8 +333,13 @@ pub async fn record(
     sql!(tx, events::insert(&stored))
 }
 
-/// Queues an event a device applied, for the next push.
+/// Queues an event a device applied, for the next push. A local user's
+/// is not queued: they have no server to push to, and their rows are
+/// queued as creates if they ever move to an account, see `local_users`.
 pub async fn queue(tx: &mut Transaction, user_id: Uuid, event: &Event) -> Result<(), sqlx::Error> {
+    if crate::local_users::is_signed_in_in(tx).await? {
+        return Ok(());
+    }
     let stored = StoredEvent {
         event: event.clone(),
         user_id,

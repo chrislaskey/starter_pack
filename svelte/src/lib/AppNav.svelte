@@ -2,8 +2,12 @@
      other apps (support, the forum, and ops for staff on the web), who
      is signed in, by their email, a link to their account, with Sign
      out, or Sign in and Sign up on the web and Accounts in the app, the
-     theme menu, and inside the app the sync status. -->
+     theme menu, and inside the app the sync status. A local user has no
+     email and no sign-out: "On this device only", to their profile. A
+     trial user sees the trial's banner above every page, and has no
+     sign-out either, having nothing to sign back in with. -->
 <script>
+  import AccountsTrialBanner from "../accounts/AccountsTrialBanner.svelte";
   import CurrentCommunityMenu from "./CurrentCommunityMenu.svelte";
   import SyncStatus from "./SyncStatus.svelte";
   import ThemeMenu from "./ThemeMenu.svelte";
@@ -50,6 +54,9 @@
   }
 </script>
 
+{#if currentUser?.kind === "trial" && currentUser.trial_expires_at}
+  <AccountsTrialBanner trialExpiresAt={currentUser.trial_expires_at} />
+{/if}
 <nav class="flex flex-wrap items-center gap-4">
   <a href={homeUrl()} class="link">Home</a>
   {#if currentUser}
@@ -67,11 +74,19 @@
   {/if}
   <span class="grow"></span>
   {#if currentUser}
-    <a href={accountsSettingsUrl()} class="link text-sm">{currentUser.email}</a>
+    {#if currentUser.kind === "local"}
+      <a href={profileEditUrl()} class="link text-sm">On this device only</a>
+    {:else if currentUser.kind === "trial"}
+      <a href={accountsSignUpUrl("")} class="link text-sm">Trial</a>
+    {:else}
+      <a href={accountsSettingsUrl()} class="link text-sm">{currentUser.email}</a>
+    {/if}
     {#if hasDeviceAccounts}
       <a href={accountsIndexUrl()} class="link text-sm">Accounts</a>
     {/if}
-    <button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={busy}>Sign out</button>
+    {#if currentUser.kind === "full"}
+      <button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={busy}>Sign out</button>
+    {/if}
   {:else if hasDeviceAccounts}
     <a href={accountsIndexUrl()} class="link">Accounts</a>
   {:else}

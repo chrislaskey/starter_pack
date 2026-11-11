@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use app_core::deployment::Deployment;
-use app_core::users::{self, User, UserError};
+use app_core::users::{self, Kind, User, UserError};
 
 use crate::device_accounts::{DeviceAccounts, DeviceAccountsError};
 use crate::sync;
@@ -21,12 +21,14 @@ pub async fn signed_in(device: &DeviceAccounts) -> Result<(Deployment, User), St
 
 /// The user signed in as their own pages show them: with the email of
 /// their account, which the device keeps in its list of accounts and
-/// their synced row does not carry.
+/// their synced row does not carry, and whether they are a local user,
+/// on this device only.
 #[derive(Serialize)]
 pub struct CurrentUserShown {
     #[serde(flatten)]
     pub user: User,
     pub email: String,
+    pub kind: Kind,
 }
 
 /// The user signed in, or none when nobody is; an error only when the
@@ -66,10 +68,17 @@ pub async fn current_user_update(
 
 async fn shown(device: &DeviceAccounts, user: User) -> Result<CurrentUserShown, String> {
     let accounts = device.list().await.map_err(|error| error.to_string())?;
-    let email = accounts
+    let account = accounts
         .into_iter()
         .find(|account| account.user_id == user.id)
-        .map(|account| account.email)
         .ok_or("The signed-in account is not in this device's list")?;
-    Ok(CurrentUserShown { user, email })
+    let kind = match account.local {
+        true => Kind::Local,
+        false => Kind::Full,
+    };
+    Ok(CurrentUserShown {
+        user,
+        email: account.email,
+        kind,
+    })
 }

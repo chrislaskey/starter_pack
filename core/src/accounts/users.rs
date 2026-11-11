@@ -25,6 +25,9 @@ pub struct AccountUser {
     /// When the person first proved their email with a code sent to it;
     /// none until then, and such an account has no token.
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// When a trial user's 24 hours end; none for every other account,
+    /// and again once a trial signs up, see `crate::trial_users`.
+    pub trial_expires_at: Option<DateTime<Utc>>,
     pub inserted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -57,11 +60,32 @@ pub(crate) async fn create_in(
     email: &str,
     confirmed: bool,
 ) -> Result<AccountUser, AccountUserError> {
+    create_with_trial_in(tx, id, email, confirmed, None).await
+}
+
+/// A trial user's account: unconfirmed, with when its trial ends.
+pub(crate) async fn create_trial_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    email: &str,
+    trial_expires_at: DateTime<Utc>,
+) -> Result<AccountUser, AccountUserError> {
+    create_with_trial_in(tx, id, email, false, Some(trial_expires_at)).await
+}
+
+async fn create_with_trial_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    email: &str,
+    confirmed: bool,
+    trial_expires_at: Option<DateTime<Utc>>,
+) -> Result<AccountUser, AccountUserError> {
     let now = now();
     let account = AccountUser {
         id,
         email: checked_email(email)?,
         confirmed_at: confirmed.then_some(now),
+        trial_expires_at,
         inserted_at: now,
         updated_at: now,
         deleted_at: None,
@@ -73,6 +97,25 @@ pub(crate) async fn create_in(
 /// Marks the account's email as proved, now.
 pub(crate) async fn confirm_in(tx: &mut Transaction, id: Uuid) -> Result<(), AccountUserError> {
     Ok(sql!(&mut *tx, accounts_users::set_confirmed_at(id, now()))?)
+}
+
+/// Makes a trial user's account the person's own, with the email they
+/// just proved: confirmed, and no longer a trial.
+pub(crate) async fn sign_up_trial_in(
+    tx: &mut Transaction,
+    id: Uuid,
+    email: &str,
+) -> Result<(), AccountUserError> {
+    sql!(&mut *tx, accounts_users::set_signed_up(id, email, now())).map_err(email_taken)
+}
+
+/// Removes an account and its user outright: a sign-up that never
+/// proved the email someone else then did.
+pub(crate) async fn delete_unconfirmed_in(
+    tx: &mut Transaction,
+    id: Uuid,
+) -> Result<(), AccountUserError> {
+    Ok(sql!(&mut *tx, accounts_users::delete_row(id))?)
 }
 
 /// The live account by its id.

@@ -280,6 +280,13 @@ async fn apply_in(
                 Some(community) if community.deleted_at.is_none() => {}
                 _ => return rejected(event, "unknown_community", None),
             }
+            // A trial user and anyone else are never in one community
+            if sql!(
+                &mut *tx,
+                trial_users::join_is_walled_off(user.id, community_id)
+            )? {
+                return rejected(event, "unknown_community", None);
+            }
             match sql!(
                 &mut *tx,
                 memberships::get_by_user_and_community(user.id, community_id)
@@ -300,7 +307,7 @@ async fn apply_in(
                         user_id: user.id,
                         community_id,
                         role: ROLE_MEMBER.to_string(),
-                        inserted_at: now,
+                        inserted_at: event.row_inserted_at(now),
                         updated_at: now,
                         version,
                         last_synced_at,

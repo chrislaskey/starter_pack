@@ -32,7 +32,7 @@ use crate::communities::{self, Community, CommunityError};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, now};
 use crate::device_settings::{self, DeviceSettingsError, WORK_OFFLINE};
-use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus};
+use crate::events::{self, Answer, AnswerStatus, Event, EventKind, EventStatus, StoredEvent};
 use crate::files::{self, File, FileError, FileUpload, FileUploadNew};
 use crate::memberships::{self, Membership, MembershipError};
 use crate::posts::{self, Post, PostError};
@@ -249,7 +249,7 @@ pub async fn pull(
             .map(SyncedRow::User),
     );
     rows.extend(
-        communities::list_synced_after(&mut tx, &after, limit)
+        communities::list_synced_after(&mut tx, user, &after, limit)
             .await?
             .into_iter()
             .map(SyncedRow::Community),
@@ -1067,6 +1067,10 @@ struct DeviceCodeExchange<'a> {
 pub struct Report {
     /// Nobody is signed in on the device: nothing was sent or asked for.
     pub signed_out: bool,
+    /// The user is a local user: nothing was sent or asked for, and
+    /// nothing ever is, see `local_users`.
+    #[serde(default)]
+    pub local: bool,
     /// The device is working offline: nothing was sent or asked for.
     pub offline: bool,
     /// Events the server applied.
@@ -1100,11 +1104,18 @@ pub struct Report {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub signed_in: bool,
+    /// The user signed in is a local user, who never syncs, see
+    /// `local_users`.
+    #[serde(default)]
+    pub local: bool,
     pub offline: bool,
     pub pending: i64,
     pub conflicts: i64,
     pub cursor: Option<Cursor>,
 }
+
+/// The most events a device sends in one push request.
+pub const PUSH_BATCH: usize = 500;
 
 /// One sync on a device, as the user signed in and with the device's
 /// token: ask the server which waiting files' bytes it has, push the
@@ -1125,6 +1136,10 @@ pub async fn run<T: Transport>(
     let before = status(deployment).await?;
     if !before.signed_in {
         report.signed_out = true;
+        return Ok(report);
+    }
+    if before.local {
+        report.local = true;
         return Ok(report);
     }
     if before.offline {
@@ -1163,6 +1178,7 @@ pub async fn status(deployment: &Deployment) -> Result<Status, SyncError> {
     let signed_in: Option<users::SignedIn> =
         device_settings::get(&mut tx, device_settings::SIGNED_IN).await?;
     let status = Status {
+        local: signed_in.as_ref().is_some_and(|user| user.token.is_none()),
         signed_in: signed_in.is_some(),
         offline: device_settings::get(&mut tx, WORK_OFFLINE).await?,
         pending: events::count(&mut tx, EventStatus::Pending).await?,
@@ -1183,7 +1199,10 @@ pub async fn set_offline(deployment: &Deployment, offline: bool) -> Result<(), S
 }
 
 /// Pushes the pending events and applies the answers, leaving out the
-/// events of the files held back, whose bytes the server does not have.
+/// events of the files held back, whose bytes the server does not have:
+/// oldest first, `PUSH_BATCH` a request, each request's answers applied
+/// before the next is sent, so a push cut short has kept what the
+/// server already answered.
 async fn push_pending<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -1192,16 +1211,42 @@ async fn push_pending<T: Transport>(
     held_back: &BTreeSet<Uuid>,
     report: &mut Report,
 ) -> Result<(), SyncError> {
-    let mut tx = deployment.begin().await?;
-    let mut pending = events::pending(&mut tx).await?;
-    tx.commit().await?;
-    pending.retain(|stored| {
-        stored.event.table != files::TABLE || !held_back.contains(&stored.event.row_id)
-    });
-    if pending.is_empty() {
-        return Ok(());
+    // What waits as the push begins; a change made while it runs waits
+    // for the next sync
+    let mut waiting: Option<BTreeSet<Uuid>> = None;
+    loop {
+        // Read again each time: the answers to one batch can remove
+        // events that were waiting behind it
+        let mut tx = deployment.begin().await?;
+        let mut batch = events::pending(&mut tx).await?;
+        tx.commit().await?;
+        batch.retain(|stored| {
+            stored.event.table != files::TABLE || !held_back.contains(&stored.event.row_id)
+        });
+        let waiting =
+            waiting.get_or_insert_with(|| batch.iter().map(|stored| stored.event.id).collect());
+        batch.retain(|stored| waiting.contains(&stored.event.id));
+        batch.truncate(PUSH_BATCH);
+        if batch.is_empty() {
+            return Ok(());
+        }
+        for stored in &batch {
+            waiting.remove(&stored.event.id);
+        }
+        push_batch(deployment, transport, token, user, &batch, report).await?;
     }
+}
 
+/// Sends one request of pending events and applies its answers, in one
+/// transaction.
+async fn push_batch<T: Transport>(
+    deployment: &Deployment,
+    transport: &T,
+    token: Option<&str>,
+    user: &User,
+    pending: &[StoredEvent],
+    report: &mut Report,
+) -> Result<(), SyncError> {
     let request = PushRequest {
         events: pending.iter().map(|stored| stored.event.clone()).collect(),
     };
@@ -1475,10 +1520,36 @@ pub(crate) mod tests {
     pub(crate) use crate::users::tests::device_of;
     use crate::{communities, conflicts, memberships, posts, posts_communities, purge};
 
-    /// A user signed up on the server, with a token for their devices.
+    /// A user signed up on the server, with a token for their devices,
+    /// and without the community a sign-up starts with, so a test
+    /// counts only the rows it makes.
     pub(crate) async fn user_with_token(server: &Deployment, email: &str) -> (User, String) {
-        let session = accounts::tests::signed_up_for_a_device(server, email).await;
+        let session = user_with_token_and_first_community(server, email).await;
+        let memberships = memberships::list_mine(server, &session.user)
+            .await
+            .expect("the memberships");
+        let mut tx = server.begin().await.expect("a transaction");
+        for membership in memberships {
+            communities::delete_row(&mut tx, membership.community_id)
+                .await
+                .expect("removed");
+            events::delete_of_row(&mut tx, communities::TABLE, membership.community_id)
+                .await
+                .expect("removed");
+            events::delete_of_row(&mut tx, memberships::TABLE, membership.id)
+                .await
+                .expect("removed");
+        }
+        tx.commit().await.expect("committed");
         (session.user, session.token)
+    }
+
+    /// A user as a sign-up leaves them, with a token for their devices.
+    async fn user_with_token_and_first_community(
+        server: &Deployment,
+        email: &str,
+    ) -> accounts::Session {
+        accounts::tests::signed_up_for_a_device(server, email).await
     }
 
     async fn sync(device: &Deployment, server: &Deployment) -> Report {
@@ -1532,6 +1603,28 @@ pub(crate) mod tests {
             );
             assert_eq!(users::get(&b, alice.id).await.expect("alice on b"), alice);
             assert!(status(&b).await.expect("the status").cursor.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_sign_up_starts_with_a_personal_community_which_its_device_pulls() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let session = user_with_token_and_first_community(&server, "alice@example.com").await;
+            let (alice, token) = (session.user, session.token);
+            let on_server = communities::list(&server, &alice).await.expect("listed");
+            assert_eq!(on_server.len(), 1);
+            assert_eq!(
+                on_server[0].community.name,
+                accounts::SIGN_UP_COMMUNITY_NAME
+            );
+            assert!(on_server[0].membership.is_some(), "and she is in it");
+
+            let a = device_of(&alice, &token).await;
+            sync(&a, &server).await;
+            let on_device = communities::list(&a, &alice).await.expect("listed");
+            assert_eq!(on_device, on_server);
         })
         .await;
     }
@@ -1795,6 +1888,163 @@ pub(crate) mod tests {
         ) -> Result<(), SyncError> {
             self.server.files_download(token, id, path).await
         }
+    }
+
+    /// A server that keeps the size of each push it is sent, and whose
+    /// connection drops at the request numbered `fails_at`, from 1.
+    struct PushCounted<'a> {
+        server: InProcess<'a>,
+        sizes: std::sync::Mutex<Vec<usize>>,
+        fails_at: Option<usize>,
+    }
+
+    impl Transport for PushCounted<'_> {
+        async fn push(
+            &self,
+            token: Option<&str>,
+            request: PushRequest,
+        ) -> Result<PushResponse, SyncError> {
+            let number = {
+                let mut sizes = self.sizes.lock().expect("the lock");
+                sizes.push(request.events.len());
+                sizes.len()
+            };
+            if self.fails_at == Some(number) {
+                return Err(SyncError::Transport("the connection dropped".to_string()));
+            }
+            self.server.push(token, request).await
+        }
+
+        async fn pull(&self, token: Option<&str>, request: PullRequest) -> Result<Page, SyncError> {
+            self.server.pull(token, request).await
+        }
+
+        async fn backfill(
+            &self,
+            token: Option<&str>,
+            request: BackfillRequest,
+        ) -> Result<Page, SyncError> {
+            self.server.backfill(token, request).await
+        }
+
+        async fn sign_in_with_device_code(
+            &self,
+            code: &str,
+            verifier: &str,
+        ) -> Result<Session, SyncError> {
+            self.server.sign_in_with_device_code(code, verifier).await
+        }
+
+        async fn sign_out(&self, token: &str) -> Result<(), SyncError> {
+            self.server.sign_out(token).await
+        }
+
+        async fn files_create_upload(
+            &self,
+            token: Option<&str>,
+            request: FileUploadNew,
+        ) -> Result<FileUpload, SyncError> {
+            self.server.files_create_upload(token, request).await
+        }
+
+        async fn files_upload(
+            &self,
+            token: Option<&str>,
+            upload: &FileUpload,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_upload(token, upload, path).await
+        }
+
+        async fn files_download(
+            &self,
+            token: Option<&str>,
+            id: Uuid,
+            path: &Path,
+        ) -> Result<(), SyncError> {
+            self.server.files_download(token, id, path).await
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_a_push_goes_in_batches_and_one_cut_short_keeps_what_was_answered() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let count = 2 * PUSH_BATCH + 200;
+            for number in 0..count {
+                posts::create(&a, &alice, &format!("post {number}"), &[])
+                    .await
+                    .expect("a post");
+            }
+
+            let dropped = PushCounted {
+                server: InProcess { server: &server },
+                sizes: std::sync::Mutex::new(Vec::new()),
+                fails_at: Some(2),
+            };
+            let report = run(&a, &dropped).await.expect("a sync");
+            assert!(report.push_error.is_some());
+            assert_eq!(report.pushed, PUSH_BATCH, "the first request's");
+            assert_eq!(report.pending as usize, count - PUSH_BATCH);
+            assert_eq!(bodies(&server, &alice).await.len(), PUSH_BATCH);
+
+            let counted = PushCounted {
+                server: InProcess { server: &server },
+                sizes: std::sync::Mutex::new(Vec::new()),
+                fails_at: None,
+            };
+            let report = run(&a, &counted).await.expect("a sync");
+            assert_eq!(
+                *counted.sizes.lock().expect("the lock"),
+                vec![PUSH_BATCH, 200]
+            );
+            assert_eq!(report.pending, 0);
+            assert_eq!(bodies(&server, &alice).await.len(), count);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_row_made_offline_keeps_the_time_it_was_made() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, _token) = user_with_token(&server, "alice@example.com").await;
+            let last_week = now() - Duration::days(7);
+            let offline = Event::create(
+                posts::TABLE,
+                Uuid::now_v7(),
+                events::Fields::from_iter([("body".to_string(), json!("written offline"))]),
+                last_week,
+            );
+            posts::apply_event(&server, &alice, &offline)
+                .await
+                .expect("applied");
+            let post = posts::get(&server, &alice, offline.row_id)
+                .await
+                .expect("the post")
+                .post;
+            assert_eq!(post.inserted_at, last_week);
+            assert!(post.updated_at > last_week, "the server's own clock");
+
+            let before = now();
+            let ahead = Event::create(
+                posts::TABLE,
+                Uuid::now_v7(),
+                events::Fields::from_iter([("body".to_string(), json!("a clock set ahead"))]),
+                now() + Duration::days(7),
+            );
+            posts::apply_event(&server, &alice, &ahead)
+                .await
+                .expect("applied");
+            let post = posts::get(&server, &alice, ahead.row_id)
+                .await
+                .expect("the post")
+                .post;
+            assert!(post.inserted_at >= before && post.inserted_at <= now());
+        })
+        .await;
     }
 
     #[tokio::test]

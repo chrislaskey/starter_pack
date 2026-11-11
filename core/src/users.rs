@@ -49,11 +49,28 @@ pub struct User {
 
 /// Who is signed in on a device, and the token the device sends the
 /// server for them: the `signed_in` device setting, written by a
-/// sign-in and cleared by a sign-out, see `accounts`.
+/// sign-in and cleared by a sign-out, see `accounts`. A local user has
+/// no token, having no account on the server, see `local_users`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedIn {
     pub user_id: Uuid,
-    pub token: String,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// What kind of user someone is, for the few places that must tell:
+/// the pages read it from the current user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Signed up, with an account on the server.
+    Full,
+    /// Made on a desktop or phone without signing up, on that device
+    /// only, see `local_users`.
+    Local,
+    /// Made on the web without signing up, and deleted soon after
+    /// unless they sign up, see `trial_users`.
+    Trial,
 }
 
 #[derive(Debug, Error)]
@@ -70,6 +87,8 @@ pub enum UserError {
     UnknownToken,
     #[error("Nobody is signed in")]
     NotSignedIn,
+    #[error("This needs an account: sign up or sign in first")]
+    LocalUser,
     #[error("the change was rejected: {0}")]
     Rejected(String),
     #[error("{0}")]
@@ -371,21 +390,28 @@ pub async fn get_by_token(deployment: &Deployment, token: &str) -> Result<User, 
     user.ok_or(UserError::UnknownToken)
 }
 
-/// The user signed in on this device, a device setting.
+/// The user signed in on this device, a device setting; a local user
+/// too.
 pub async fn signed_in(deployment: &Deployment) -> Result<User, UserError> {
-    let (user, _token) = signed_in_with_token(deployment).await?;
-    Ok(user)
-}
-
-/// The user signed in on this device, and the token the device sends
-/// the server for them.
-pub async fn signed_in_with_token(deployment: &Deployment) -> Result<(User, String), UserError> {
     let mut tx = deployment.begin().await?;
     let signed_in: Option<SignedIn> = device_settings::get(&mut tx, SIGNED_IN).await?;
     let signed_in = signed_in.ok_or(UserError::NotSignedIn)?;
     let user = get_live(&mut tx, signed_in.user_id).await?;
     tx.commit().await?;
-    Ok((user, signed_in.token))
+    Ok(user)
+}
+
+/// The user signed in on this device, and the token the device sends
+/// the server for them; a local user has none, and whatever asks the
+/// server is refused them.
+pub async fn signed_in_with_token(deployment: &Deployment) -> Result<(User, String), UserError> {
+    let mut tx = deployment.begin().await?;
+    let signed_in: Option<SignedIn> = device_settings::get(&mut tx, SIGNED_IN).await?;
+    let signed_in = signed_in.ok_or(UserError::NotSignedIn)?;
+    let token = signed_in.token.ok_or(UserError::LocalUser)?;
+    let user = get_live(&mut tx, signed_in.user_id).await?;
+    tx.commit().await?;
+    Ok((user, token))
 }
 
 /// The user as they travel on the wire.
@@ -482,7 +508,7 @@ pub(crate) mod tests {
         upsert_in(&mut tx, user).await.expect("the user's row");
         let signed_in = SignedIn {
             user_id: user.id,
-            token: token.to_string(),
+            token: Some(token.to_string()),
         };
         device_settings::set(&mut tx, SIGNED_IN, &Some(signed_in))
             .await

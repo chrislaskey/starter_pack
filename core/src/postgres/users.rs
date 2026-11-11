@@ -112,7 +112,8 @@ pub async fn delete_of_unconfirmed_accounts_before(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "DELETE FROM app_users WHERE id IN
-           (SELECT id FROM accounts_users WHERE confirmed_at IS NULL AND inserted_at < $1)",
+           (SELECT id FROM accounts_users
+            WHERE confirmed_at IS NULL AND trial_expires_at IS NULL AND inserted_at < $1)",
     )
     .bind(time)
     .execute(connection)

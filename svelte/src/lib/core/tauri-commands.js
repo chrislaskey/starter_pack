@@ -144,8 +144,12 @@ export function accountsSignInPending() {
 
 /**
  * Exchanges the code the browser showed for the session, which becomes
- * the active account; answers the user.
+ * the active account: `{outcome: "signed_in", user}`. On a device with a
+ * local user, and an account new to it, nothing is done yet and it
+ * answers `{outcome: "move_offered", email, items}`: the person chooses
+ * localUsersMove or localUsersKeepSeparate.
  * @param {string} code
+ * @returns {Promise<{outcome: "signed_in", user: object} | {outcome: "move_offered", email: string, items: number}>}
  */
 export function accountsSignInFinish(code) {
   return invoke("accounts_sign_in_finish", { code });
@@ -193,6 +197,42 @@ export function deviceAccountsDeactivate() {
  */
 export function deviceAccountsRemove(userId, losingChanges) {
   return invoke("device_accounts_remove", { userId, losingChanges });
+}
+
+// Trial users are the web's; a device has a local user instead.
+
+export function accountsTrialGet() {
+  return Promise.resolve(false);
+}
+
+export function accountsTrialCreate() {
+  return Promise.reject(new Error("only the web has trials"));
+}
+
+// A local user: someone using the app on this device without signing
+// up, see docs/design/accounts-local-and-trial-users.md.
+
+/**
+ * Whether the accounts page offers Skip.
+ * @returns {Promise<boolean>}
+ */
+export function localUsersCanCreate() {
+  return invoke("local_users_can_create");
+}
+
+/** Skip: makes the device's local user and opens the app as them. */
+export function localUsersCreate() {
+  return invoke("local_users_create");
+}
+
+/** Moves what the local user made into the account whose sign-in offered it. */
+export function localUsersMove() {
+  return invoke("local_users_move");
+}
+
+/** Adds the account whose sign-in offered a move beside the local user. */
+export function localUsersKeepSeparate() {
+  return invoke("local_users_keep_separate");
 }
 
 export function postsList() {
