@@ -3,12 +3,13 @@
 //! error, "Nobody is signed in", until someone is active.
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use app_core::deployment::Deployment;
 use app_core::users::{self, User, UserError};
 
 use crate::device_accounts::{DeviceAccounts, DeviceAccountsError};
+use crate::sync;
 
 pub async fn signed_in(device: &DeviceAccounts) -> Result<(Deployment, User), String> {
     let deployment = device.active().await.map_err(|error| error.to_string())?;
@@ -44,11 +45,31 @@ pub async fn current_user_get(
         Err(UserError::NotSignedIn) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
+    shown(&device, user).await.map(Some)
+}
+
+/// The signed-in user's new name, written on this device and synced
+/// when it next can.
+#[tauri::command]
+pub async fn current_user_update(
+    app: AppHandle,
+    device: State<'_, DeviceAccounts>,
+    name: String,
+) -> Result<CurrentUserShown, String> {
+    let (deployment, user) = signed_in(&device).await?;
+    let user = users::update(&deployment, &user, &name)
+        .await
+        .map_err(|error| error.to_string())?;
+    sync::spawn(app);
+    shown(&device, user).await
+}
+
+async fn shown(device: &DeviceAccounts, user: User) -> Result<CurrentUserShown, String> {
     let accounts = device.list().await.map_err(|error| error.to_string())?;
     let email = accounts
         .into_iter()
         .find(|account| account.user_id == user.id)
         .map(|account| account.email)
         .ok_or("The signed-in account is not in this device's list")?;
-    Ok(Some(CurrentUserShown { user, email }))
+    Ok(CurrentUserShown { user, email })
 }

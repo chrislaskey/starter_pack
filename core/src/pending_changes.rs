@@ -13,6 +13,7 @@ use crate::deployment::Deployment;
 use crate::events::{self, EventKind, Fields, StoredEvent};
 use crate::files::{self, FileError};
 use crate::posts::{self, PostError};
+use crate::users::{self, UserError};
 
 /// A change waiting to reach the server, as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,8 @@ pub enum PendingChangeError {
     File(#[from] FileError),
     #[error(transparent)]
     Community(#[from] CommunityError),
+    #[error(transparent)]
+    User(#[from] UserError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -57,6 +60,9 @@ pub async fn list(deployment: &Deployment) -> Result<Vec<PendingChange>, Pending
             communities::TABLE => communities::get_in(&mut tx, stored.event.row_id)
                 .await?
                 .map(|community| community.name),
+            users::TABLE => users::get_in(&mut tx, stored.event.row_id)
+                .await?
+                .map(|user| user.name),
             _ => None,
         };
         changes.push(pending_change(stored, about));

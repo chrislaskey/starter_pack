@@ -143,7 +143,9 @@ impl From<UserError> for ApiError {
         let status = match error {
             UserError::NotFound { .. } => StatusCode::NOT_FOUND,
             UserError::UnknownToken | UserError::NotSignedIn => StatusCode::UNAUTHORIZED,
-            UserError::InvalidName | UserError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            UserError::InvalidName | UserError::Invalid(_) | UserError::Rejected(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             UserError::AccountUser(error) => return error.into(),
             UserError::ServerOnly | UserError::DeviceSettings(_) | UserError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR

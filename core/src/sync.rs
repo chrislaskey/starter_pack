@@ -195,6 +195,7 @@ pub async fn push(
     let mut answers = Vec::with_capacity(request.events.len());
     for event in &request.events {
         let answer = match event.table.as_str() {
+            users::TABLE => users::apply_event(deployment, user, event).await?,
             communities::TABLE => communities::apply_event(deployment, user, event).await?,
             memberships::TABLE => memberships::apply_event(deployment, user, event).await?,
             posts::TABLE => posts::apply_event(deployment, user, event).await?,
@@ -2415,6 +2416,60 @@ pub(crate) mod tests {
                     .expect("memberships")
                     .is_empty()
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_name_changed_on_a_device_reaches_the_server_and_other_members() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, alice_token) = user_with_token(&server, "alice@example.com").await;
+            let (bob, bob_token) = user_with_token(&server, "bob@example.com").await;
+            let gardening = communities::create(&server, &alice, "Gardening")
+                .await
+                .expect("a community");
+            memberships::join(&server, &bob, gardening.id)
+                .await
+                .expect("joined");
+            let a = device_of(&alice, &alice_token).await;
+            let b = device_of(&bob, &bob_token).await;
+            sync(&a, &server).await;
+            sync(&b, &server).await;
+
+            let renamed = users::update(&a, &alice, "Alice B")
+                .await
+                .expect("renamed offline");
+            assert_eq!(renamed.name, "Alice B");
+            assert_eq!(
+                renamed.version, alice.version,
+                "a device leaves the version"
+            );
+            sync(&a, &server).await;
+            let on_server = users::get(&server, alice.id).await.expect("alice");
+            assert_eq!(on_server.name, "Alice B");
+            assert_eq!(on_server.version, alice.version + 1);
+            assert_eq!(users::get(&a, alice.id).await.expect("alice"), on_server);
+
+            sync(&b, &server).await;
+            assert_eq!(
+                users::get(&b, alice.id).await.expect("alice").name,
+                "Alice B"
+            );
+
+            let event = Event::update(
+                users::TABLE,
+                alice.id,
+                on_server.version,
+                crate::events::Fields::from_iter([("name".to_string(), json!("Alice B"))]),
+                crate::events::Fields::from_iter([("name".to_string(), json!("Mallory"))]),
+                now(),
+            );
+            let answer = users::apply_event(&server, &bob, &event)
+                .await
+                .expect("answered");
+            assert_eq!(answer.status, AnswerStatus::Rejected, "bob renaming alice");
+            assert_eq!(answer.reason.as_deref(), Some("not_yours"));
         })
         .await;
     }

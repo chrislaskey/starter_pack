@@ -18,13 +18,16 @@ use crate::accounts::users::{self as accounts_users, AccountUserError};
 use crate::database::{Transaction, sql};
 use crate::deployment::{Deployment, Role, now};
 use crate::device_settings::{self, DeviceSettingsError, SIGNED_IN};
-use crate::events::{self, Answer, Conflicts, Event, Fields};
+use crate::events::{self, Answer, AnswerStatus, Conflicts, Event, EventKind, Fields};
 use crate::sync::{Cursor, TableRow};
 use crate::tokens;
 
 pub const TABLE: &str = "app_users";
 
 pub const MAX_NAME_LENGTH: usize = 80;
+
+/// What a person changes of their own row; the rest is the server's.
+pub(crate) const UPDATE_FIELDS: &[&str] = &["name"];
 
 /// A user as the pages show one, with the sync columns every synced row
 /// carries, see `docs/design/offline-sync.md`.
@@ -67,6 +70,8 @@ pub enum UserError {
     UnknownToken,
     #[error("Nobody is signed in")]
     NotSignedIn,
+    #[error("the change was rejected: {0}")]
+    Rejected(String),
     #[error("{0}")]
     Invalid(String),
     #[error(transparent)]
@@ -127,6 +132,154 @@ pub(crate) async fn create_in(
     };
     sql!(&mut *tx, users::insert(&user))?;
     Ok(user)
+}
+
+/// Writes a new name over the user's own row, with the time from this
+/// deployment: an event like any change a person makes, so a device
+/// writes it offline and the next sync carries it, see
+/// `docs/design/offline-sync.md`.
+pub async fn update(deployment: &Deployment, user: &User, name: &str) -> Result<User, UserError> {
+    let name = checked_name(name)?;
+    let mut tx = deployment.begin().await?;
+    let current = get_live(&mut tx, user.id).await?;
+    if current.name == name {
+        return Ok(current);
+    }
+    let event = Event::update(
+        TABLE,
+        current.id,
+        current.version,
+        Fields::from_iter([("name".to_string(), json!(current.name))]),
+        Fields::from_iter([("name".to_string(), json!(name))]),
+        now(),
+    );
+    let user = apply_in(&mut tx, deployment.role, &current, &event)
+        .await?
+        .user()?;
+    tx.commit().await?;
+    Ok(user)
+}
+
+/// Applies an event of the user's to their own row and answers it: what
+/// the server does with a pushed event.
+pub async fn apply_event(
+    deployment: &Deployment,
+    user: &User,
+    event: &Event,
+) -> Result<Answer, UserError> {
+    let mut tx = deployment.begin().await?;
+    let applied = apply_in(&mut tx, deployment.role, user, event).await?;
+    tx.commit().await?;
+    Ok(applied.answer)
+}
+
+/// An event applied: the answer, and the user as they now stand.
+pub(crate) struct Applied {
+    pub answer: Answer,
+    pub user: Option<User>,
+}
+
+impl Applied {
+    fn user(self) -> Result<User, UserError> {
+        match (self.answer.status, self.user) {
+            (AnswerStatus::Rejected, _) => Err(UserError::Rejected(
+                self.answer.reason.unwrap_or_else(|| "rejected".to_string()),
+            )),
+            (_, Some(user)) => Ok(user),
+            (_, None) => Err(UserError::NotFound { id: self.answer.id }),
+        }
+    }
+}
+
+/// Applies the event in the transaction: an update of the user's own
+/// row merges into it as a post's does. Only the server makes a user,
+/// so a create is rejected, and so is a change to anyone else.
+pub(crate) async fn apply_in(
+    tx: &mut Transaction,
+    role: Role,
+    user: &User,
+    event: &Event,
+) -> Result<Applied, UserError> {
+    if role == Role::Server
+        && let Some(recorded) = events::get(tx, event.id).await?
+    {
+        let row = get_in(tx, event.row_id).await?;
+        let server = row.as_ref().map(table_row).transpose()?;
+        return Ok(Applied {
+            answer: recorded.answer(server),
+            user: row,
+        });
+    }
+    let Some(row) = get_in(tx, event.row_id).await? else {
+        return rejected(event, "unknown_user", None);
+    };
+    if event.kind != EventKind::Update {
+        return rejected(event, "server_only", Some(row));
+    }
+    if row.id != user.id {
+        return rejected(event, "not_yours", Some(row));
+    }
+    if let Some(reason) = events::not_editable(&event.changes, UPDATE_FIELDS) {
+        return rejected(event, reason, Some(row));
+    }
+    let current = Fields::from_iter([("name".to_string(), json!(row.name))]);
+    let (changes, conflicts) = events::merge(
+        &current,
+        row.version,
+        event.base_version,
+        &event.base,
+        &event.changes,
+    );
+    let Some(name) = changes.get("name") else {
+        return finish(tx, role, user, event, conflicts, row).await;
+    };
+    let Some(name) = name.as_str().and_then(|name| checked_name(name).ok()) else {
+        return rejected(event, "invalid: a name is needed", Some(row));
+    };
+    let now = now();
+    let mut updated = User {
+        name,
+        updated_at: now,
+        ..row
+    };
+    if role == Role::Server {
+        updated.version += 1;
+        updated.last_synced_at = Some(now);
+    }
+    sql!(&mut *tx, users::update(&updated))?;
+    finish(tx, role, user, event, conflicts, updated).await
+}
+
+/// Answers an applied event and does the role's part.
+async fn finish(
+    tx: &mut Transaction,
+    role: Role,
+    user: &User,
+    event: &Event,
+    conflicts: Conflicts,
+    row: User,
+) -> Result<Applied, UserError> {
+    let answer = Answer::applied(event.id, row.version, conflicts, table_row(&row)?);
+    match role {
+        Role::Server => events::record(tx, user.id, event, &answer).await?,
+        Role::Device => events::queue(tx, user.id, event).await?,
+    }
+    Ok(Applied {
+        answer,
+        user: Some(row),
+    })
+}
+
+fn rejected(
+    event: &Event,
+    reason: impl Into<String>,
+    row: Option<User>,
+) -> Result<Applied, UserError> {
+    let server = row.as_ref().map(table_row).transpose()?;
+    Ok(Applied {
+        answer: Answer::rejected(event.id, reason, server),
+        user: row,
+    })
 }
 
 /// Sets the user's name, a server write the devices pull like any
@@ -243,10 +396,13 @@ pub fn table_row(user: &User) -> Result<TableRow, UserError> {
     })
 }
 
-/// Writes the server's row over the device's: a user never has an event
-/// pending, so it always applies.
+/// Writes the server's row over the device's, unless an event of the
+/// device's for it is still pending; true when it was written.
 pub(crate) async fn apply_server_row(tx: &mut Transaction, row: &Value) -> Result<bool, UserError> {
     let user: User = serde_json::from_value(row.clone())?;
+    if events::has_pending(tx, TABLE, user.id).await? {
+        return Ok(false);
+    }
     upsert_in(tx, &user).await?;
     Ok(true)
 }

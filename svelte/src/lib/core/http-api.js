@@ -56,6 +56,14 @@ export async function currentUserGet() {
   }
 }
 
+/**
+ * The signed-in user's new name.
+ * @param {string} name
+ */
+export function currentUserUpdate(name) {
+  return send("PUT", "/api/current-user", { name });
+}
+
 /** The community the person works in, kept by this browser; null when they are in none. */
 export function currentCommunityGet() {
   return send("GET", "/api/current-community");

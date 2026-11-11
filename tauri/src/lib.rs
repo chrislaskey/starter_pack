@@ -55,6 +55,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             current_user::current_user_get,
+            current_user::current_user_update,
             current_community::current_community_get,
             current_community::current_community_update,
             avatars::avatars_create_upload,

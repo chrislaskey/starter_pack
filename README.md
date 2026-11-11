@@ -57,6 +57,7 @@ Inside the Tauri app each is a command of the same name
 | `filesCacheGet()`, `filesCacheDelete()` | the app only: the copies of synced files kept on the device, and removing them |
 | `conflictsList()`, `conflictsReapply(id)`, `conflictsTryAgain(id)`, `conflictsLetGo(id)` | none: the web has nothing to resolve |
 | `currentUserGet()` | `GET /api/current-user`; null when nobody is signed in, which the server answers 401 |
+| `currentUserUpdate(name)` | `PUT /api/current-user`, their new name; in the app written on the device and synced |
 | `currentCommunityGet()` | `GET /api/current-community`, the community the person works in, or null when they are in none |
 | `currentCommunityUpdate(communityId)` | `PUT /api/current-community` with `{"community_id": "..."}`; a member only, else 403 |
 | `avatarsCreateUpload(contentType, size)` | `POST /api/avatars/uploads`, 201 with where to PUT the picture; 422 with `"errors"` for a wrong file |
@@ -373,7 +374,7 @@ shows the page at the path, swapped in place:
 | `/accounts/settings` | `accounts/AccountsSettingsPage.svelte`, the person's own account: a placeholder with their email |
 | `/support` | `support/SupportIndexPage.svelte`, the support app: a placeholder |
 | `/forum` | `forum/ForumIndexPage.svelte`, the forum app: a placeholder |
-| `/ops` | not the router's: the ops app, an entry of its own, `ops.html` with `ops/OpsHomePage.svelte`, for staff: a placeholder. `cargo run -p app_web -- ops staff create <email>` makes an account staff |
+| `/ops` | not the router's: the ops app, a build of its own (`svelte/dist-ops`) with `ops/OpsHomePage.svelte`, for staff and a 404 to anyone else: a placeholder. `cargo run -p app_web -- ops staff create <email>` makes an account staff |
 | `/accounts/sign-in` | `accounts/AccountsSignInPage.svelte`, where a signed-out visitor is sent on the web; with `?challenge=`, a device's sign-in, ending with the code to paste into the app |
 | `/posts` | `posts/PostsIndexPage.svelte` |
 | `/posts/new` | `posts/PostsNewPage.svelte` |
@@ -509,14 +510,15 @@ when another program holds 4000 or 1420, it warns and uses 4010 and 5010
 instead; `bin/dev --help` has the rest. By hand:
 
 ```sh
-(cd svelte && pnpm install && pnpm build)   # writes svelte/dist
+(cd svelte && pnpm install && pnpm build)   # writes svelte/dist and svelte/dist-ops
 cargo run -p app_web                        # http://localhost:4000, serving svelte/dist
 (cd tauri && cargo tauri dev)               # the desktop app on the pages' dev server
 (cd tauri && cargo tauri build)             # the app bundle, under target/release/bundle
 ```
 
 The web server reads `PORT`, `DATABASE_URL`, `SVELTE_DIST` (default
-`svelte/dist`), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`,
+`svelte/dist`), `SVELTE_OPS_DIST` (default `svelte/dist-ops`, the ops app's
+build, for staff), `MAILER` with `RESEND_API_KEY` and `MAIL_FROM`,
 `STORAGE_BUCKET` (public, for pictures) and `STORAGE_PRIVATE_BUCKET`
 (for files) with `STORAGE_ENDPOINT`, `STORAGE_REGION`,
 `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` and

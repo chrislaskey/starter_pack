@@ -162,7 +162,7 @@ Any other field is refused as `not_editable: <field>`:
 | `app_communities` | `name` | `name`, `deleted_at`, by a live member |
 | `app_users_communities` | `user_id`, `community_id`, `role` | `deleted_at` |
 | `app_posts_communities` | `post_id`, `community_id`, `users_communities_id` | `deleted_at` |
-| `app_users` | nothing, the server makes a user | `avatar_url`, by the server only for now, see `uploads.md` |
+| `app_users` | nothing, the server makes a user | `name`, by the user themselves; `avatar_url`, by the server only for now, see `uploads.md` |
 | `app_files` | `name`, `content_type`, `size`, once the bytes are in the bucket | `name`, `deleted_at` |
 
 Who made the event is not on the wire: the server records the user its

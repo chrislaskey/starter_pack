@@ -58,7 +58,7 @@ function publicPages() {
         const name = pathname === "/" ? "index" : pathname.slice(1);
         const isPublicPage = /^[\w-]+$/.test(name) && existsSync(resolve(PUBLIC_PAGES, `${name}.html`));
         if (isPublicPage) request.url = `/public/${name}.html${search}`;
-        // The ops app's pages are its own entry, as on the web server
+        // The ops app's pages are its own entry; in dev, open to anyone
         if (pathname === "/ops" || pathname.startsWith("/ops/")) {
           const isPage = !/\.\w+$/.test(pathname);
           if (isPage) request.url = `/ops.html${search}`;
@@ -79,15 +79,20 @@ const TAURI_DEV_HOST = process.env.TAURI_DEV_HOST;
 
 // One HTML entry per window: src/index.html, whose router
 // (src/lib/router.js) shows the page at the address, and
-// src/quick-picker.html for the desktop app's quick picker; src/ops.html
-// for the ops app, at /ops and under it; and one per page of the public
-// website. Files served as they are, the fonts, are in
-// src/static. The dev server
+// src/quick-picker.html for the desktop app's quick picker; and one per
+// page of the public website. Files served as they are, the fonts, are in
+// src/static.
+//
+// The ops app, src/ops.html, is a build of its own, `vite build --mode
+// ops`, to dist-ops/ with its files under /ops/: the web server gives
+// them to staff alone, and the Tauri app, which bundles dist/, never has
+// them. `pnpm build` runs both. The dev server
 // answers any other path with index.html, and so do the web server
 // (../axum) and the Tauri app, so every page is reloadable. `pnpm build` writes dist/, which the web server
 // serves and the Tauri app bundles.
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   root: "src",
+  base: mode === "ops" ? "/ops/" : "/",
   publicDir: "static",
   plugins: [themeScript(), publicPages(), tailwindcss(), svelte()],
   clearScreen: false,
@@ -98,18 +103,24 @@ export default defineConfig({
     hmr: TAURI_DEV_HOST ? { protocol: "ws", host: TAURI_DEV_HOST, port: 1421 } : undefined,
     proxy: { "/api": WEB_SERVER_URL },
   },
-  build: {
-    outDir: "../dist",
-    emptyOutDir: true,
-    rolldownOptions: {
-      input: {
-        main: resolve(import.meta.dirname, "src/index.html"),
-        quick_picker: resolve(import.meta.dirname, "src/quick-picker.html"),
-        ops: resolve(import.meta.dirname, "src/ops.html"),
-        ...Object.fromEntries(
-          publicPageNames().map((name) => [`public_${name}`, resolve(PUBLIC_PAGES, `${name}.html`)]),
-        ),
-      },
-    },
-  },
-});
+  build:
+    mode === "ops"
+      ? {
+          outDir: "../dist-ops",
+          emptyOutDir: true,
+          rolldownOptions: { input: { ops: resolve(import.meta.dirname, "src/ops.html") } },
+        }
+      : {
+          outDir: "../dist",
+          emptyOutDir: true,
+          rolldownOptions: {
+            input: {
+              main: resolve(import.meta.dirname, "src/index.html"),
+              quick_picker: resolve(import.meta.dirname, "src/quick-picker.html"),
+              ...Object.fromEntries(
+                publicPageNames().map((name) => [`public_${name}`, resolve(PUBLIC_PAGES, `${name}.html`)]),
+              ),
+            },
+          },
+        },
+}));

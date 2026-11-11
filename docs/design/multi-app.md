@@ -41,10 +41,11 @@ other app carries its name:
 - **Paths**: `app` owns the top level and is the fallback; another app
   owns its subpath. The public website owns `/` and its pages' names.
 - **Pages**: one Svelte app, each page loaded when visited, as today.
-  `ops` is the exception: an entry of its own, `svelte/src/ops.html`
-  with `svelte/src/ops/`, so the staff's tools are not in what users
-  load. The web server answers `/ops` and every path under it with it
-  (`axum/src/ops.rs`), and a link to it loads the page in full.
+  `ops` is the exception: a build of its own, `vite build --mode ops`
+  of `svelte/src/ops.html` and `svelte/src/ops/` to `svelte/dist-ops`,
+  its files under `/ops/`. The staff's tools are not in what users
+  load, and not in the desktop and phone apps, which bundle
+  `svelte/dist`. A link to it loads the page in full.
 - **The nav** (`svelte/src/lib/AppNav.svelte`) links the apps: Support,
   Forum, the person's email to their account, and Ops for staff.
 - **Depends on**: `accounts`, then `app`, then every other app. Never
@@ -79,7 +80,9 @@ One id, two tables, written together at sign-up:
 
 - An email never reaches other people's devices. A page shows a user
   by **name**, asked for at sign-up (`accounts::sign_up`), which writes
-  both rows in one transaction.
+  both rows in one transaction. A person changes their name on their
+  profile, `users::update`: an event on their own row, so a device
+  writes it offline and syncs it, and nobody changes another's.
 - `accounts_tokens` and `accounts_credentials` reference
   `accounts_users`. A device has the `accounts_` tables and leaves them
   empty.
@@ -96,14 +99,15 @@ One id, two tables, written together at sign-up:
 `ops_staff` has a row per account that may use `ops`
 (`core/src/ops/staff.rs`).
 
-- Every route under `/api/ops` is behind one check,
-  `axum/src/ops.rs`: 401 from nobody, 403 from someone who is not
-  staff.
+- To anyone who is not staff, signed in or not, every path of the ops
+  app is a 404: the API under `/api/ops`, answered as an API path with
+  no route is, and the pages and their files under `/ops`
+  (`axum/src/ops.rs`). A 403 would say there is something there.
 - Someone becomes staff from the server's command line, never from a
   page: `app_web ops staff create <email>`, and `ops staff delete
   <email>`.
-- The ops page itself is served to anyone and says why they cannot use
-  it; what it shows comes from the API.
+- In dev the Svelte dev server gives the ops page to anyone; its API is
+  the web server's, so it shows nothing.
 
 ## Still to decide
 
@@ -112,5 +116,4 @@ One id, two tables, written together at sign-up:
 - How a device's pages call an online-only app's API: the first one
   built sets the pattern in `svelte/src/lib/core/`.
 - Whether a deployment can leave an app out, so `ops` can run where
-  only staff reach it, and keeping the ops entry out of the device
-  bundles, which today carry every built file.
+  only staff reach it.

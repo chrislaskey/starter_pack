@@ -8,6 +8,14 @@ export function currentUserGet() {
   return invoke("current_user_get");
 }
 
+/**
+ * The signed-in user's new name, written on this device and synced when it next can.
+ * @param {string} name
+ */
+export function currentUserUpdate(name) {
+  return invoke("current_user_update", { name });
+}
+
 /** The community the person works in on this device; null when they are in none. */
 export function currentCommunityGet() {
   return invoke("current_community_get");

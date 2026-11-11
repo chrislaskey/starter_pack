@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use app_core::accounts::users as accounts_users;
 use app_core::deployment::Deployment;
@@ -85,15 +85,34 @@ pub async fn get(
     State(deployment): State<Deployment>,
     CurrentUser(user): CurrentUser,
 ) -> Result<axum::Json<CurrentUserShown>, ApiError> {
-    let account = accounts_users::get(&deployment, user.id).await?;
-    let is_staff = match staff::get(&deployment, &user).await {
+    shown(&deployment, user).await.map(axum::Json)
+}
+
+#[derive(Deserialize)]
+pub struct CurrentUserUpdate {
+    pub name: String,
+}
+
+/// `PUT /api/current-user`: the user's new name.
+pub async fn update(
+    State(deployment): State<Deployment>,
+    CurrentUser(user): CurrentUser,
+    axum::Json(update): axum::Json<CurrentUserUpdate>,
+) -> Result<axum::Json<CurrentUserShown>, ApiError> {
+    let user = users::update(&deployment, &user, &update.name).await?;
+    shown(&deployment, user).await.map(axum::Json)
+}
+
+async fn shown(deployment: &Deployment, user: User) -> Result<CurrentUserShown, ApiError> {
+    let account = accounts_users::get(deployment, user.id).await?;
+    let is_staff = match staff::get(deployment, &user).await {
         Ok(_) => true,
         Err(StaffError::NotStaff) => false,
         Err(error) => return Err(error.into()),
     };
-    Ok(axum::Json(CurrentUserShown {
+    Ok(CurrentUserShown {
         user,
         email: account.email,
         is_staff,
-    }))
+    })
 }

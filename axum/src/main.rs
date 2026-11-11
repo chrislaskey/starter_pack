@@ -53,6 +53,14 @@ fn svelte_dist() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../svelte/dist"))
 }
 
+/// The built ops pages: `SVELTE_OPS_DIST`, else `../svelte/dist-ops`
+/// beside this crate.
+fn svelte_ops_dist() -> PathBuf {
+    env::var_os("SVELTE_OPS_DIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../svelte/dist-ops"))
+}
+
 /// Whether the client IP is the reverse proxy's `X-Forwarded-For`
 /// header, `TRUST_PROXY_HEADERS=1`; off unless the proxy is the only way
 /// in, see `rate_limits`.
@@ -118,7 +126,7 @@ async fn main() -> Result<(), String> {
         .map_err(|error| format!("could not listen on {address}: {error}"))?;
     tracing::info!("listening on http://{address}");
 
-    let app = router::router(&svelte_dist(), state);
+    let app = router::router(&svelte_dist(), &svelte_ops_dist(), state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

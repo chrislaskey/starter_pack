@@ -52,7 +52,7 @@ impl FromRef<AppState> for RateLimits {
     }
 }
 
-pub fn router(svelte_dist: &Path, state: AppState) -> Router {
+pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
     let pages = ServeDir::new(svelte_dist).fallback(ServeFile::new(svelte_dist.join("index.html")));
     let accounts = Router::new()
         .route("/api/accounts/sign-up", post(accounts::sign_up))
@@ -66,7 +66,10 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
     Router::new()
         .merge(accounts)
         .merge(ops::api(state.clone()))
-        .route("/api/current-user", get(current_user::get))
+        .route(
+            "/api/current-user",
+            get(current_user::get).put(current_user::update),
+        )
         .route(
             "/api/current-community",
             get(current_community::get).put(current_community::update),
@@ -104,16 +107,16 @@ pub fn router(svelte_dist: &Path, state: AppState) -> Router {
         .route("/api/sync/backfill", post(sync::backfill))
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
-        .with_state(state)
+        .with_state(state.clone())
         .merge(public::router(svelte_dist))
-        .merge(ops::pages(svelte_dist))
+        .merge(ops::pages(ops_dist, state.clone()))
         .fallback_service(pages)
         .layer(TraceLayer::new_for_http())
 }
 
 /// An API path no route has: a JSON 404, so a page asking a server that
 /// lacks the route sees an error and not the pages' HTML.
-async fn api_not_found(method: Method, uri: Uri) -> ApiError {
+pub(crate) async fn api_not_found(method: Method, uri: Uri) -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
         format!("The server has no API route {method} {}", uri.path()),
@@ -155,7 +158,10 @@ mod tests {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
-        fs::write(dist.join("ops.html"), "<html>ops</html>").expect("ops.html");
+        let ops_dist = dist.join("ops");
+        fs::create_dir_all(ops_dist.join("assets")).expect("an ops dir");
+        fs::write(ops_dist.join("ops.html"), "<html>ops</html>").expect("ops.html");
+        fs::write(ops_dist.join("assets/ops.js"), "ops script").expect("ops.js");
         fs::create_dir_all(dist.join("public")).expect("a public dir");
         fs::write(dist.join("public/index.html"), "<html>public home</html>").expect("the home");
         fs::write(dist.join("public/about.html"), "<html>public about</html>").expect("about");
@@ -182,7 +188,7 @@ mod tests {
             trust_proxy_headers: false,
         };
         let test_router = TestRouter {
-            router: router(&dist, state),
+            router: router(&dist, &ops_dist, state),
             deployment,
             token: alice.token,
             mailer,
@@ -1216,35 +1222,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ops_api_is_for_staff_alone() {
+    async fn current_user_update_changes_their_name() {
         let (router, _) = test_router().await;
-        let path = "/api/ops/current-staff";
-        let (status, _) = send_as(&router.router, None, Method::GET, path, None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "nobody signed in");
-        let (status, body) = get(&router, path).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "signed in, not staff");
-        assert_eq!(body, json!({ "error": "Only staff can use this" }));
+        let (status, me) = send(
+            &router,
+            Method::PUT,
+            "/api/current-user",
+            Some(json!({ "name": " Alice B " })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["name"], json!("Alice B"));
+        assert_eq!(me["email"], json!("alice@example.com"));
+        let (_, me) = get(&router, "/api/current-user").await;
+        assert_eq!(me["name"], json!("Alice B"));
 
+        let (status, _) = send(
+            &router,
+            Method::PUT,
+            "/api/current-user",
+            Some(json!({ "name": " " })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn ops_is_a_404_to_anyone_who_is_not_staff() {
+        let (router, _) = test_router().await;
+        let cookie = format!("token={}", router.token);
+        let (_, missing) = get(&router, "/api/nothing-here").await;
+        for path in ["/api/ops/current-staff", "/api/ops/nothing-here"] {
+            let (status, _) = send_as(&router.router, None, Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}, nobody signed in");
+            let (status, body) = get(&router, path).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{path}, signed in, not staff"
+            );
+            assert_eq!(
+                body["error"].as_str().map(|error| error.replace(path, "")),
+                missing["error"]
+                    .as_str()
+                    .map(|error| error.replace("/api/nothing-here", "")),
+                "the same answer as a path with no route"
+            );
+        }
+        for path in ["/ops", "/ops/users", "/ops/assets/ops.js"] {
+            for cookie in [None, Some(cookie.as_str())] {
+                let (status, _headers, body) =
+                    send_with(&router.router, None, cookie, Method::GET, path, None).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+                assert_eq!(body, Value::Null, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ops_answers_staff_with_its_api_its_pages_and_its_files() {
+        let (router, _) = test_router().await;
         let staff = app_core::ops::staff::create(&router.deployment, "alice@example.com")
             .await
             .expect("alice is staff");
-        let (status, body) = get(&router, path).await;
+        let (status, body) = get(&router, "/api/ops/current-staff").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["user_id"], json!(staff.user_id));
         let (_, me) = get(&router, "/api/current-user").await;
         assert_eq!(me["is_staff"], json!(true));
 
-        let (status, _) = get(&router, "/api/ops/nothing-here").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn ops_pages_answer_with_the_ops_entry() {
-        let (router, _) = test_router().await;
-        for path in ["/ops", "/ops/users"] {
-            let (status, body) = get(&router, path).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body, json!("<html>ops</html>"));
+        let cookie = format!("token={}", router.token);
+        for (path, answer) in [
+            ("/ops", "<html>ops</html>"),
+            ("/ops/users", "<html>ops</html>"),
+            ("/ops/assets/ops.js", "ops script"),
+        ] {
+            let (status, _headers, body) =
+                send_with(&router.router, None, Some(&cookie), Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(body, json!(answer), "{path}");
         }
     }
 

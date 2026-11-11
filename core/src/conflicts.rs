@@ -19,7 +19,7 @@ use crate::deployment::{Deployment, now};
 use crate::events::{self, AnswerStatus, Event, EventKind, EventStatus, Fields, StoredEvent};
 use crate::files::{self, FileError};
 use crate::posts::{self, PostError};
-use crate::users::User;
+use crate::users::{self, User, UserError};
 
 /// A conflicted change as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +77,8 @@ pub enum ConflictError {
     File(#[from] FileError),
     #[error(transparent)]
     Community(#[from] CommunityError),
+    #[error(transparent)]
+    User(#[from] UserError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -127,6 +129,11 @@ pub async fn reapply(deployment: &Deployment, user: &User, id: Uuid) -> Result<(
         }
         communities::TABLE => {
             communities::apply_in(&mut tx, deployment.role, user, &event)
+                .await?
+                .answer
+        }
+        users::TABLE => {
+            users::apply_in(&mut tx, deployment.role, user, &event)
                 .await?
                 .answer
         }
@@ -231,6 +238,14 @@ async fn row_of(tx: &mut Transaction, event: &Event) -> Result<Option<Row>, Conf
                 })
             })
             .transpose()?,
+        users::TABLE => users::get_in(tx, event.row_id)
+            .await?
+            .filter(|user| user.deleted_at.is_none())
+            .map(|user| Row {
+                about: user.name.clone(),
+                version: user.version,
+                fields: Fields::from_iter([("name".to_string(), Value::String(user.name))]),
+            }),
         _ => None,
     })
 }
