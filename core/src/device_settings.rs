@@ -28,6 +28,10 @@ pub const CURRENT_COMMUNITY: &str = "current_community_id";
 /// accounts; null otherwise.
 pub const LOCAL_USER_MOVED: &str = "local_user_moved";
 
+/// The signed-in person's plan as the server last answered it, an
+/// `accounts::online::PlanKept`, or null until the device has asked.
+pub const PLAN: &str = "plan";
+
 /// Every setting, with the value a device starts with. Add a setting
 /// here, with its key as a constant above, and read it from the module
 /// that owns it.
@@ -37,6 +41,7 @@ pub fn defaults() -> Vec<(&'static str, Value)> {
         (SIGNED_IN, Value::Null),
         (CURRENT_COMMUNITY, Value::Null),
         (LOCAL_USER_MOVED, Value::Null),
+        (PLAN, Value::Null),
     ]
 }
 

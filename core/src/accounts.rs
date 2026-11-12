@@ -25,6 +25,7 @@
 
 #[cfg(feature = "stripe")]
 pub mod checkouts;
+pub mod online;
 #[cfg(feature = "stripe")]
 pub mod plans;
 #[cfg(feature = "stripe")]
@@ -37,6 +38,8 @@ pub mod purchases;
 pub mod stripe;
 #[cfg(feature = "stripe")]
 pub mod stripe_events;
+#[cfg(feature = "stripe")]
+pub mod stripe_reconcile;
 #[cfg(feature = "stripe")]
 pub mod subscriptions;
 pub mod users;

@@ -7,10 +7,10 @@
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import AccountsNeeded from "./AccountsNeeded.svelte";
-  import { accountsCheckoutsCreate, accountsProductsGet } from "../lib/core/index.js";
-  import { currentUserLoad } from "../lib/current_user.js";
-  import { pathParams } from "../lib/router.js";
-  import { accountsProductsIndexUrl, accountsSubscriptionsShowUrl } from "../lib/routes.js";
+  import { accountsCheckoutsCreate, accountsProductsGet, accountsSubscriptionsUpdate } from "../lib/core/index.js";
+  import { currentUserLoad, currentUserReload } from "../lib/current_user.js";
+  import { navigateToUrl, pathParams } from "../lib/router.js";
+  import { accountsCheckoutsShowUrl, accountsProductsIndexUrl, accountsSubscriptionsShowUrl } from "../lib/routes.js";
   import { priceFormat } from "./money.js";
 
   const id = pathParams().id;
@@ -29,12 +29,30 @@
   );
 
   /** @param {string} priceId */
+  async function planSwitch(priceId) {
+    const plan = currentUser?.plan;
+    if (!plan) return;
+    buying = true;
+    error = "";
+    try {
+      await accountsSubscriptionsUpdate(plan.subscription_id, { action: "switch", price_id: priceId });
+      await currentUserReload();
+      await navigateToUrl(accountsSubscriptionsShowUrl(plan.subscription_id));
+    } catch (problem) {
+      error = String(problem);
+      buying = false;
+    }
+  }
+
+  /** @param {string} priceId */
   async function buy(priceId) {
     buying = true;
     error = "";
     try {
-      const { url } = await accountsCheckoutsCreate(priceId);
-      window.location.assign(url);
+      const { checkout, url } = await accountsCheckoutsCreate(priceId);
+      // In the app Stripe's page opens in the browser, and the checkout's page waits
+      if (url) window.location.assign(url);
+      else await navigateToUrl(accountsCheckoutsShowUrl(checkout.id));
     } catch (problem) {
       error = String(problem);
       buying = false;
@@ -64,12 +82,28 @@
       </ul>
       <AccountsNeeded kind={currentUser.kind} />
     {:else if product.kind === "plan" && currentUser?.plan}
-      {#if currentUser.plan.product_id === product.id}
-        <p>This is your plan.</p>
+      {@const plan = currentUser.plan}
+      <p>You are on {plan.product_name}.</p>
+      {#if plan.cancel_at_period_end}
+        <p class="muted">It ends with this period. Resume it on its page to switch.</p>
       {:else}
-        <p>You are on {currentUser.plan.product_name}.</p>
+        <div class="flex flex-wrap gap-2">
+          {#each product.prices as price (price.id)}
+            {#if price.id !== plan.price_id}
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                disabled={buying}
+                onclick={() => planSwitch(price.id)}
+              >
+                Switch · {priceFormat(price)}
+              </button>
+            {/if}
+          {/each}
+        </div>
+        <p class="muted">A dearer plan, or yearly, starts now with the difference charged; a cheaper one, or monthly, starts when this period ends.</p>
       {/if}
-      <p><a href={accountsSubscriptionsShowUrl(currentUser.plan.subscription_id)} class="link">See your plan</a></p>
+      <p><a href={accountsSubscriptionsShowUrl(plan.subscription_id)} class="link">See your plan</a></p>
     {:else if product.owned && !product.is_repeatable}
       <p>Owned</p>
     {:else}

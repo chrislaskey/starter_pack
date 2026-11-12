@@ -3,8 +3,11 @@
 //! error, "Nobody is signed in", until someone is active.
 
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{AppHandle, State};
+use uuid::Uuid;
 
+use app_core::accounts::online;
 use app_core::deployment::Deployment;
 use app_core::users::{self, Kind, User, UserError};
 
@@ -21,14 +24,17 @@ pub async fn signed_in(device: &DeviceAccounts) -> Result<(Deployment, User), St
 
 /// The user signed in as their own pages show them: with the email of
 /// their account, which the device keeps in its list of accounts and
-/// their synced row does not carry, and whether they are a local user,
-/// on this device only.
+/// their synced row does not carry, whether they are a local user, on
+/// this device only, and their plan as the device last heard it, until
+/// its period ends, see `app_core::accounts::online`.
 #[derive(Serialize)]
 pub struct CurrentUserShown {
     #[serde(flatten)]
     pub user: User,
     pub email: String,
     pub kind: Kind,
+    pub plan: Value,
+    pub payment_failed_subscription_id: Option<Uuid>,
 }
 
 /// The user signed in, or none when nobody is; an error only when the
@@ -76,9 +82,15 @@ async fn shown(device: &DeviceAccounts, user: User) -> Result<CurrentUserShown, 
         true => Kind::Local,
         false => Kind::Full,
     };
+    let deployment = device.active().await.map_err(|error| error.to_string())?;
+    let kept = online::plan_kept(&deployment)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(CurrentUserShown {
         user,
         email: account.email,
         kind,
+        plan: kept.as_ref().map_or(Value::Null, |kept| kept.plan.clone()),
+        payment_failed_subscription_id: kept.and_then(|kept| kept.payment_failed_subscription_id),
     })
 }

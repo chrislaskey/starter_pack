@@ -35,7 +35,7 @@ stripe = [
 argon2 = "0.6"
 # A release candidate, pinned exactly: the 1.0 line is the maintained one, see docs/design/purchasing.md
 async-stripe = { version = "=1.0.0-rc.10", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"], optional = true }
-async-stripe-billing = { version = "=1.0.0-rc.10", features = ["deserialize", "subscription"], optional = true }
+async-stripe-billing = { version = "=1.0.0-rc.10", features = ["deserialize", "subscription", "subscription_schedule", "billing_portal_session"], optional = true }
 async-stripe-checkout = { version = "=1.0.0-rc.10", features = ["deserialize", "checkout_session"], optional = true }
 async-stripe-client-core = { version = "=1.0.0-rc.10", optional = true }
 async-stripe-core = { version = "=1.0.0-rc.10", features = ["deserialize", "customer", "charge"], optional = true }

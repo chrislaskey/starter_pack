@@ -311,6 +311,23 @@ export function accountsSubscriptionsGet(id) {
   return send("GET", `/api/accounts/subscriptions/${encodeURIComponent(id)}`);
 }
 
+/**
+ * A change to a plan, answering the plan as it is now.
+ * @param {string} id
+ * @param {{action: "switch", price_id: string} | {action: "switch_undo" | "cancel" | "resume"}} change
+ */
+export function accountsSubscriptionsUpdate(id, change) {
+  return send("PUT", `/api/accounts/subscriptions/${encodeURIComponent(id)}`, change);
+}
+
+/**
+ * Stripe's Customer Portal for the plan's card and invoices, answering `{url}`.
+ * @param {string} id
+ */
+export function accountsSubscriptionsPortalCreate(id) {
+  return send("POST", `/api/accounts/subscriptions/${encodeURIComponent(id)}/portal`);
+}
+
 // Local users are a device's; the web has trial users instead.
 
 export function localUsersCanCreate() {

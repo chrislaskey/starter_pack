@@ -121,7 +121,10 @@ One id, two tables, written together at sign-up:
 
 - The build order of the apps. Proposed: `ops` with a users list;
   `support`; purchasing in `accounts`; `forum`.
-- How a device's pages call an online-only app's API: the first one
-  built sets the pattern in `svelte/src/lib/core/`.
+- ~~How a device's pages call an online-only app's API~~: decided
+  2026-11-11 by purchasing, see `app_core::accounts::online`. A Tauri
+  command per call asks the server's API with the device's token, held
+  in Rust, through the sync's `Http`, and passes its JSON on; the page
+  calls it from `svelte/src/lib/core/tauri-commands.js` as any other.
 - Whether a deployment can leave an app out, so `ops` can run where
   only staff reach it.

@@ -794,6 +794,22 @@ impl Http {
             .await
     }
 
+    /// An online-only API of the server's, as the token's user, with its
+    /// JSON answer as it came: the accounts app's purchasing, which a
+    /// device only passes to its pages, see `accounts::online`.
+    pub(crate) async fn json(
+        &self,
+        method: reqwest::Method,
+        token: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, SyncError> {
+        match body {
+            Some(body) => self.send(method, Some(token), path, body).await,
+            None => self.send(method, Some(token), path, &()).await,
+        }
+    }
+
     /// `accounts::password_update` on the server, as the token's user.
     pub async fn accounts_password_update(
         &self,

@@ -30,15 +30,19 @@ pub enum Job {
     AvatarsDeleteUnreferenced,
     /// `files::delete_unreferenced`.
     FilesDeleteUnreferenced,
+    /// `accounts::stripe_reconcile::run`, on a server with Stripe: what a
+    /// missed webhook left behind.
+    StripeReconcile,
 }
 
 impl Job {
     /// Every job, in the order `run_due` runs them.
-    pub const ALL: [Job; 4] = [
+    pub const ALL: [Job; 5] = [
         Job::Purge,
         Job::TrialUsersDelete,
         Job::AvatarsDeleteUnreferenced,
         Job::FilesDeleteUnreferenced,
+        Job::StripeReconcile,
     ];
 
     /// Its name in `app_jobs` and on the command line.
@@ -48,6 +52,7 @@ impl Job {
             Job::TrialUsersDelete => "trial_users_delete",
             Job::AvatarsDeleteUnreferenced => "avatars_delete_unreferenced",
             Job::FilesDeleteUnreferenced => "files_delete_unreferenced",
+            Job::StripeReconcile => "stripe_reconcile",
         }
     }
 
@@ -61,16 +66,18 @@ impl Job {
             Job::Purge
             | Job::TrialUsersDelete
             | Job::AvatarsDeleteUnreferenced
-            | Job::FilesDeleteUnreferenced => Role::Server,
+            | Job::FilesDeleteUnreferenced
+            | Job::StripeReconcile => Role::Server,
         }
     }
 
     /// How long after a run starts the next is due.
     pub fn interval(self) -> Duration {
         match self {
-            Job::Purge | Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
-                Duration::days(1)
-            }
+            Job::Purge
+            | Job::AvatarsDeleteUnreferenced
+            | Job::FilesDeleteUnreferenced
+            | Job::StripeReconcile => Duration::days(1),
             Job::TrialUsersDelete => Duration::hours(1),
         }
     }
@@ -92,6 +99,10 @@ impl Job {
                 let _ = deployment;
                 false
             }
+            #[cfg(feature = "stripe")]
+            Job::StripeReconcile => deployment.stripe.is_some(),
+            #[cfg(not(feature = "stripe"))]
+            Job::StripeReconcile => false,
         }
     }
 }
@@ -118,7 +129,7 @@ pub struct JobRun {
 pub enum JobError {
     #[error("the {} job does not run on this deployment", .0.name())]
     NotForThisRole(Job),
-    #[error("the {} job has no bucket to work on here", .0.name())]
+    #[error("the {} job is not set up here: no bucket, or no Stripe", .0.name())]
     NotSetUp(Job),
     #[error(transparent)]
     Purge(#[from] PurgeError),
@@ -128,6 +139,9 @@ pub enum JobError {
     Avatar(#[from] AvatarError),
     #[error(transparent)]
     File(#[from] FileError),
+    #[cfg(feature = "stripe")]
+    #[error(transparent)]
+    StripeReconcile(#[from] crate::accounts::stripe_reconcile::StripeReconcileError),
     #[error("could not record the report: {0}")]
     Report(#[from] serde_json::Error),
     #[error("database error: {0}")]
@@ -198,6 +212,15 @@ async fn perform(deployment: &Deployment, job: Job, now: DateTime<Utc>) -> Resul
         Job::AvatarsDeleteUnreferenced | Job::FilesDeleteUnreferenced => {
             Err(JobError::NotSetUp(job))
         }
+        #[cfg(feature = "stripe")]
+        Job::StripeReconcile => match &deployment.stripe {
+            Some(stripe) => Ok(serde_json::to_value(
+                crate::accounts::stripe_reconcile::run(deployment, stripe).await?,
+            )?),
+            None => Err(JobError::NotSetUp(job)),
+        },
+        #[cfg(not(feature = "stripe"))]
+        Job::StripeReconcile => Err(JobError::NotSetUp(job)),
     }
 }
 
@@ -353,10 +376,15 @@ mod tests {
         use crate::deployment::FileStore;
         use crate::storage::Storage;
 
+        /// A server with everything its jobs work on: buckets, and
+        /// Stripe when it sells.
         fn server_with_buckets(database: Database) -> Deployment {
-            server(database)
+            let deployment = server(database)
                 .with_avatar_bucket(Storage::memory())
-                .with_file_store(FileStore::Bucket(Storage::memory()))
+                .with_file_store(FileStore::Bucket(Storage::memory()));
+            #[cfg(feature = "stripe")]
+            let deployment = deployment.with_stripe(crate::accounts::stripe::Stripe::memory());
+            deployment
         }
 
         #[tokio::test]

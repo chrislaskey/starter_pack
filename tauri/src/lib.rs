@@ -25,6 +25,7 @@ mod macos;
 mod memberships;
 mod pending_changes;
 mod posts;
+mod purchasing;
 mod quick_picker;
 mod server_urls;
 mod sync;
@@ -111,7 +112,17 @@ pub fn run() {
             quick_picker::quick_picker_paste,
             quick_picker::quick_picker_close,
             quick_picker::quick_picker_open_app,
-            quick_picker::quick_picker_accessibility_request
+            quick_picker::quick_picker_accessibility_request,
+            purchasing::accounts_products_list,
+            purchasing::accounts_products_get,
+            purchasing::accounts_checkouts_create,
+            purchasing::accounts_checkouts_get,
+            purchasing::accounts_purchases_list,
+            purchasing::accounts_purchases_get,
+            purchasing::accounts_subscriptions_list,
+            purchasing::accounts_subscriptions_get,
+            purchasing::accounts_subscriptions_update,
+            purchasing::accounts_subscriptions_portal_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

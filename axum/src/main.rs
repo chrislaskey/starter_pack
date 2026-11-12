@@ -122,6 +122,10 @@ async fn main() -> Result<(), String> {
         None => deployment,
     };
     let stripe = stripe::open()?;
+    let deployment = match &stripe {
+        Some(stripe) => deployment.with_stripe(stripe.clone()),
+        None => deployment,
+    };
     let arguments: Vec<String> = env::args().skip(1).collect();
     if !arguments.is_empty() {
         return command(&deployment, stripe.as_ref(), &arguments).await;

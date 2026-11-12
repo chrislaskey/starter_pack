@@ -121,7 +121,14 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
         .route("/api/accounts/purchases", get(purchases::list))
         .route("/api/accounts/purchases/{id}", get(purchases::get))
         .route("/api/accounts/subscriptions", get(subscriptions::list))
-        .route("/api/accounts/subscriptions/{id}", get(subscriptions::get))
+        .route(
+            "/api/accounts/subscriptions/{id}",
+            get(subscriptions::get).put(subscriptions::update),
+        )
+        .route(
+            "/api/accounts/subscriptions/{id}/portal",
+            post(subscriptions::portal_create),
+        )
         .route("/api/avatars", put(avatars::update))
         .route("/api/avatars/uploads", post(avatars::create_upload))
         .route("/api/posts", get(posts::list).post(posts::create))
@@ -2283,11 +2290,15 @@ mod tests {
         let subscription = |status: &str| StripeSubscription {
             id: "sub_1".to_string(),
             customer_id: customer_id.clone(),
+            item_id: "si_1".to_string(),
             price_id: "price_monthly".to_string(),
             status: status.to_string(),
             current_period_end: Some(1_800_000_000),
             cancel_at_period_end: false,
             ended_at: None,
+            schedule_id: None,
+            scheduled_price_id: None,
+            scheduled_at: None,
         };
         router
             .stripe
@@ -2323,6 +2334,52 @@ mod tests {
         );
         let (status, _) = get(&router, &subscription_path).await;
         assert_eq!(status, StatusCode::OK);
+
+        let (status, canceled) = send(
+            &router,
+            Method::PUT,
+            &subscription_path,
+            Some(json!({ "action": "cancel" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(canceled["cancel_at_period_end"], json!(true));
+        let (status, resumed) = send(
+            &router,
+            Method::PUT,
+            &subscription_path,
+            Some(json!({ "action": "resume" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resumed["cancel_at_period_end"], json!(false));
+        let (status, portal) = send(
+            &router,
+            Method::POST,
+            &format!("{subscription_path}/portal"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            portal["url"]
+                .as_str()
+                .expect("a url")
+                .starts_with("https://")
+        );
+        let (status, portal) = send(
+            &router,
+            Method::POST,
+            &format!("{subscription_path}/portal"),
+            Some(json!({ "return_to": "app" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let url = portal["url"].as_str().expect("a url");
+        assert!(
+            url.ends_with("http://server.test/accounts/back-to-app"),
+            "{url}"
+        );
 
         router
             .stripe

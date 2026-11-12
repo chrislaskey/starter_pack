@@ -21,6 +21,7 @@ pub struct Plan {
     pub grant: Grant,
     pub product_id: Uuid,
     pub product_name: String,
+    pub price_id: Uuid,
     pub subscription_id: Uuid,
     pub status: SubscriptionStatus,
     /// The next renewal, or the end when `cancel_at_period_end`.
@@ -59,6 +60,7 @@ pub async fn current(deployment: &Deployment, user: &User) -> Result<Option<Plan
             grant,
             product_id: subscription.product_id,
             product_name,
+            price_id: subscription.price_id,
             subscription_id: subscription.id,
             status: subscription.status,
             current_period_end: subscription.current_period_end,
@@ -137,11 +139,15 @@ mod tests {
         StripeSubscription {
             id: "sub_1".to_string(),
             customer_id: customer_id.to_string(),
+            item_id: "si_1".to_string(),
             price_id: "price_monthly".to_string(),
             status: status.to_string(),
             current_period_end: Some(now().timestamp() + 30 * 24 * 60 * 60),
             cancel_at_period_end: false,
             ended_at: None,
+            schedule_id: None,
+            scheduled_price_id: None,
+            scheduled_at: None,
         }
     }
 
@@ -175,9 +181,16 @@ mod tests {
             .await
             .expect("a user");
         let monthly = products::list(deployment).await.expect("the catalog")[0].prices[0].id;
-        let created = checkouts::create(deployment, stripe, &alice, monthly, "http://server.test")
-            .await
-            .expect("a checkout");
+        let created = checkouts::create(
+            deployment,
+            stripe,
+            &alice,
+            monthly,
+            "http://server.test",
+            crate::accounts::online::ReturnTo::Web,
+        )
+        .await
+        .expect("a checkout");
         let customer_id = match stripe {
             Stripe::Memory(memory) => {
                 let memory = memory.lock().expect("the memory");
@@ -248,10 +261,16 @@ mod tests {
             ));
 
             let yearly = products::list(&deployment).await.expect("the catalog")[0].prices[1].id;
-            let error =
-                checkouts::create(&deployment, &stripe, &alice, yearly, "http://server.test")
-                    .await
-                    .expect_err("one plan at a time");
+            let error = checkouts::create(
+                &deployment,
+                &stripe,
+                &alice,
+                yearly,
+                "http://server.test",
+                crate::accounts::online::ReturnTo::Web,
+            )
+            .await
+            .expect_err("one plan at a time");
             assert!(matches!(error, CheckoutError::AlreadySubscribed));
         })
         .await;
@@ -316,6 +335,168 @@ mod tests {
                 .expect("listed");
             assert_eq!(listed.len(), 1, "the same subscription, updated in place");
             assert!(listed[0].subscription.ended_at.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscriptions_update_switches_now_or_at_the_period_end() {
+        use crate::accounts::subscriptions::{SubscriptionChange, SubscriptionError};
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let stripe = catalog(&deployment).await;
+            let (alice, _) = subscribed(&deployment, &stripe).await;
+            let id = current(&deployment, &alice)
+                .await
+                .expect("read")
+                .expect("a plan")
+                .subscription_id;
+            let prices = products::list(&deployment).await.expect("the catalog")[0]
+                .prices
+                .clone();
+            let (monthly, yearly) = (prices[0].id, prices[1].id);
+
+            let error = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::Switch { price_id: monthly },
+            )
+            .await
+            .expect_err("the same price");
+            assert!(matches!(error, SubscriptionError::SamePrice));
+
+            let shown = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::Switch { price_id: yearly },
+            )
+            .await
+            .expect("monthly to yearly is at once");
+            assert_eq!(shown.price.id, yearly);
+            assert_eq!(shown.scheduled_price, None);
+
+            let shown = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::Switch { price_id: monthly },
+            )
+            .await
+            .expect("yearly to monthly waits");
+            assert_eq!(shown.price.id, yearly);
+            assert_eq!(
+                shown.scheduled_price.as_ref().map(|price| price.id),
+                Some(monthly)
+            );
+            assert_eq!(
+                shown.subscription.scheduled_at,
+                shown.subscription.current_period_end
+            );
+
+            let shown = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::SwitchUndo,
+            )
+            .await
+            .expect("undone");
+            assert_eq!(shown.price.id, yearly);
+            assert_eq!(shown.scheduled_price, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscriptions_update_cancels_and_resumes_and_opens_the_portal() {
+        use crate::accounts::subscriptions::{SubscriptionChange, SubscriptionError};
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let stripe = catalog(&deployment).await;
+            let (alice, customer_id) = subscribed(&deployment, &stripe).await;
+            let id = current(&deployment, &alice)
+                .await
+                .expect("read")
+                .expect("a plan")
+                .subscription_id;
+            let yearly = products::list(&deployment).await.expect("the catalog")[0].prices[1].id;
+
+            let shown =
+                subscriptions::update(&deployment, &stripe, &alice, id, SubscriptionChange::Cancel)
+                    .await
+                    .expect("canceled");
+            assert!(shown.subscription.cancel_at_period_end);
+            assert!(
+                current(&deployment, &alice)
+                    .await
+                    .expect("read")
+                    .expect("still a plan")
+                    .cancel_at_period_end
+            );
+            let error = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::Switch { price_id: yearly },
+            )
+            .await
+            .expect_err("resume first");
+            assert!(matches!(error, SubscriptionError::Canceling));
+            let shown =
+                subscriptions::update(&deployment, &stripe, &alice, id, SubscriptionChange::Resume)
+                    .await
+                    .expect("resumed");
+            assert!(!shown.subscription.cancel_at_period_end);
+
+            let url = subscriptions::portal_create(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                "http://server.test",
+                crate::accounts::online::ReturnTo::Web,
+            )
+            .await
+            .expect("the portal");
+            assert!(url.contains(&customer_id));
+            assert!(url.contains(&format!("http://server.test/accounts/subscriptions/{id}")));
+
+            stripe.memory_subscription_put(subscription("past_due", &customer_id));
+            deliver(
+                &deployment,
+                &stripe,
+                "evt_1",
+                "customer.subscription.updated",
+                "sub_1",
+            )
+            .await;
+            let error = subscriptions::update(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                SubscriptionChange::Switch { price_id: yearly },
+            )
+            .await
+            .expect_err("the card first");
+            assert!(matches!(error, SubscriptionError::PaymentFailed));
+            subscriptions::portal_create(
+                &deployment,
+                &stripe,
+                &alice,
+                id,
+                "http://server.test",
+                crate::accounts::online::ReturnTo::Web,
+            )
+            .await
+            .expect("the portal still opens, for the card");
         })
         .await;
     }

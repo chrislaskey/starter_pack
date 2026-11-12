@@ -10,6 +10,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use app_core::accounts::checkouts::{self, CheckoutCreated, CheckoutShown};
+use app_core::accounts::online::ReturnTo;
 use app_core::accounts::stripe::Stripe;
 use app_core::deployment::Deployment;
 
@@ -45,6 +46,9 @@ impl ServerUrl {
 #[derive(Deserialize)]
 pub struct CheckoutFields {
     pub price_id: Uuid,
+    /// `app` when the desktop app asks, see `app_core::accounts::online`.
+    #[serde(default)]
+    pub return_to: ReturnTo,
 }
 
 /// `POST /api/accounts/checkouts`
@@ -56,8 +60,15 @@ pub async fn create(
     Json(fields): Json<CheckoutFields>,
 ) -> Result<(StatusCode, Json<CheckoutCreated>), ApiError> {
     let stripe = stripe.ok_or_else(no_stripe)?;
-    let created =
-        checkouts::create(&deployment, &stripe, &user, fields.price_id, &server_url).await?;
+    let created = checkouts::create(
+        &deployment,
+        &stripe,
+        &user,
+        fields.price_id,
+        &server_url,
+        fields.return_to,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 

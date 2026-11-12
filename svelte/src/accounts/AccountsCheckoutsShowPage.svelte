@@ -1,10 +1,13 @@
 <!-- Where Stripe's page returns to, at /accounts/checkouts/:id: the
      checkout as Stripe has it now. A payment that settles later shows
      Processing, and the page asks again every few seconds until it is
-     paid or failed. See docs/design/purchasing.md, P3. -->
+     paid or failed. In the app, Stripe's page is in the browser, and the
+     page asks again when the app has the focus. See
+     docs/design/purchasing.md, P3. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
-  import { accountsCheckoutsGet } from "../lib/core/index.js";
+  import { accountsCheckoutsGet, hasDeviceAccounts } from "../lib/core/index.js";
+  import { currentUserReload } from "../lib/current_user.js";
   import { pathParams } from "../lib/router.js";
   import {
     accountsProductsShowUrl,
@@ -28,14 +31,24 @@
       asked += 1;
       const pending = checkout.status === "open" || checkout.status === "processing";
       if (pending && asked < ASK_AT_MOST) timer = setTimeout(load, ASK_AGAIN_MS);
+      if (checkout.status === "paid") await currentUserReload();
     } catch (problem) {
       error = String(problem);
     }
   }
 
+  // Back from paying in the browser, in the app: ask again
+  function onFocus() {
+    clearTimeout(timer);
+    asked = 0;
+    load();
+  }
+
   $effect(() => () => clearTimeout(timer));
   load();
 </script>
+
+<svelte:window onfocus={onFocus} />
 
 <main class="page">
   <AppNav />
@@ -54,6 +67,8 @@
       {/if}
     {:else if checkout.status === "processing"}
       <p>Your payment for {checkout.product_name} is processing. This page updates when it is done.</p>
+    {:else if checkout.status === "open" && hasDeviceAccounts}
+      <p>Finish paying for {checkout.product_name} in your browser. This page updates when you come back.</p>
     {:else if checkout.status === "open"}
       <p>{checkout.product_name} is not paid yet.</p>
       <p><a href={accountsProductsShowUrl(checkout.product_id)} class="link">Back to {checkout.product_name}</a></p>

@@ -209,45 +209,58 @@ export function accountsTrialCreate() {
   return Promise.reject(new Error("only the web has trials"));
 }
 
-// Purchasing is the web server's alone, and the app does not reach it yet,
-// see docs/design/purchasing.md, build step 7.
-const purchasingOnTheWebOnly = () => Promise.reject(new Error("Purchases are on the web for now"));
+// Purchasing is the web server's: these commands ask its API as the
+// signed-in person (../../../../tauri/src/purchasing.rs). Stripe's pages open
+// in the system browser, so a checkout and the portal answer no `url`.
 
 export function accountsProductsList() {
-  return purchasingOnTheWebOnly();
+  return invoke("accounts_products_list");
 }
 
-/** @param {string} _id */
-export function accountsProductsGet(_id) {
-  return purchasingOnTheWebOnly();
+/** @param {string} id */
+export function accountsProductsGet(id) {
+  return invoke("accounts_products_get", { id });
 }
 
-/** @param {string} _priceId */
-export function accountsCheckoutsCreate(_priceId) {
-  return purchasingOnTheWebOnly();
+/** @param {string} priceId */
+export function accountsCheckoutsCreate(priceId) {
+  return invoke("accounts_checkouts_create", { priceId });
 }
 
-/** @param {string} _id */
-export function accountsCheckoutsGet(_id) {
-  return purchasingOnTheWebOnly();
+/** @param {string} id */
+export function accountsCheckoutsGet(id) {
+  return invoke("accounts_checkouts_get", { id });
 }
 
 export function accountsPurchasesList() {
-  return purchasingOnTheWebOnly();
+  return invoke("accounts_purchases_list");
 }
 
-/** @param {string} _id */
-export function accountsPurchasesGet(_id) {
-  return purchasingOnTheWebOnly();
+/** @param {string} id */
+export function accountsPurchasesGet(id) {
+  return invoke("accounts_purchases_get", { id });
 }
 
 export function accountsSubscriptionsList() {
-  return purchasingOnTheWebOnly();
+  return invoke("accounts_subscriptions_list");
 }
 
-/** @param {string} _id */
-export function accountsSubscriptionsGet(_id) {
-  return purchasingOnTheWebOnly();
+/** @param {string} id */
+export function accountsSubscriptionsGet(id) {
+  return invoke("accounts_subscriptions_get", { id });
+}
+
+/**
+ * @param {string} id
+ * @param {object} change
+ */
+export function accountsSubscriptionsUpdate(id, change) {
+  return invoke("accounts_subscriptions_update", { id, change });
+}
+
+/** @param {string} id */
+export function accountsSubscriptionsPortalCreate(id) {
+  return invoke("accounts_subscriptions_portal_create", { id });
 }
 
 // A local user: someone using the app on this device without signing

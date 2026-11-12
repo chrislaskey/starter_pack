@@ -99,3 +99,14 @@ pub async fn update_status(
         .await?;
     Ok(())
 }
+
+/// The Stripe sessions of the checkouts Stripe may still change.
+pub async fn list_pending_stripe_session_ids(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT stripe_session_id FROM accounts_checkouts WHERE status IN ('open', 'processing') ORDER BY inserted_at",
+    )
+    .fetch_all(connection)
+    .await
+}

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::accounts::online::ReturnTo;
 use crate::accounts::prices;
 use crate::accounts::products::{self, ProductError, ProductKind};
 use crate::accounts::purchases::{self, Purchase, Store};
@@ -26,6 +27,10 @@ use crate::deployment::{Deployment, Role, now};
 use crate::users::User;
 
 pub const TABLE: &str = "accounts_checkouts";
+
+/// The page Stripe comes back to for the app: open to anyone, as the
+/// browser that paid is not signed in, saying to go back to the app.
+pub const BACK_TO_APP_PATH: &str = "/accounts/back-to-app";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,13 +158,15 @@ impl From<ProductError> for CheckoutError {
 
 /// A checkout for the price, with a Checkout Session on Stripe that
 /// comes back to `{server_url}/accounts/checkouts/{id}` when paid and
-/// to the product's page when the person goes back.
+/// to the product's page when the person goes back; for the app, to
+/// `{server_url}/accounts/back-to-app` either way.
 pub async fn create(
     deployment: &Deployment,
     stripe: &Stripe,
     user: &User,
     price_id: Uuid,
     server_url: &str,
+    return_to: ReturnTo,
 ) -> Result<CheckoutCreated, CheckoutError> {
     if deployment.role != Role::Server {
         return Err(CheckoutError::ServerOnly);
@@ -201,8 +208,14 @@ pub async fn create(
                 ProductKind::OneTime => CheckoutMode::Payment,
             },
             client_reference_id: id.to_string(),
-            success_url: format!("{server_url}/accounts/checkouts/{id}"),
-            cancel_url: format!("{server_url}/accounts/products/{}", product.id),
+            success_url: match return_to {
+                ReturnTo::Web => format!("{server_url}/accounts/checkouts/{id}"),
+                ReturnTo::App => format!("{server_url}{BACK_TO_APP_PATH}"),
+            },
+            cancel_url: match return_to {
+                ReturnTo::Web => format!("{server_url}/accounts/products/{}", product.id),
+                ReturnTo::App => format!("{server_url}{BACK_TO_APP_PATH}"),
+            },
             free_days: product.free_days,
             tax: stripe.tax(),
         })
@@ -433,9 +446,16 @@ mod tests {
                 .expect("a user");
             let license = price_named(&deployment, "License").await;
 
-            let created = create(&deployment, &stripe, &alice, license, SERVER_URL)
-                .await
-                .expect("a checkout");
+            let created = create(
+                &deployment,
+                &stripe,
+                &alice,
+                license,
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect("a checkout");
             assert_eq!(created.checkout.status, CheckoutStatus::Open);
             assert!(created.url.starts_with("https://checkout.stripe.test/"));
             if let Stripe::Memory(memory) = &stripe {
@@ -480,9 +500,16 @@ mod tests {
                     .expect("shown")
                     .owned
             );
-            let error = create(&deployment, &stripe, &alice, license, SERVER_URL)
-                .await
-                .expect_err("owned");
+            let error = create(
+                &deployment,
+                &stripe,
+                &alice,
+                license,
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect_err("owned");
             assert!(matches!(error, CheckoutError::AlreadyOwned));
 
             let bob = users::create(&deployment, "bob@example.com", "Bob")
@@ -506,9 +533,16 @@ mod tests {
                 .expect("a user");
             let credits = price_named(&deployment, "Credits").await;
             for payment in ["pi_1", "pi_2"] {
-                let created = create(&deployment, &stripe, &alice, credits, SERVER_URL)
-                    .await
-                    .expect("a checkout");
+                let created = create(
+                    &deployment,
+                    &stripe,
+                    &alice,
+                    credits,
+                    SERVER_URL,
+                    ReturnTo::Web,
+                )
+                .await
+                .expect("a checkout");
                 pay(&stripe, &created.checkout.stripe_session_id, payment);
                 get(&deployment, &stripe, &alice, created.checkout.id)
                     .await
@@ -532,6 +566,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkouts_create_for_the_app_comes_back_to_the_page_for_it() {
+        with_each_database(|database| async move {
+            let deployment = Deployment::new(database, Role::Server);
+            let stripe = catalog(&deployment).await;
+            let alice = users::create(&deployment, "alice@example.com", "Alice")
+                .await
+                .expect("a user");
+            let license = price_named(&deployment, "License").await;
+            create(
+                &deployment,
+                &stripe,
+                &alice,
+                license,
+                SERVER_URL,
+                ReturnTo::App,
+            )
+            .await
+            .expect("a checkout");
+            if let Stripe::Memory(memory) = &stripe {
+                let memory = memory.lock().expect("the memory");
+                let asked = &memory.checkout_sessions_asked[0];
+                let back = format!("{SERVER_URL}{BACK_TO_APP_PATH}");
+                assert_eq!((&asked.success_url, &asked.cancel_url), (&back, &back));
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn checkouts_create_needs_an_account_and_a_price_for_sale() {
         with_each_database(|database| async move {
             let deployment = Deployment::new(database, Role::Server);
@@ -540,17 +603,31 @@ mod tests {
             let trial = trial_users::create(&deployment, 5)
                 .await
                 .expect("a trial user");
-            let error = create(&deployment, &stripe, &trial.user, license, SERVER_URL)
-                .await
-                .expect_err("a trial user");
+            let error = create(
+                &deployment,
+                &stripe,
+                &trial.user,
+                license,
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect_err("a trial user");
             assert!(matches!(error, CheckoutError::NeedsAccount));
 
             let alice = users::create(&deployment, "alice@example.com", "Alice")
                 .await
                 .expect("a user");
-            let error = create(&deployment, &stripe, &alice, Uuid::now_v7(), SERVER_URL)
-                .await
-                .expect_err("no such price");
+            let error = create(
+                &deployment,
+                &stripe,
+                &alice,
+                Uuid::now_v7(),
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect_err("no such price");
             assert!(matches!(error, CheckoutError::PriceNotForSale));
         })
         .await;
@@ -565,9 +642,16 @@ mod tests {
                 .await
                 .expect("a user");
             let license = price_named(&deployment, "License").await;
-            let created = create(&deployment, &stripe, &alice, license, SERVER_URL)
-                .await
-                .expect("a checkout");
+            let created = create(
+                &deployment,
+                &stripe,
+                &alice,
+                license,
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect("a checkout");
             let session_id = created.checkout.stripe_session_id.clone();
             pay(&stripe, &session_id, "pi_1");
             deliver(
@@ -600,9 +684,16 @@ mod tests {
                     .expect("shown")
                     .owned
             );
-            create(&deployment, &stripe, &alice, license, SERVER_URL)
-                .await
-                .expect("refunded, it can be bought again");
+            create(
+                &deployment,
+                &stripe,
+                &alice,
+                license,
+                SERVER_URL,
+                ReturnTo::Web,
+            )
+            .await
+            .expect("refunded, it can be bought again");
         })
         .await;
     }

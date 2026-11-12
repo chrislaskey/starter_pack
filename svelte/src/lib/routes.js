@@ -17,6 +17,7 @@ export const ACCOUNTS_PASSWORD_EDIT_PATH = "/accounts/password";
 export const ACCOUNTS_PRODUCTS_INDEX_PATH = "/accounts/products";
 export const ACCOUNTS_PRODUCTS_SHOW_PATH = "/accounts/products/:id";
 export const ACCOUNTS_CHECKOUTS_SHOW_PATH = "/accounts/checkouts/:id";
+export const ACCOUNTS_BACK_TO_APP_PATH = "/accounts/back-to-app";
 export const ACCOUNTS_PURCHASES_INDEX_PATH = "/accounts/purchases";
 export const ACCOUNTS_PURCHASES_SHOW_PATH = "/accounts/purchases/:id";
 export const ACCOUNTS_SUBSCRIPTIONS_INDEX_PATH = "/accounts/subscriptions";
@@ -43,7 +44,14 @@ export const FORUM_INDEX_PATH = "/forum";
 export const OPS_HOME_PATH = "/ops";
 
 /** The pages anyone sees; every other page needs someone signed in. */
-export const OPEN_PATHS = [HOME_PATH, ACCOUNTS_INDEX_PATH, ACCOUNTS_SIGN_UP_PATH, ACCOUNTS_SIGN_IN_PATH, ACCOUNTS_TRIAL_PATH];
+export const OPEN_PATHS = [
+  HOME_PATH,
+  ACCOUNTS_INDEX_PATH,
+  ACCOUNTS_SIGN_UP_PATH,
+  ACCOUNTS_SIGN_IN_PATH,
+  ACCOUNTS_TRIAL_PATH,
+  ACCOUNTS_BACK_TO_APP_PATH,
+];
 
 export function homeUrl() {
   return HOME_PATH;

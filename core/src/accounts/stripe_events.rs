@@ -172,6 +172,17 @@ async fn fetch(
             };
             Ok(Fetched::CheckoutSession(session, subscription))
         }
+        "subscription_schedule" => {
+            match stripe
+                .subscription_schedule_subscription_id(object_id)
+                .await?
+            {
+                Some(subscription_id) => Ok(Fetched::Subscription(
+                    stripe.subscription_get(&subscription_id).await?,
+                )),
+                None => Ok(Fetched::Nothing),
+            }
+        }
         "customer.subscription" => Ok(Fetched::Subscription(
             stripe.subscription_get(object_id).await?,
         )),

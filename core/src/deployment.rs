@@ -44,6 +44,9 @@ pub struct Deployment {
     /// The public bucket users' pictures go to, on a server that has one.
     #[cfg(feature = "object-storage")]
     pub avatar_bucket: Option<Storage>,
+    /// Stripe, on a server that sells, for the jobs that ask it.
+    #[cfg(feature = "stripe")]
+    pub stripe: Option<crate::accounts::stripe::Stripe>,
 }
 
 impl Deployment {
@@ -56,11 +59,21 @@ impl Deployment {
             file_store: FileStore::None,
             #[cfg(feature = "object-storage")]
             avatar_bucket: None,
+            #[cfg(feature = "stripe")]
+            stripe: None,
         }
     }
 
     pub fn with_file_store(self, file_store: FileStore) -> Deployment {
         Deployment { file_store, ..self }
+    }
+
+    #[cfg(feature = "stripe")]
+    pub fn with_stripe(self, stripe: crate::accounts::stripe::Stripe) -> Deployment {
+        Deployment {
+            stripe: Some(stripe),
+            ..self
+        }
     }
 
     #[cfg(feature = "object-storage")]

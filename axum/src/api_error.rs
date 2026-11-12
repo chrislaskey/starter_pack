@@ -337,6 +337,13 @@ impl From<SubscriptionError> for ApiError {
     fn from(error: SubscriptionError) -> Self {
         let status = match &error {
             SubscriptionError::NotFound { .. } => StatusCode::NOT_FOUND,
+            SubscriptionError::Ended
+            | SubscriptionError::OtherStore
+            | SubscriptionError::PaymentFailed
+            | SubscriptionError::Canceling
+            | SubscriptionError::PriceNotForSale
+            | SubscriptionError::SamePrice => StatusCode::UNPROCESSABLE_ENTITY,
+            SubscriptionError::Stripe(error) => return ApiError::from_stripe(error),
             SubscriptionError::ServerOnly | SubscriptionError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

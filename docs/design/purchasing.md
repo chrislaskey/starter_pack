@@ -1,6 +1,6 @@
 # Purchasing
 
-**Status: agreed 2026-11-11; steps 1–4 built 2026-11-11.** Plans and one-time
+**Status: agreed 2026-11-11; steps 1–7 built 2026-11-11, step 8 agreed in `purchasing-phones.md`, iOS first.** Plans and one-time
 purchases in `accounts`, paid through Stripe on the web and desktop and
 later through the App Store and Google Play on phones.
 
@@ -72,8 +72,8 @@ A purchase or a subscription records which store sold it, `store`:
 | Store | Where | First build |
 |---|---|---|
 | `stripe` | web, desktop | yes |
-| `app_store` | iOS | later, a design of its own |
-| `play_store` | Android | later, a design of its own |
+| `app_store` | iOS | step 8, `purchasing-phones.md` |
+| `play_store` | Android | step 8, `purchasing-phones.md` |
 
 The pages read our copy, so they look the same whichever store sold
 it. What differs is where a subscription is managed: a store's
@@ -141,9 +141,8 @@ retry succeeds the subscription is `active` again and so is the plan.
 webhook marks the purchase refunded, and a refunded one-time purchase
 gives nothing. Ops shows it later.
 
-**P12. Deleting an account** with a plan cancels it at once in Stripe
-first. Deleting accounts is not built yet; this is a rule for when it
-is.
+**P12. Deleting an account** with a plan cancels it at once in Stripe,
+designed in `accounts-delete.md`.
 
 ## The copy of Stripe
 
@@ -154,9 +153,11 @@ is.
   overwrites a newer state.
 - **The return page fetches too**, P3, so a person never waits for a
   webhook.
-- **A daily job**, `stripe_reconcile` in `Job::ALL`, fetches the
-  subscriptions changed in the last days and every checkout still
-  open, for a webhook that never came.
+- **A daily job**, `stripe_reconcile` in `Job::ALL`, copies the catalog
+  again, asks Stripe for every checkout still open or processing, and
+  copies every subscription not ended, for a webhook that never came.
+  Every live subscription is fine for a small app; a big one would ask
+  for those changed lately.
 - **The webhook route** is `POST /api/accounts/stripe-webhooks`, no
   session, checked by its `Stripe-Signature` against the raw body. A
   bad or missing signature, or one more than five minutes old, is a
@@ -249,7 +250,7 @@ so a phone store later changes neither.
 |---|---|
 | Core | `core/src/accounts/products.rs`, `prices.rs`, `checkouts.rs`, `purchases.rs`, `subscriptions.rs`, `plans.rs`, `stripe.rs` (the client), `stripe_events.rs` |
 | API | `/api/accounts/products`, `/api/accounts/products/:id`, `POST /api/accounts/checkouts`, `/api/accounts/checkouts/:id`, `/api/accounts/purchases[/:id]`, `/api/accounts/subscriptions[/:id]`, `PUT /api/accounts/subscriptions/:id` (switch, cancel, resume), `POST /api/accounts/subscriptions/:id/portal` |
-| Tauri | none: `accounts` is online only, a device's pages call the API with its token, see `multi-app.md` |
+| Tauri | `tauri/src/purchasing.rs`: `accounts_products_list` and the rest, each asking the API with the device's token through `app_core::accounts::online`, step 7 |
 | Pages | `AccountsProductsIndexPage`, `AccountsProductsShowPage`, `AccountsCheckoutsShowPage`, `AccountsPurchasesIndexPage`, `AccountsPurchasesShowPage`, `AccountsSubscriptionsIndexPage`, `AccountsSubscriptionsShowPage` |
 
 Stripe's own "trial" is called **free days** here
@@ -276,11 +277,34 @@ Stripe's own "trial" is called **free days** here
    past-due banner, one plan at a time, `/accounts/subscriptions` and
    `/accounts/subscriptions/:id`: P4, P6, P10. Until step 5 the banner
    points to Stripe's email for a new card.
-5. **Changing a plan.** Switch, cancel and resume, the portal: P7–P9.
-6. **The reconcile job.**
-7. **Desktop.** The system browser, coming back on focus, the plan in
-   `device_settings`.
-8. **Phones.** The App Store and Google Play, a design of their own.
+5. **Changing a plan.** Built: `PUT /api/accounts/subscriptions/:id`
+   with `switch`, `switch_undo`, `cancel` or `resume`, and
+   `POST /api/accounts/subscriptions/:id/portal`; `scheduled_price_id`
+   and `scheduled_at` on `accounts_subscriptions`; the
+   `subscription_schedule.*` events. A switch is at once and prorated
+   for a dearer price of the same interval and for monthly to yearly
+   (Stripe starts a new period when the interval changes); it waits
+   for the end of the period for a cheaper price and for yearly to
+   monthly, so a paid year is not cut short, with a subscription
+   schedule the page shows as "Changes to … on …". A plan ending with
+   its period is resumed before it is switched. The banner's Update
+   your card opens the portal: P7–P9.
+6. **The reconcile job.** Built: `accounts::stripe_reconcile::run`, on
+   a server whose deployment has Stripe, `Deployment::with_stripe`;
+   `app_web jobs run stripe_reconcile` runs it now.
+7. **Desktop.** Built: `app_core::accounts::online`, the purchasing API
+   asked with the device's token through the sync's `Http`, its JSON
+   passed to the pages as it came, so the app has none of the Stripe
+   crates; the Tauri commands in `tauri/src/purchasing.rs`. Stripe's
+   checkout and portal open in the system browser with
+   `"return_to": "app"`, and come back to `/accounts/back-to-app`, open
+   to anyone, as that browser may not be signed in; the app's pages ask
+   again when it has the focus. The plan is kept in the `plan` device
+   setting, asked for after a sync when older than 15 minutes and after
+   a purchase or a change, and trusted offline until its period ends.
+   A phone is refused a checkout or a change until step 8.
+8. **Phones.** The App Store and Google Play: `purchasing-phones.md`,
+   proposed.
 
 Each step asks before its migration, as AGENTS.md says.
 

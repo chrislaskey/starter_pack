@@ -4,7 +4,9 @@
 //! sync runs at a time: when the app starts, when it comes
 //! to the foreground, after every write, from the Sync now button, and
 //! every half minute. Each one ends with a `synced` event to the pages,
-//! carrying the report or the error.
+//! carrying the report or the error. A sync that went through also asks
+//! for the person's plan when the one kept is stale, see
+//! `app_core::accounts::online`.
 //! A device working offline, `sync_set_offline`, makes no request until
 //! it goes online again, and neither does one with no account active,
 //! see `device_accounts`, which holds the same lock while it switches
@@ -20,6 +22,7 @@ use serde_json::json;
 use tauri::{App, AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, MutexGuard};
 
+use app_core::accounts::online;
 use app_core::sync::{self, Http, Report, Status, SyncError};
 
 use crate::device_accounts::DeviceAccounts;
@@ -117,6 +120,14 @@ pub async fn run(app: &AppHandle) -> Result<Report, String> {
         if let Err(error) = device.forget_signed_in().await {
             log::warn!("could not sign out: {error}");
         }
+    }
+    if let (Ok(report), Ok(deployment)) = (&result, device.active().await)
+        && !report.signed_out
+        && !report.local
+        && !report.offline
+        && online::plan_is_stale(&deployment).await.unwrap_or(true)
+    {
+        crate::purchasing::plan_refresh(&deployment, &server.transport).await;
     }
     let result = result.map_err(|error| error.to_string());
     match &result {

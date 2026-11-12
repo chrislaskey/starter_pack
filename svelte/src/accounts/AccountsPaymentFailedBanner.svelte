@@ -13,6 +13,6 @@
 </script>
 
 <div class="alert alert-error flex flex-wrap items-center gap-3" role="status" data-payment-failed-banner>
-  <span class="grow">Your plan's payment failed, so your plan is paused. The email from Stripe has a link to update your card.</span>
-  <a href={accountsSubscriptionsShowUrl(subscriptionId)} class="btn btn-sm">See your plan</a>
+  <span class="grow">Your plan's payment failed, so your plan is paused. Update your card to restore it.</span>
+  <a href={accountsSubscriptionsShowUrl(subscriptionId)} class="btn btn-sm">Update your card</a>
 </div>
