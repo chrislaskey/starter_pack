@@ -46,13 +46,16 @@ macro_rules! select {
 }
 
 /// Every community the user, `$1`, sees: all of them but a trial
-/// user's, which only that trial user sees, see `trial_users`.
+/// user's, which only that trial user sees, and for a trial user only
+/// those they are or were in, see `trial_users`.
 macro_rules! visible_to {
     () => {
         "id NOT IN (
             SELECT uc.community_id FROM app_users_communities uc
             JOIN accounts_users a ON a.id = uc.user_id
-            WHERE a.trial_expires_at IS NOT NULL AND uc.user_id != $1)"
+            WHERE a.trial_expires_at IS NOT NULL AND uc.user_id != $1)
+         AND ((SELECT trial_expires_at FROM accounts_users WHERE id = $1) IS NULL
+            OR id IN (SELECT community_id FROM app_users_communities WHERE user_id = $1))"
     };
 }
 

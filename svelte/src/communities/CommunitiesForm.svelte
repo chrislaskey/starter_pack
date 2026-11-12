@@ -26,7 +26,7 @@
 <form onsubmit={submit} class="flex flex-col gap-3">
   <label class="flex flex-col gap-1">
     <span>Name</span>
-    <input type="text" class="input w-full" bind:value={name} disabled={busy} />
+    <input type="text" class="input w-full" bind:value={name} maxlength="80" disabled={busy} />
     <FieldErrors {errors} fields={["name"]} />
   </label>
   {#if error && Object.keys(errors).length === 0}

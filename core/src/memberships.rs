@@ -53,6 +53,8 @@ pub enum MembershipError {
     Invalid(String),
     #[error("the change was refused: {0}")]
     Rejected(String),
+    #[error(transparent)]
+    Record(#[from] crate::events::RecordError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }

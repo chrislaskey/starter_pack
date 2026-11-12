@@ -95,6 +95,8 @@ pub enum UserError {
     Invalid(String),
     #[error(transparent)]
     DeviceSettings(#[from] DeviceSettingsError),
+    #[error(transparent)]
+    Record(#[from] crate::events::RecordError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }

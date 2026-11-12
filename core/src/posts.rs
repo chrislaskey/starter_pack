@@ -26,6 +26,7 @@ use crate::sync::{Cursor, TableRow};
 use crate::users::{self, User};
 
 pub const TABLE: &str = "app_posts";
+pub const MAX_BODY_LENGTH: usize = 10_000;
 /// The fields an event may set when it creates a post.
 const CREATE_FIELDS: &[&str] = &["body"];
 /// The fields an event may change on a post.
@@ -62,6 +63,8 @@ pub enum PostError {
     NotFound { id: Uuid },
     #[error("a post needs some text")]
     BlankBody,
+    #[error("a post has {MAX_BODY_LENGTH} characters at most")]
+    BodyTooLong,
     #[error("only the owner can change a post")]
     NotOwner,
     #[error("{0}")]
@@ -70,6 +73,8 @@ pub enum PostError {
     Rejected(String),
     #[error(transparent)]
     Community(#[from] PostCommunityError),
+    #[error(transparent)]
+    Record(#[from] crate::events::RecordError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -479,11 +484,14 @@ fn fields(value: Value) -> Fields {
     }
 }
 
-/// The body as it is kept: trimmed, and not blank.
+/// The body as it is kept: trimmed, not blank and not too long.
 fn checked_body(body: &str) -> Result<String, PostError> {
     let body = body.trim();
     if body.is_empty() {
         return Err(PostError::BlankBody);
+    }
+    if body.chars().count() > MAX_BODY_LENGTH {
+        return Err(PostError::BodyTooLong);
     }
     Ok(body.to_string())
 }
@@ -588,6 +596,40 @@ mod tests {
                 .await
                 .expect_err("blank");
             assert!(matches!(error, PostError::BlankBody));
+            assert_eq!(list(&deployment, &alice).await.expect("the posts").len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn posts_create_and_update_refuse_a_body_over_the_maximum_length() {
+        with_each_database(|database| async move {
+            let deployment = server(database);
+            let alice = user(&deployment, "alice@example.com").await;
+            let longest = "é".repeat(MAX_BODY_LENGTH);
+            let post = create(&deployment, &alice, &longest, &[])
+                .await
+                .expect("the maximum, counted in characters");
+            let too_long = format!("{longest}é");
+            let error = create(&deployment, &alice, &too_long, &[])
+                .await
+                .expect_err("one more");
+            assert!(matches!(error, PostError::BodyTooLong));
+            let error = update(&deployment, &alice, post.id, &too_long, &[])
+                .await
+                .expect_err("one more");
+            assert!(matches!(error, PostError::BodyTooLong));
+
+            let pushed = Event::create(
+                TABLE,
+                Uuid::now_v7(),
+                fields(json!({ "body": too_long })),
+                now(),
+            );
+            let answer = apply_event(&deployment, &alice, &pushed)
+                .await
+                .expect("answered");
+            assert_eq!(answer.status, AnswerStatus::Rejected, "a pushed one too");
             assert_eq!(list(&deployment, &alice).await.expect("the posts").len(), 1);
         })
         .await;

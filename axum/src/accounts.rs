@@ -36,7 +36,7 @@ use app_core::users::{self, User};
 
 use crate::api_error::ApiError;
 use crate::current_user::{CurrentToken, CurrentUser, TOKEN_COOKIE};
-use crate::rate_limits::RateLimits;
+use crate::rate_limits::{ClientIpAddr, RateLimits};
 use crate::router::TrialUsersMax;
 
 #[derive(Deserialize)]
@@ -158,16 +158,21 @@ pub async fn trial_get(
 /// `POST /api/accounts/trial`, "Try it now": a trial user, signed in
 /// with a cookie that lasts as long as their rows are kept. A browser
 /// already signed in, as a trial user or anyone, is answered who it is
-/// and nothing is made.
+/// and nothing is made. A client IP makes so many an hour, see
+/// `rate_limits`; one refused because the server holds all the trial
+/// users it may is a 503, which `ApiError` writes to the log.
 pub async fn trial_create(
     State(deployment): State<Deployment>,
     State(TrialUsersMax(max)): State<TrialUsersMax>,
+    State(limits): State<RateLimits>,
+    ClientIpAddr(client_ip): ClientIpAddr,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ApiError> {
     if signed_in_user_of(&deployment, &jar).await?.is_some() {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
+    limits.check_trial_user(client_ip)?;
     let session = trial_users::create(&deployment, max)
         .await
         .map_err(AccountError::from)?;

@@ -38,7 +38,7 @@
 </script>
 
 <form onsubmit={submit} class="flex flex-col gap-3">
-  <textarea bind:value={text} rows="4" class="textarea w-full" aria-label="Post" placeholder="What's on your mind?"
+  <textarea bind:value={text} rows="4" class="textarea w-full" aria-label="Post" placeholder="What's on your mind?" maxlength="10000"
   ></textarea>
   {#if mine.length > 0}
     <fieldset class="flex flex-wrap gap-3">

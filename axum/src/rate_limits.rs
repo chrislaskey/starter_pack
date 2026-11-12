@@ -2,12 +2,15 @@
 //! key in this process's memory, see "Rate limits" in
 //! `docs/design/accounts-sign-in.md`: the emails sent per address, so
 //! nobody has the server mail an address over and over; the new codes
-//! per pending sign-in; and, as a layer on the routes, the requests per
-//! client IP. The buckets are forgotten on a restart, which is fine for
-//! these; `forget_old` keeps the maps from growing with every address
-//! ever tried. Behind a reverse proxy the client IP is the
-//! `X-Forwarded-For` header's, trusted only when `TRUST_PROXY_HEADERS`
-//! says the proxy is the only way in, since anyone can send the header.
+//! per pending sign-in; the trial users made per client IP; and, as a
+//! layer on the routes, the requests per client IP. The buckets are
+//! forgotten on a restart, which is fine for these; `forget_old` keeps
+//! the maps from growing with every address ever tried. Behind a
+//! reverse proxy the client IP is the last entry of the
+//! `X-Forwarded-For` header, the one the proxy wrote, trusted only when
+//! `TRUST_PROXY_HEADERS` says the proxy is the only way in, since
+//! anyone can send the header, and the entries before the last are
+//! whatever the client sent.
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -16,8 +19,9 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode, header};
+use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::http::request::Parts;
+use axum::http::{Extensions, HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use governor::clock::QuantaInstant;
 use governor::middleware::NoOpMiddleware;
@@ -29,11 +33,15 @@ use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::KeyExtractor;
 
 use crate::api_error::ApiError;
+use crate::router::AppState;
 
 /// Emails an address is sent in an hour, codes and the rest.
 pub const EMAILS_PER_HOUR_PER_ADDRESS: u32 = 5;
 /// New codes a pending sign-in gets in a minute.
 pub const RESENDS_PER_MINUTE_PER_SIGN_IN: u32 = 1;
+/// Trial users a client IP makes in an hour: enough for a classroom
+/// behind one address, too few for a script to fill the cap quickly.
+pub const TRIAL_USERS_PER_HOUR_PER_IP: u32 = 10;
 /// Requests to the accounts routes a client IP makes in a minute.
 pub const ACCOUNT_REQUESTS_PER_MINUTE_PER_IP: u32 = 30;
 
@@ -48,6 +56,7 @@ pub struct RateLimits {
 struct Limiters {
     emails: DefaultKeyedRateLimiter<String>,
     resends: DefaultKeyedRateLimiter<String>,
+    trial_users: DefaultKeyedRateLimiter<IpAddr>,
 }
 
 impl RateLimits {
@@ -57,6 +66,9 @@ impl RateLimits {
                 emails: RateLimiter::keyed(Quota::per_hour(nonzero(EMAILS_PER_HOUR_PER_ADDRESS))),
                 resends: RateLimiter::keyed(Quota::per_minute(nonzero(
                     RESENDS_PER_MINUTE_PER_SIGN_IN,
+                ))),
+                trial_users: RateLimiter::keyed(Quota::per_hour(nonzero(
+                    TRIAL_USERS_PER_HOUR_PER_IP,
                 ))),
             }),
         }
@@ -79,10 +91,19 @@ impl RateLimits {
             .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, TOO_MANY))
     }
 
+    /// One more trial user from the client IP, or 429.
+    pub fn check_trial_user(&self, client_ip: IpAddr) -> Result<(), ApiError> {
+        self.limiters
+            .trial_users
+            .check_key(&client_ip)
+            .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, TOO_MANY))
+    }
+
     /// Drops the buckets that are full again, for a task once an hour.
     pub fn forget_old(&self) {
         self.limiters.emails.retain_recent();
         self.limiters.resends.retain_recent();
+        self.limiters.trial_users.retain_recent();
     }
 }
 
@@ -128,10 +149,7 @@ fn too_many_requests(error: GovernorError) -> Response {
     }
 }
 
-/// The client's IP as the key: the proxy's header when trusted, else the
-/// peer address the server was started with, else, with neither, one
-/// shared key, so a server missing its connect info limits everyone
-/// together rather than nobody.
+/// The client's IP as the key, see `client_ip`.
 #[derive(Clone, Debug)]
 pub struct ClientIp {
     trust_proxy_headers: bool,
@@ -141,21 +159,52 @@ impl KeyExtractor for ClientIp {
     type Key = IpAddr;
 
     fn extract<T>(&self, request: &Request<T>) -> Result<IpAddr, GovernorError> {
-        if self.trust_proxy_headers
-            && let Some(forwarded) = request
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').next())
-                .and_then(|first| first.trim().parse::<IpAddr>().ok())
-        {
-            return Ok(forwarded);
-        }
-        Ok(request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map_or(IpAddr::from([0, 0, 0, 0]), |info| info.0.ip()))
+        Ok(client_ip(
+            self.trust_proxy_headers,
+            request.headers(),
+            request.extensions(),
+        ))
     }
+}
+
+/// The client's IP, for a handler that limits by it.
+pub struct ClientIpAddr(pub IpAddr);
+
+impl FromRequestParts<AppState> for ClientIpAddr {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<ClientIpAddr, ApiError> {
+        Ok(ClientIpAddr(client_ip(
+            state.trust_proxy_headers,
+            &parts.headers,
+            &parts.extensions,
+        )))
+    }
+}
+
+/// The client's IP: the last entry of the proxy's `X-Forwarded-For`
+/// when trusted, which the proxy wrote, where the entries before it
+/// came from the client; else the peer address the server was started
+/// with; else, with neither, one shared key, so a server missing its
+/// connect info limits everyone together rather than nobody.
+fn client_ip(trust_proxy_headers: bool, headers: &HeaderMap, extensions: &Extensions) -> IpAddr {
+    if trust_proxy_headers
+        && let Some(forwarded) = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit(',').next())
+            .and_then(|last| last.trim().parse::<IpAddr>().ok())
+    {
+        return forwarded;
+    }
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(IpAddr::from([0, 0, 0, 0]), |info| info.0.ip())
 }
 
 fn nonzero(count: u32) -> NonZeroU32 {
@@ -167,7 +216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rate_limits_count_emails_per_address_and_resends_per_sign_in() {
+    fn rate_limits_count_emails_per_address_resends_per_sign_in_and_trial_users_per_client() {
         let limits = RateLimits::new();
         for _ in 0..EMAILS_PER_HOUR_PER_ADDRESS {
             limits
@@ -187,6 +236,14 @@ mod tests {
             "within the minute"
         );
         limits.check_resend("pending-2").expect("another sign-in");
+        let client: IpAddr = "203.0.113.9".parse().unwrap();
+        for _ in 0..TRIAL_USERS_PER_HOUR_PER_IP {
+            limits.check_trial_user(client).expect("within the hour's");
+        }
+        assert!(limits.check_trial_user(client).is_err(), "the same client");
+        limits
+            .check_trial_user("203.0.113.10".parse().unwrap())
+            .expect("another client");
         limits.forget_old();
     }
 
@@ -194,7 +251,8 @@ mod tests {
     fn rate_limits_key_by_the_peer_or_the_trusted_header() {
         let peer: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let request = Request::builder()
-            .header("x-forwarded-for", "203.0.113.9, 10.0.0.2")
+            .header("x-forwarded-for", "198.51.100.7")
+            .header("x-forwarded-for", "10.0.0.2, 203.0.113.9")
             .extension(ConnectInfo(peer))
             .body(())
             .unwrap();
@@ -207,7 +265,8 @@ mod tests {
         };
         assert_eq!(
             trusting.extract(&request).unwrap(),
-            "203.0.113.9".parse::<IpAddr>().unwrap()
+            "203.0.113.9".parse::<IpAddr>().unwrap(),
+            "the last entry, the proxy's; the others are the client's to write"
         );
         let bare = Request::builder().body(()).unwrap();
         assert_eq!(

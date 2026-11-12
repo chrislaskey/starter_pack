@@ -46,6 +46,8 @@ Ports:
   PORT set     The web server on PORT and the Svelte dev server on
                PORT + 1000, so consecutive ports never meet; an error when
                either is taken.
+  Trials       The web server starts with TRIAL_USERS_MAX=100, so "Try it
+               now" works; set TRIAL_USERS_MAX=0 to see the pages without it.
   Storage      Garage on the web server's port + 2000 to + 2003, see
                \`bin/storage --help\`. Code Reviewer sets a distinct PORT in each
                session's tmux environment, so each worktree's apps run on
@@ -256,7 +258,7 @@ for target in "${targets[@]}"; do
   case "$target" in
     web)
       echo "bin/dev: the web server on http://localhost:$web_port"
-      (cd "$ROOT" && exec env ${storage_env[@]+"${storage_env[@]}"} PORT="$web_port" cargo run -p app_web) &
+      (cd "$ROOT" && exec env ${storage_env[@]+"${storage_env[@]}"} PORT="$web_port" TRIAL_USERS_MAX="${TRIAL_USERS_MAX:-100}" cargo run -p app_web) &
       pids+=($!)
       ;;
     desktop)

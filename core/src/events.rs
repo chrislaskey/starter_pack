@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::database::{Transaction, sql};
@@ -308,14 +309,28 @@ pub fn not_editable(changes: &Fields, allowed: &[&str]) -> Option<String> {
     Some(format!("not_editable: {}", refused.join(", ")))
 }
 
+/// Why the server did not record an event, and so not the write.
+#[derive(Debug, Error)]
+pub enum RecordError {
+    #[error("This trial has reached its limit. Sign up to keep going.")]
+    TrialWritesFull,
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
 /// Records an event the server answered, in the same transaction as the
-/// row, so a retry gets the same answer.
+/// row, so a retry gets the same answer. Refused for a trial user who
+/// has made all the writes a trial may, see `trial_users::MAX_WRITES`:
+/// the caller's transaction ends there and nothing is written.
 pub async fn record(
     tx: &mut Transaction,
     user_id: Uuid,
     event: &Event,
     answer: &Answer,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), RecordError> {
+    if crate::trial_users::writes_are_full_in(tx, user_id).await? {
+        return Err(RecordError::TrialWritesFull);
+    }
     let status = match answer.status {
         AnswerStatus::Applied => EventStatus::Applied,
         AnswerStatus::Conflict => EventStatus::Conflict,
@@ -330,7 +345,7 @@ pub async fn record(
         last_error: answer.reason.clone(),
         attempts: 0,
     };
-    sql!(tx, events::insert(&stored))
+    Ok(sql!(tx, events::insert(&stored))?)
 }
 
 /// Queues an event a device applied, for the next push. A local user's

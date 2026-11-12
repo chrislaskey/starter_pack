@@ -105,9 +105,12 @@ pub async fn create(
         deleted_by_id: None,
         avatar_url: None,
     };
-    let community_name = match device_name.trim() {
-        "" => COMMUNITY_NAME_WITHOUT_A_DEVICE_NAME,
-        device_name => device_name,
+    let community_name: String = match device_name.trim() {
+        "" => COMMUNITY_NAME_WITHOUT_A_DEVICE_NAME.to_string(),
+        device_name => device_name
+            .chars()
+            .take(communities::MAX_NAME_LENGTH)
+            .collect(),
     };
     let mut tx = deployment.begin().await?;
     users::upsert_in(&mut tx, &user).await?;
@@ -116,7 +119,7 @@ pub async fn create(
         token: None,
     };
     device_settings::set(&mut tx, SIGNED_IN, &Some(signed_in)).await?;
-    communities::create_in(&mut tx, Role::Device, &user, community_name).await?;
+    communities::create_in(&mut tx, Role::Device, &user, &community_name).await?;
     tx.commit().await?;
     Ok(user)
 }

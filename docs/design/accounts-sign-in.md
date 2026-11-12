@@ -579,10 +579,14 @@ hour calls `retain_recent`, so the map does not grow with every
 address ever tried. The per-IP limit is `tower_governor`'s layer on
 the accounts routes only, keyed by the peer address, which needs the
 server started with `into_make_service_with_connect_info`; behind a
-reverse proxy the key must come from `X-Forwarded-For` through its
-`SmartIpKeyExtractor`, and only when the proxy is the only way in,
-since the header is otherwise a lie anyone can send. That switch is a
-variable, `TRUST_PROXY_HEADERS`, off by default. Core knows nothing of
+reverse proxy the key is the last entry of `X-Forwarded-For`, the
+one the proxy wrote: the entries before it are whatever the client
+sent, so the first, which `SmartIpKeyExtractor` takes, let a client
+name a new address with every request. And only when the proxy is the
+only way in, since the header is otherwise a lie anyone can send. That
+switch is a variable, `TRUST_PROXY_HEADERS`, off by default. "Try it
+now" has a bucket of its own per client IP, ten an hour, checked in
+its handler, see `accounts-local-and-trial-users.md`. Core knows nothing of
 any of it; the same `RateLimits` can later take a key for anything the
 server wants to meter, sync pushes per token or posts per user.
 

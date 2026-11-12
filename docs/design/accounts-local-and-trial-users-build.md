@@ -1,7 +1,6 @@
 # Local users and trial users: the build plan
 
-**Status: steps 1 to 4 built 2026-11-11; step 5, abuse of trials, is
-not.** The requirements settled in
+**Status: steps 1 to 5 built 2026-11-11.** The requirements settled in
 `accounts-local-and-trial-users.md`, which keeps the scenarios and the
 reasons, as steps with what each must do to be done. A ticked box is
 built and tested; "As built" at the end lists where the code went
@@ -10,7 +9,7 @@ SQLite and PostgreSQL, and the trial's pages in a headless browser; the
 desktop and phone apps' pages were not clicked through.
 
 Trials are off until the server is started with `TRIAL_USERS_MAX`
-above 0, and no fork should set it before step 5.
+above 0; 100 is the number to start with, see step 5.
 
 ## The words
 
@@ -256,13 +255,80 @@ Not built:
 - **Ops marking trial users**: ops has no users list yet. The current
   user's `kind` and `accounts_users.trial_expires_at` are what it
   will read.
-- **Step 5.**
 
 ## Step 5. Abuse of trials
 
-To be written once To decide 13 is settled. Trials are not switched on
-in the template, and no fork should deploy with them on, before this
-step is built.
+Agreed and built 2026-11-11; the reasons are in To decide 13.
+
+- [x] **The cap stays off unless set.** `TRIAL_USERS_MAX` unset is 0 on
+      a deployed server. `bin/dev` sets it to 100, and the README
+      suggests 100 as the number to start with.
+- [x] **Ten trials an hour per client IP**, a bucket of its own on
+      `POST /api/accounts/trial`, on top of the accounts routes' 30
+      requests a minute.
+- [x] **The client IP behind a proxy is the last entry of
+      `X-Forwarded-For`**, the one the proxy wrote, not the first,
+      which the client can write. For every per-IP limit.
+- [x] **Maximum lengths, for everyone**: a post's body 10,000
+      characters, a community's name 80. Checked in core, so a device
+      refuses what the server would.
+- [x] **500 writes in a trial's life.** The server already records
+      every write as a row in `app_events` with the user's id, in the
+      write's transaction. Where it records one, core counts the
+      user's rows when the user is a trial, and at 500 refuses the
+      write: "This trial has reached its limit. Sign up to keep
+      going." Nothing is recorded for a refused write. No resource
+      module asks the user's kind, and a push from a trial's cookie
+      is counted like any write. Signing up ends the limit.
+- [x] **A trial user lists only their own communities.**
+- [x] **The server's log says when a trial is refused** because the
+      cap is reached.
+- [x] **A push fits the request the server takes.** Before this a
+      push was 500 events whatever their size, the server took 2 MB,
+      and a push over that was refused whole and sent again unchanged
+      at every sync, so the device never pushed again. One constant
+      in core, 5 MB, is the most a push request may be. The server
+      sets that as the body limit of `/api/sync/push` only; the other
+      routes keep 2 MB. A device fills a batch until 500 events or
+      four fifths of the constant, by the events' serialized size,
+      and always sends at least one. The README says a reverse proxy
+      in front must allow 5 MB too.
+- [x] Tests: the eleventh trial in an hour from one address is 429
+      and another address is not; a forged first `X-Forwarded-For`
+      entry does not change the key; a body of 10,001 characters is
+      refused on both databases; a trial's 501st write is refused and
+      leaves no row, and the same user after signing up writes again;
+      a trial's list has no community of anyone else; 500 pending
+      events with bodies of the maximum length go in several requests
+      and all apply; a push over 5 MB is 413.
+- [x] `docs/suggestions/accounts.md`: a CAPTCHA in front of "Try it
+      now"; ops showing the count of trials against the cap; a rate
+      limit per user on the application's routes.
+
+Accepted, nothing built: one person taking trial after trial; ten an
+hour from one address being enough to keep a cap of 100 full, which
+makes trials unavailable and never sign-up; two requests at once
+passing the cap by a few.
+
+As built, where it differs from a box:
+
+- **The 500 are counted with no index.** `app_events` has none on
+  `user_id`, so each write of a trial user reads the whole table;
+  a full user's write only reads their account's row. An index is a
+  migration, to ask for.
+- **A write over the 500 is an error, not a rejected answer.** The
+  transaction ends and the request is answered 403, a whole push
+  too, since only a browser holds a trial's session and no device
+  waits on the answer.
+- **Only their own communities, in every read**: the list, one
+  community by its id, and a pull.
+- **No new line in the log for a full cap.** The refusal is a 503,
+  and `ApiError` already writes every 5xx to the log as an error,
+  with "Trials are full right now".
+- **A device's name longer than 80 characters is cut to 80** for the
+  local user's community, so Skip cannot fail on it.
+- **The lengths are counted in characters**, not bytes, as a user's
+  name is.
 
 ## Left out
 

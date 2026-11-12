@@ -143,8 +143,11 @@ for; the pages send a visitor to the sign-in page before showing
 anything that needs one (`svelte/src/lib/router.js`). The accounts
 routes are rate limited per address, per pending sign-in and per
 client IP (`axum/src/rate_limits.rs`, the `governor` crate); behind a
-reverse proxy, `TRUST_PROXY_HEADERS=1` takes the client IP from
-`X-Forwarded-For`.
+reverse proxy, `TRUST_PROXY_HEADERS=1` takes the client IP from the
+last entry of `X-Forwarded-For`, the one the proxy wrote, so the proxy
+must be the only way in and must add the address it saw. The proxy
+must also let a request be 5 MB, what a device's push may be
+(`sync::MAX_PUSH_BYTES`); nginx allows 1 MB unless told.
 
 A person can use the app before signing up
 (`docs/design/accounts-local-and-trial-users.md`). In the desktop and
@@ -155,6 +158,14 @@ set, "Try it now" makes a trial user for 24 hours, deleted with
 everything of theirs 48 hours after it was made unless they sign up,
 which keeps the same user. The pages tell the kinds apart by the
 current user's `kind`: `full`, `local` or `trial`.
+
+Trials are off on a server until `TRIAL_USERS_MAX` is set, since the
+number is how much a stranger with no email can make the database
+hold: 100 is the number to start with, and what `bin/dev` sets. A
+trial user is one of at most that many, makes 500 writes and no more
+(`trial_users::MAX_WRITES`), sees only their own communities, has no
+files, and a client IP starts ten an hour. A trial refused because
+the server holds all it may is a 503, and so an error in the log.
 
 A device asks for no password at a sign-in: it signs in in the system browser,
 on the web's own sign-in page, and exchanges the code the page shows

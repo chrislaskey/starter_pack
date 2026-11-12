@@ -1,7 +1,6 @@
 # Using the app before signing up: local users and trial users
 
-**Status: agreed 2026-11-11 except abuse of trials, To decide 13;
-built the same day except that, see the build plan.** This document keeps the scenarios and the reasons.
+**Status: agreed and built 2026-11-11, see the build plan.** This document keeps the scenarios and the reasons.
 What to build, as steps with what each must do, is
 `accounts-local-and-trial-users-build.md`, and where the two differ
 that one is right.
@@ -295,7 +294,7 @@ person will ask for first.
     No page is closed to them in between, so there is no third state
     to build.
 
-13. **Abuse of trials** (T9). **Under discussion.** A trial is the one place a stranger
+13. **Abuse of trials** (T9). **Agreed.** A trial is the one place a stranger
     makes rows with no email behind them. What could go wrong, and the
     answer proposed for each:
     - *Crawlers and link previews starting trials*: "Try it now" is a
@@ -323,6 +322,44 @@ person will ask for first.
     - *Still open*: a CAPTCHA such as Turnstile in front of the
       button. Proposed: not in the first version, a suggestion for
       forks that see abuse.
+
+    **Agreed 2026-11-11**, replacing the numbers above; what to build
+    is step 5 of the build plan:
+    - *The cap starts at 100, not 1,000.* The most a deployment can
+      be made to hold is the cap, times the writes a trial may make,
+      times the size of a write. With the two limits below, 100
+      trials are about 500 MB at the very worst, gone in 48 hours.
+      Unset stays off, so whoever deploys picks the number; `bin/dev`
+      sets 100.
+    - *Ten an hour per IP stays*, in a bucket of its own. It stops a
+      runaway script, not a determined person: ten an hour is 480 in
+      48 hours, enough to keep the cap full. Accepted, since that
+      costs trials and never sign-up.
+    - *One trial writing without end* was the gap: the cap counts
+      users, not what they write, and a post's body had no maximum.
+      So maximum lengths for everyone, 10,000 characters a post and
+      80 a community's name, and 500 writes in a trial's life,
+      counted from the events the server already records per user. A
+      total and not a rate, because a rate bounds speed and a trial
+      has 48 hours.
+    - *A trial user lists only their own communities.* They could
+      join none of the others, and listing them showed every
+      community's name to someone with no email.
+    - *The client IP behind a proxy* was the first entry of
+      `X-Forwarded-For`, which the client can write, so every per-IP
+      limit could be skipped. It becomes the last, the proxy's.
+    - *Staff learn trials are full* from the log, where the refusal,
+      a 503, is written as an error.
+    - *A push fits the request the server takes.* Found on the way: a
+      push was 500 events whatever their size against the 2 MB a
+      request may be, and one over it was refused whole and sent
+      again unchanged for ever. With a body of up to 10,000
+      characters that is easy to reach, so the server takes 5 MB on
+      the push and a device fills a request to four fifths of it.
+    - *Not taken*: a rate limit per user on the application's routes.
+      It bounds speed and not how much is stored, and with the 500
+      writes adds nothing for trials; in `docs/suggestions/`, with
+      the CAPTCHA.
 
 14. **How often the delete runs.** **Agreed: an hourly job**, one more
     `Job` in `core/src/jobs.rs` beside the purge and the sweeps, run

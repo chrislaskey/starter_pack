@@ -23,6 +23,7 @@ use crate::sync::{Cursor, TableRow};
 use crate::users::User;
 
 pub const TABLE: &str = "app_communities";
+pub const MAX_NAME_LENGTH: usize = 80;
 const CREATE_FIELDS: &[&str] = &["name"];
 pub(crate) const UPDATE_FIELDS: &[&str] = &["name", "deleted_at"];
 
@@ -62,6 +63,8 @@ pub enum CommunityError {
     Rejected(String),
     #[error(transparent)]
     Membership(#[from] MembershipError),
+    #[error(transparent)]
+    Record(#[from] crate::events::RecordError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -466,12 +469,18 @@ fn fields(value: Value) -> Fields {
     }
 }
 
-/// The name as it is kept: trimmed, and not blank.
+/// The name as it is kept: trimmed, not blank and not too long.
 fn checked_name(name: &str) -> Result<String, CommunityError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(CommunityError::Invalid(FieldErrors::one(
             "name", "is blank",
+        )));
+    }
+    if name.chars().count() > MAX_NAME_LENGTH {
+        return Err(CommunityError::Invalid(FieldErrors::one(
+            "name",
+            format!("has {MAX_NAME_LENGTH} characters at most"),
         )));
     }
     Ok(name.to_string())
@@ -519,6 +528,15 @@ mod tests {
             let error = create(&deployment, &alice, " ").await.expect_err("blank");
             assert!(
                 matches!(error, CommunityError::Invalid(errors) if errors == FieldErrors::one("name", "is blank"))
+            );
+            create(&deployment, &alice, &"é".repeat(MAX_NAME_LENGTH))
+                .await
+                .expect("the maximum, counted in characters");
+            let error = create(&deployment, &alice, &"é".repeat(MAX_NAME_LENGTH + 1))
+                .await
+                .expect_err("one more");
+            assert!(
+                matches!(error, CommunityError::Invalid(errors) if errors == FieldErrors::one("name", "has 80 characters at most"))
             );
         })
         .await;

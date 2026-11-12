@@ -13,6 +13,7 @@ use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
 use app_core::credentials::CredentialError;
 use app_core::current_community::CurrentCommunityError;
+use app_core::events::RecordError;
 use app_core::field_errors::FieldErrors;
 use app_core::files::FileError;
 use app_core::memberships::MembershipError;
@@ -52,10 +53,12 @@ impl From<PostError> for ApiError {
         let status = match &error {
             PostError::NotFound { .. } => StatusCode::NOT_FOUND,
             PostError::NotOwner => StatusCode::FORBIDDEN,
-            PostError::BlankBody | PostError::Invalid(_) | PostError::Rejected(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            PostError::BlankBody
+            | PostError::BodyTooLong
+            | PostError::Invalid(_)
+            | PostError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             PostError::Community(error) => return ApiError::from_post_community(error),
+            PostError::Record(error) => return ApiError::from_record(error),
             PostError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
@@ -74,7 +77,20 @@ impl ApiError {
             PostCommunityError::Invalid(_) | PostCommunityError::Rejected(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
+            PostCommunityError::Record(error) => return ApiError::from_record(error),
             PostCommunityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl ApiError {
+    /// A write the server did not record: 403 for a trial user who has
+    /// made all the writes a trial may.
+    fn from_record(error: &RecordError) -> ApiError {
+        let status = match error {
+            RecordError::TrialWritesFull => StatusCode::FORBIDDEN,
+            RecordError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
     }
@@ -98,6 +114,7 @@ impl From<CommunityError> for ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             CommunityError::Membership(error) => return ApiError::from_membership(error),
+            CommunityError::Record(error) => return ApiError::from_record(error),
             CommunityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
@@ -113,6 +130,7 @@ impl ApiError {
             MembershipError::Invalid(_) | MembershipError::Rejected(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
+            MembershipError::Record(error) => return ApiError::from_record(error),
             MembershipError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError::new(status, error.to_string())
@@ -149,6 +167,7 @@ impl From<UserError> for ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             UserError::AccountUser(error) => return error.into(),
+            UserError::Record(error) => return ApiError::from_record(&error),
             UserError::ServerOnly | UserError::DeviceSettings(_) | UserError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -195,6 +214,7 @@ impl From<FileError> for ApiError {
         let status = match error {
             FileError::Invalid(field_errors) => return ApiError::from_field_errors(field_errors),
             FileError::NotFound { .. } => StatusCode::NOT_FOUND,
+            FileError::Record(error) => return ApiError::from_record(&error),
             FileError::NotOwner => StatusCode::FORBIDDEN,
             FileError::NotUploaded | FileError::Rejected(_) | FileError::Malformed(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY

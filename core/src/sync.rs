@@ -1116,6 +1116,12 @@ pub struct Status {
 
 /// The most events a device sends in one push request.
 pub const PUSH_BATCH: usize = 500;
+/// The most bytes a push request may be: the web server refuses a
+/// larger one whole, so a device never sends one.
+pub const MAX_PUSH_BYTES: usize = 5 * 1024 * 1024;
+/// The most bytes of events a device puts in one push request, which
+/// leaves a fifth of `MAX_PUSH_BYTES` for the JSON around them.
+const PUSH_BATCH_BYTES: usize = MAX_PUSH_BYTES / 5 * 4;
 
 /// One sync on a device, as the user signed in and with the device's
 /// token: ask the server which waiting files' bytes it has, push the
@@ -1200,9 +1206,10 @@ pub async fn set_offline(deployment: &Deployment, offline: bool) -> Result<(), S
 
 /// Pushes the pending events and applies the answers, leaving out the
 /// events of the files held back, whose bytes the server does not have:
-/// oldest first, `PUSH_BATCH` a request, each request's answers applied
-/// before the next is sent, so a push cut short has kept what the
-/// server already answered.
+/// oldest first, `PUSH_BATCH` events or `PUSH_BATCH_BYTES` a request,
+/// whichever is fewer, each request's answers applied before the next
+/// is sent, so a push cut short has kept what the server already
+/// answered.
 async fn push_pending<T: Transport>(
     deployment: &Deployment,
     transport: &T,
@@ -1227,6 +1234,7 @@ async fn push_pending<T: Transport>(
             waiting.get_or_insert_with(|| batch.iter().map(|stored| stored.event.id).collect());
         batch.retain(|stored| waiting.contains(&stored.event.id));
         batch.truncate(PUSH_BATCH);
+        batch.truncate(count_within_push_batch_bytes(&batch)?);
         if batch.is_empty() {
             return Ok(());
         }
@@ -1235,6 +1243,21 @@ async fn push_pending<T: Transport>(
         }
         push_batch(deployment, transport, token, user, &batch, report).await?;
     }
+}
+
+/// How many of the events, from the first, one push request holds:
+/// those whose JSON is within `PUSH_BATCH_BYTES`, and one at least.
+fn count_within_push_batch_bytes(batch: &[StoredEvent]) -> Result<usize, SyncError> {
+    let mut bytes = 0;
+    for (index, stored) in batch.iter().enumerate() {
+        bytes += serde_json::to_vec(&stored.event)
+            .map_err(|error| SyncError::Malformed(error.to_string()))?
+            .len();
+        if bytes > PUSH_BATCH_BYTES && index > 0 {
+            return Ok(index);
+        }
+    }
+    Ok(batch.len())
 }
 
 /// Sends one request of pending events and applies its answers, in one
@@ -1890,7 +1913,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A server that keeps the size of each push it is sent, and whose
+    /// A server that keeps the size of each push it is sent, refuses
+    /// one over `MAX_PUSH_BYTES` as the web server does, and whose
     /// connection drops at the request numbered `fails_at`, from 1.
     struct PushCounted<'a> {
         server: InProcess<'a>,
@@ -1911,6 +1935,10 @@ pub(crate) mod tests {
             };
             if self.fails_at == Some(number) {
                 return Err(SyncError::Transport("the connection dropped".to_string()));
+            }
+            let bytes = serde_json::to_vec(&request).expect("as JSON").len();
+            if bytes > MAX_PUSH_BYTES {
+                return Err(SyncError::Refused(format!("a push of {bytes} bytes")));
             }
             self.server.push(token, request).await
         }
@@ -2004,6 +2032,57 @@ pub(crate) mod tests {
             assert_eq!(bodies(&server, &alice).await.len(), count);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn sync_a_push_of_long_posts_goes_in_requests_the_server_takes() {
+        with_each_database(|database| async move {
+            let server = Deployment::new(database, Role::Server);
+            let (alice, token) = user_with_token(&server, "alice@example.com").await;
+            let a = device_of(&alice, &token).await;
+            let longest = "é".repeat(posts::MAX_BODY_LENGTH);
+            for _ in 0..PUSH_BATCH {
+                posts::create(&a, &alice, &longest, &[])
+                    .await
+                    .expect("a post");
+            }
+
+            let counted = PushCounted {
+                server: InProcess { server: &server },
+                sizes: std::sync::Mutex::new(Vec::new()),
+                fails_at: None,
+            };
+            let report = run(&a, &counted).await.expect("a sync");
+            assert_eq!(report.push_error, None);
+            let sizes = counted.sizes.lock().expect("the lock").clone();
+            assert_eq!(sizes.len(), 3, "twenty kilobytes a post: {sizes:?}");
+            assert_eq!(sizes.iter().sum::<usize>(), PUSH_BATCH);
+            assert_eq!(report.pending, 0);
+            assert_eq!(bodies(&server, &alice).await.len(), PUSH_BATCH);
+        })
+        .await;
+    }
+
+    #[test]
+    fn sync_a_push_request_holds_one_event_at_least_whatever_its_size() {
+        let huge = Event::create(
+            posts::TABLE,
+            Uuid::now_v7(),
+            events::Fields::from_iter([("body".to_string(), json!("a".repeat(MAX_PUSH_BYTES)))]),
+            now(),
+        );
+        let stored = |event: &Event| StoredEvent {
+            event: event.clone(),
+            user_id: Uuid::now_v7(),
+            status: events::EventStatus::Pending,
+            conflicts: events::Conflicts::new(),
+            version: None,
+            last_error: None,
+            attempts: 0,
+        };
+        let batch = [stored(&huge), stored(&huge)];
+        assert_eq!(count_within_push_batch_bytes(&batch).expect("counted"), 1);
+        assert_eq!(count_within_push_batch_bytes(&[]).expect("counted"), 0);
     }
 
     #[tokio::test]

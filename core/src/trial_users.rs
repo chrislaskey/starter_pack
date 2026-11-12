@@ -9,8 +9,10 @@
 //! - nobody else sees their communities or joins them, and they join
 //!   nobody else's (`sqlite::communities`, `memberships`), so nothing
 //!   of theirs ever reaches a device or another person;
+//! - they see only their own communities (`sqlite::communities`);
 //! - they have no files and no picture (`files::create_upload`,
 //!   `avatars::create_upload`);
+//! - they make `MAX_WRITES` writes and no more (`events::record`);
 //! - `delete_expired`, an hourly job, removes them outright with
 //!   everything of theirs once the trial ended `KEPT_AFTER_HOURS` ago.
 //!
@@ -34,6 +36,11 @@ use crate::users::{self, User, UserError};
 pub const SHOWN_HOURS: i64 = 24;
 /// How long after that a trial user is kept, to finish signing up.
 pub const KEPT_AFTER_HOURS: i64 = 24;
+/// How many writes a trial user makes in the trial's life, the two
+/// their first community takes included; `events::record` refuses the
+/// next. With the cap on trial users and the lengths a row may have,
+/// this bounds what trials can make the server hold.
+pub const MAX_WRITES: i64 = 500;
 /// The community a trial user starts with.
 pub const COMMUNITY_NAME: &str = "Trial";
 
@@ -122,6 +129,18 @@ pub async fn is_trial(deployment: &Deployment, user: &User) -> Result<bool, sqlx
     let account = sql!(&mut tx, accounts_users::get(user.id))?;
     tx.commit().await?;
     Ok(account.is_some_and(|account| account.trial_expires_at.is_some()))
+}
+
+/// Whether the user is a trial user who has made `MAX_WRITES` writes.
+pub(crate) async fn writes_are_full_in(
+    tx: &mut Transaction,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let account = sql!(&mut *tx, accounts_users::get(user_id))?;
+    if !account.is_some_and(|account| account.trial_expires_at.is_some()) {
+        return Ok(false);
+    }
+    Ok(sql!(tx, trial_users::count_writes(user_id))? >= MAX_WRITES)
 }
 
 /// Removes outright every trial user whose trial ended more than
@@ -299,13 +318,89 @@ mod tests {
 
             assert_eq!(
                 names_seen_by(&server, &trial).await,
-                ["Baking", "Personal", "Trial"],
-                "a trial user sees the others' as anyone does"
+                ["Trial"],
+                "a trial user sees only their own"
+            );
+            assert!(matches!(
+                communities::get(&server, &trial, baking.id).await,
+                Err(CommunityError::NotFound { .. })
+            ));
+            assert!(
+                tables_pulled_by(&server, &trial)
+                    .await
+                    .iter()
+                    .all(|(_, id)| *id != baking.id),
+                "nor pulls anyone else's"
             );
             let second = communities::create(&server, &trial, "Second")
                 .await
                 .expect("a trial user makes more of their own");
             assert!(!names_seen_by(&server, &alice).await.contains(&second.name));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn trial_users_make_the_maximum_of_writes_and_no_more_until_they_sign_up() {
+        with_each_database(|database| async move {
+            let server = server(database);
+            let trial = create(&server, 10).await.expect("a trial").user;
+            let mut tx = server.begin().await.expect("a transaction");
+            let made = sql!(&mut tx, trial_users::count_writes(trial.id)).expect("counted");
+            tx.commit().await.expect("committed");
+            assert_eq!(made, 2, "their community and their membership");
+            for number in made..MAX_WRITES {
+                posts::create(&server, &trial, &format!("post {number}"), &[])
+                    .await
+                    .expect("within the maximum");
+            }
+
+            let error = posts::create(&server, &trial, "one more", &[])
+                .await
+                .expect_err("refused");
+            assert!(matches!(
+                error,
+                posts::PostError::Record(crate::events::RecordError::TrialWritesFull)
+            ));
+            assert_eq!(
+                error.to_string(),
+                "This trial has reached its limit. Sign up to keep going."
+            );
+            let pushed = crate::events::Event::create(
+                posts::TABLE,
+                Uuid::now_v7(),
+                crate::events::Fields::from_iter([("body".to_string(), "pushed".into())]),
+                now(),
+            );
+            let request = sync::PushRequest {
+                events: vec![pushed],
+            };
+            assert!(
+                sync::push(&server, &trial, request).await.is_err(),
+                "a push is a write like any other"
+            );
+            assert!(
+                communities::create(&server, &trial, "Another")
+                    .await
+                    .is_err(),
+                "whatever the resource"
+            );
+            let mut tx = server.begin().await.expect("a transaction");
+            let recorded = sql!(&mut tx, trial_users::count_writes(trial.id)).expect("counted");
+            tx.commit().await.expect("committed");
+            assert_eq!(recorded, MAX_WRITES, "a refused write leaves no row");
+            let posts_made = usize::try_from(MAX_WRITES - made).expect("a count");
+            assert_eq!(
+                posts::list(&server, &trial).await.expect("theirs").len(),
+                posts_made
+            );
+            assert_eq!(names_seen_by(&server, &trial).await, ["Trial"]);
+
+            signed_up(&server, &trial, "bob@example.com").await;
+            let bob = users::get(&server, trial.id).await.expect("the same user");
+            posts::create(&server, &bob, "signed up", &[])
+                .await
+                .expect("a full user has no maximum");
         })
         .await;
     }

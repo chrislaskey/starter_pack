@@ -10,7 +10,7 @@ use std::path::Path;
 use app_core::deployment::Deployment;
 use app_core::mailer::Mailer;
 use axum::Router;
-use axum::extract::FromRef;
+use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::http::{Method, StatusCode, Uri};
 use axum::routing::{any, delete, get, post, put};
 use tower_http::services::{ServeDir, ServeFile};
@@ -135,7 +135,10 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
             "/api/memberships/{community_id}",
             put(memberships::join).delete(memberships::leave),
         )
-        .route("/api/sync/push", post(sync::push))
+        .route(
+            "/api/sync/push",
+            post(sync::push).layer(DefaultBodyLimit::max(app_core::sync::MAX_PUSH_BYTES)),
+        )
         .route("/api/sync/pull", post(sync::pull))
         .route("/api/sync/backfill", post(sync::backfill))
         .route("/api", any(api_not_found))
@@ -189,6 +192,15 @@ mod tests {
     }
 
     async fn test_router() -> (TestRouter, Value) {
+        test_router_with(TrialUsersMax(2), false).await
+    }
+
+    /// `test_router` holding so many trial users, and behind a reverse
+    /// proxy or not.
+    async fn test_router_with(
+        trial_users_max: TrialUsersMax,
+        trust_proxy_headers: bool,
+    ) -> (TestRouter, Value) {
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         fs::create_dir_all(&dist).expect("a temp dir");
         fs::write(dist.join("index.html"), "<html>pages</html>").expect("index.html");
@@ -219,8 +231,8 @@ mod tests {
             deployment: deployment.clone(),
             mailer: mailer.clone(),
             rate_limits: RateLimits::new(),
-            trust_proxy_headers: false,
-            trial_users_max: TrialUsersMax(2),
+            trust_proxy_headers,
+            trial_users_max,
         };
         let test_router = TestRouter {
             router: router(&dist, &ops_dist, state),
@@ -992,6 +1004,113 @@ mod tests {
         assert_eq!(available, json!({ "available": false }));
     }
 
+    /// "Try it now" through a reverse proxy that wrote the header.
+    async fn trial_create_forwarded_for(router: &TestRouter, forwarded_for: &str) -> StatusCode {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/accounts/trial")
+            .header("x-forwarded-for", forwarded_for)
+            .body(Body::empty())
+            .expect("a request");
+        let response = router
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("a response");
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn accounts_trial_is_limited_per_client_by_the_address_the_proxy_wrote() {
+        let (router, _) = test_router_with(TrialUsersMax(100), true).await;
+        for _ in 0..rate_limits::TRIAL_USERS_PER_HOUR_PER_IP {
+            let status = trial_create_forwarded_for(&router, "203.0.113.9").await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        assert_eq!(
+            trial_create_forwarded_for(&router, "203.0.113.9").await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the eleventh in the hour"
+        );
+        assert_eq!(
+            trial_create_forwarded_for(&router, "198.51.100.7, 203.0.113.9").await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "an address the client wrote in front changes nothing"
+        );
+        assert_eq!(
+            trial_create_forwarded_for(&router, "203.0.113.9, 203.0.113.10").await,
+            StatusCode::CREATED,
+            "another client"
+        );
+    }
+
+    #[tokio::test]
+    async fn trial_users_are_refused_past_their_writes_and_see_only_their_communities() {
+        let (router, _) = test_router().await;
+        let trial = app_core::trial_users::create(&router.deployment, 2)
+            .await
+            .expect("a trial");
+        let (status, communities) = send_as(
+            &router.router,
+            Some(&trial.token),
+            Method::GET,
+            "/api/communities",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&Value> = communities
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|listed| &listed["community"]["name"])
+            .collect();
+        assert_eq!(names, [&json!("Trial")], "not Alice's Personal");
+
+        for number in 2..app_core::trial_users::MAX_WRITES {
+            app_core::posts::create(
+                &router.deployment,
+                &trial.user,
+                &format!("post {number}"),
+                &[],
+            )
+            .await
+            .expect("within the maximum");
+        }
+        let (status, body) = send_as(
+            &router.router,
+            Some(&trial.token),
+            Method::POST,
+            "/api/posts",
+            Some(json!({ "body": "one more", "community_ids": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            json!({ "error": "This trial has reached its limit. Sign up to keep going." })
+        );
+    }
+
+    #[tokio::test]
+    async fn posts_create_refuses_a_body_over_the_maximum_length() {
+        let (router, _) = test_router().await;
+        let too_long = "a".repeat(app_core::posts::MAX_BODY_LENGTH + 1);
+        let (status, body) = send(
+            &router,
+            Method::POST,
+            "/api/posts",
+            Some(json!({ "body": too_long, "community_ids": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({ "error": "a post has 10000 characters at most" })
+        );
+    }
+
     #[tokio::test]
     async fn accounts_routes_are_rate_limited_per_address_per_sign_in_and_per_client() {
         let (router, _) = test_router().await;
@@ -1675,6 +1794,52 @@ mod tests {
         assert_eq!(body["next"], Value::Null);
         assert_eq!(body["resync"], json!(false));
         assert!(body["cursor"]["last_synced_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn sync_push_takes_a_request_up_to_the_most_a_device_sends_and_no_larger() {
+        let (router, _) = test_router().await;
+        let event = |body: String| {
+            json!({
+                "id": uuid::Uuid::now_v7(),
+                "table": "app_posts",
+                "row_id": uuid::Uuid::now_v7(),
+                "type": "create",
+                "base_version": 0,
+                "base": {},
+                "changes": { "body": body },
+                "made_at": "2026-11-08T10:00:00Z"
+            })
+        };
+        let longest = "a".repeat(app_core::posts::MAX_BODY_LENGTH);
+        let four_megabytes: Vec<Value> = (0..400).map(|_| event(longest.clone())).collect();
+        let (status, body) = send(
+            &router,
+            Method::POST,
+            "/api/sync/push",
+            Some(json!({ "events": four_megabytes })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "over the 2 MB of the other routes");
+        assert_eq!(body["events"].as_array().expect("answers").len(), 400);
+
+        let over = "a".repeat(app_core::sync::MAX_PUSH_BYTES);
+        let (status, _) = send(
+            &router,
+            Method::POST,
+            "/api/sync/push",
+            Some(json!({ "events": [event(over.clone())] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let (status, _) = send(
+            &router,
+            Method::POST,
+            "/api/posts",
+            Some(json!({ "body": over, "community_ids": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "2 MB elsewhere");
     }
 
     #[tokio::test]

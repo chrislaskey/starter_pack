@@ -343,7 +343,11 @@ As the user signed in, with the device's token:
 0. **Ask** the server which waiting files' bytes its bucket has. The
    events of a file whose bytes it has not are held back from the push.
 1. **Push** every event pending as the push begins, in `made_at, id`
-   order, 500 a request, `sync::PUSH_BATCH`, each request's answers
+   order, 500 a request, `sync::PUSH_BATCH`, or fewer when their JSON
+   would pass four fifths of `sync::MAX_PUSH_BYTES`, 5 MB, the most
+   the server takes in a push; one event at least. A request over
+   that is refused whole and would be sent again unchanged at every
+   sync, so a device never makes one. Each request's answers are
    applied before the next is sent, so a push cut short has kept what
    was answered. Apply the answers:
    `applied` deletes the event; `conflict` keeps it with the conflicts;

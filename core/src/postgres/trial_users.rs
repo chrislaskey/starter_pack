@@ -15,6 +15,18 @@ pub async fn count(connection: &mut PgConnection) -> Result<i64, sqlx::Error> {
     Ok(count)
 }
 
+/// How many writes of the user the server has recorded.
+pub async fn count_writes(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM app_events WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(connection)
+        .await?;
+    Ok(count)
+}
+
 /// Whether a user joining a community would put a trial user and
 /// anyone else in one community: the user is a trial and someone else
 /// is or was a member, or someone who is or was a member is a trial.
@@ -37,8 +49,9 @@ pub async fn join_is_walled_off(
     Ok(walled_off)
 }
 
-/// Whether the community is a trial user's other than the viewer, and
-/// so not theirs to see.
+/// Whether the community is not the viewer's to see: a trial user's
+/// other than the viewer, or anyone's the viewer, a trial user, was
+/// never in.
 pub async fn community_is_hidden_from(
     connection: &mut PgConnection,
     community_id: Uuid,
@@ -48,7 +61,11 @@ pub async fn community_is_hidden_from(
         "SELECT EXISTS (
            SELECT 1 FROM app_users_communities uc
            JOIN accounts_users a ON a.id = uc.user_id
-           WHERE uc.community_id = $1 AND uc.user_id != $2 AND a.trial_expires_at IS NOT NULL)",
+           WHERE uc.community_id = $1 AND uc.user_id != $2 AND a.trial_expires_at IS NOT NULL)
+         OR ((SELECT trial_expires_at FROM accounts_users WHERE id = $2) IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM app_users_communities
+             WHERE community_id = $1 AND user_id = $2))",
     )
     .bind(community_id)
     .bind(viewer_id)

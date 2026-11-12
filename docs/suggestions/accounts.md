@@ -15,6 +15,18 @@ this one:
   picture for trial users, with a quota; extending a trial; ops
   listing users with their kind; a device with an account whose plan
   has no sync, which belongs with purchasing.
+- **More against abuse of trials**, past what step 5 of
+  `docs/design/accounts-local-and-trial-users-build.md` built: a
+  CAPTCHA such as Turnstile in front of "Try it now", for a fork that
+  sees its cap kept full; ops showing the count of trial users
+  against `TRIAL_USERS_MAX`.
+- **A rate limit per user on the application's routes.** A second
+  `tower_governor` layer on `/api/posts`, `/api/communities`,
+  `/api/files` and `/api/sync/*`, keyed by the session token, some
+  300 requests a minute, against a signed-up user hammering the API.
+  It bounds speed, not how much a user stores, which is a quota per
+  plan and belongs with purchasing. Needs the sync to wait and try
+  again on a 429, and the buckets are per process.
 - **Magic links.** Phoenix logs a user in by a link sent to the email;
   here the email carries a code. A link is the same pending sign-in
   with the pending token and the code in the URL, and on a phone it

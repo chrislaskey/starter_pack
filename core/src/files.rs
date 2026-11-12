@@ -216,6 +216,8 @@ pub enum FileError {
     #[cfg(feature = "object-storage")]
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Record(#[from] crate::events::RecordError),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
