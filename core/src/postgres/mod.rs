@@ -4,6 +4,8 @@
 
 use sqlx::migrate::Migrator;
 
+#[cfg(feature = "stripe")]
+pub mod accounts_stripe_events;
 pub mod accounts_users;
 pub mod communities;
 pub mod credentials;

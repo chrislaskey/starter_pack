@@ -23,6 +23,8 @@
 //! resumes from the cursor; which file a device signs into is the app's
 //! business, see `docs/design/device-accounts.md`.
 
+#[cfg(feature = "stripe")]
+pub mod stripe_events;
 pub mod users;
 
 use serde::{Deserialize, Serialize};

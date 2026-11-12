@@ -16,9 +16,13 @@ sync-http = ["dep:reqwest"]
 mail-resend = ["dep:reqwest", "dep:secrecy"]
 # Uploads straight to S3-style object storage, for the server; never in the Tauri app
 object-storage = ["dep:object_store", "dep:secrecy", "dep:futures-util"]
+# Taking payments through Stripe, for the server; never in the Tauri app
+stripe = ["dep:async-stripe-webhook", "dep:secrecy"]
 
 [dependencies]
 argon2 = "0.6"
+# A release candidate, pinned exactly: the 1.0 line is the maintained one, see docs/design/purchasing.md
+async-stripe-webhook = { version = "=1.0.0-rc.10", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 futures-util = { version = "0.3", default-features = false, optional = true }
 garde = { version = "0.23", features = ["derive"] }

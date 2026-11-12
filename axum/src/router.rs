@@ -18,9 +18,10 @@ use tower_http::trace::TraceLayer;
 
 use crate::api_error::ApiError;
 use crate::rate_limits::{self, RateLimits};
+use crate::stripe_events::StripeSigningSecret;
 use crate::{
     accounts, avatars, communities, current_community, current_user, files, memberships, ops,
-    posts, public, sync,
+    posts, public, stripe_events, sync,
 };
 
 /// What every handler may take from the server: the database with its
@@ -33,6 +34,7 @@ pub struct AppState {
     pub rate_limits: RateLimits,
     pub trust_proxy_headers: bool,
     pub trial_users_max: TrialUsersMax,
+    pub stripe_signing_secret: StripeSigningSecret,
 }
 
 /// How many trial users the server holds at once, `TRIAL_USERS_MAX`; 0,
@@ -107,6 +109,7 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
             "/api/current-community",
             get(current_community::get).put(current_community::update),
         )
+        .route("/api/accounts/stripe-webhooks", post(stripe_events::create))
         .route("/api/avatars", put(avatars::update))
         .route("/api/avatars/uploads", post(avatars::create_upload))
         .route("/api/posts", get(posts::list).post(posts::create))
@@ -177,6 +180,7 @@ mod tests {
     const MISSING_ID: &str = "01900000-0000-7000-8000-000000000000";
     const PASSWORD: &str = "correct horse battery";
     const NEW_PASSWORD: &str = "another horse battery";
+    const STRIPE_SIGNING_SECRET: &str = "whsec_test_secret";
 
     /// A router over an in-memory database with Alice signed up and one
     /// post of hers, and a stand-in `index.html`. Every request `send`
@@ -233,6 +237,9 @@ mod tests {
             rate_limits: RateLimits::new(),
             trust_proxy_headers,
             trial_users_max,
+            stripe_signing_secret: StripeSigningSecret(Some(std::sync::Arc::new(
+                secrecy::SecretString::from(STRIPE_SIGNING_SECRET),
+            ))),
         };
         let test_router = TestRouter {
             router: router(&dist, &ops_dist, state),
@@ -1970,5 +1977,105 @@ mod tests {
                 assert_eq!(body, json!(format!("<html>{page}</html>")));
             }
         }
+    }
+
+    /// A webhook delivery: the body as Stripe sends it, and its signature
+    /// header when there is one.
+    async fn stripe_webhook_send(
+        router: &Router,
+        body: &str,
+        signature: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/accounts/stripe-webhooks")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(signature) = signature {
+            request = request.header("stripe-signature", signature);
+        }
+        let request = request
+            .body(Body::from(body.to_string()))
+            .expect("a request");
+        let response = router.clone().oneshot(request).await.expect("a response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes();
+        (status, serde_json::from_slice(&body).expect("json"))
+    }
+
+    fn stripe_event_body(id: &str) -> String {
+        json!({
+            "id": id,
+            "object": "event",
+            "api_version": "2026-09-30.endive",
+            "created": 1_790_000_000,
+            "data": { "object": { "id": "obj_test", "object": "test_object" } },
+            "livemode": false,
+            "pending_webhooks": 1,
+            "request": { "id": null, "idempotency_key": null },
+            "type": "customer.created",
+        })
+        .to_string()
+    }
+
+    fn stripe_signature(body: &str, secret: &str) -> String {
+        stripe_webhook::Webhook::generate_test_header(body, secret, None)
+    }
+
+    #[tokio::test]
+    async fn stripe_webhooks_create_records_a_signed_event_once() {
+        let (router, _) = test_router().await;
+        let body = stripe_event_body("evt_1");
+        let signature = stripe_signature(&body, STRIPE_SIGNING_SECRET);
+
+        let (status, answer) = stripe_webhook_send(&router.router, &body, Some(&signature)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer, json!({ "received": true, "repeat": false }));
+        let (status, answer) = stripe_webhook_send(&router.router, &body, Some(&signature)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer, json!({ "received": true, "repeat": true }));
+        let event = app_core::accounts::stripe_events::get(&router.deployment, "evt_1")
+            .await
+            .expect("read");
+        assert!(event.is_some());
+    }
+
+    #[tokio::test]
+    async fn stripe_webhooks_create_refuses_what_stripe_did_not_sign() {
+        let (router, _) = test_router().await;
+        let body = stripe_event_body("evt_1");
+        let forged = stripe_signature(&body, "whsec_another_secret");
+        for signature in [Some(forged.as_str()), None] {
+            let (status, answer) = stripe_webhook_send(&router.router, &body, signature).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(answer["error"].is_string());
+        }
+        let event = app_core::accounts::stripe_events::get(&router.deployment, "evt_1")
+            .await
+            .expect("read");
+        assert_eq!(event, None);
+    }
+
+    #[tokio::test]
+    async fn stripe_webhooks_create_is_not_found_without_a_secret() {
+        let (router, _) = test_router().await;
+        let state = AppState {
+            deployment: router.deployment.clone(),
+            mailer: router.mailer.clone(),
+            rate_limits: RateLimits::new(),
+            trust_proxy_headers: false,
+            trial_users_max: TrialUsersMax(0),
+            stripe_signing_secret: StripeSigningSecret(None),
+        };
+        let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
+        let without_stripe = super::router(&dist, &dist.join("ops"), state);
+        let body = stripe_event_body("evt_1");
+        let signature = stripe_signature(&body, STRIPE_SIGNING_SECRET);
+        let (status, _) = stripe_webhook_send(&without_stripe, &body, Some(&signature)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

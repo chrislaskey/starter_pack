@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use app_core::accounts::AccountError;
+use app_core::accounts::stripe_events::StripeEventError;
 use app_core::accounts::users::AccountUserError;
 use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
@@ -278,6 +279,20 @@ impl From<SyncError> for ApiError {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
             }
         }
+    }
+}
+
+impl From<StripeEventError> for ApiError {
+    fn from(error: StripeEventError) -> Self {
+        let status = match error {
+            StripeEventError::BadSignature(_) | StripeEventError::Unreadable(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            StripeEventError::ServerOnly | StripeEventError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
     }
 }
 

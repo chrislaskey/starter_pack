@@ -8,7 +8,8 @@
 //! sends goes where `MAILER` says, see `mailer`, pictures go to the bucket
 //! `STORAGE_BUCKET` names and files' bytes to `STORAGE_PRIVATE_BUCKET`'s,
 //! see `storage`, and its accounts routes are rate limited, see
-//! `rate_limits`.
+//! `rate_limits`. Stripe's webhook needs `STRIPE_WEBHOOK_SECRET`, see
+//! `stripe_events`.
 //!
 //! It runs the recurring jobs as they come due, see `jobs`. With
 //! arguments it runs a command on that database instead and exits:
@@ -32,6 +33,7 @@ mod public;
 mod rate_limits;
 mod router;
 mod storage;
+mod stripe_events;
 mod sync;
 
 use std::env;
@@ -131,6 +133,7 @@ async fn main() -> Result<(), String> {
         rate_limits,
         trust_proxy_headers: trust_proxy_headers(),
         trial_users_max: trial_users_max()?,
+        stripe_signing_secret: stripe_events::open(),
     };
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
