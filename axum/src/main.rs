@@ -8,17 +8,21 @@
 //! sends goes where `MAILER` says, see `mailer`, pictures go to the bucket
 //! `STORAGE_BUCKET` names and files' bytes to `STORAGE_PRIVATE_BUCKET`'s,
 //! see `storage`, and its accounts routes are rate limited, see
-//! `rate_limits`. Stripe's webhook needs `STRIPE_WEBHOOK_SECRET`, see
-//! `stripe_events`.
+//! `rate_limits`. It sells through Stripe with `STRIPE_SECRET_KEY` and
+//! `STRIPE_TAX`, see `stripe`, whose webhook needs
+//! `STRIPE_WEBHOOK_SECRET`, see `stripe_events`, and whose return links
+//! start with `SERVER_URL`, see `checkouts`.
 //!
 //! It runs the recurring jobs as they come due, see `jobs`. With
 //! arguments it runs a command on that database instead and exits:
 //! `jobs run` runs the jobs due, `jobs run <name>` that job now, and
-//! `ops staff create <email>` makes that account staff, see `ops`.
+//! `ops staff create <email>` makes that account staff, see `ops`, and
+//! `accounts products sync` copies Stripe's catalog, see `products`.
 
 mod accounts;
 mod api_error;
 mod avatars;
+mod checkouts;
 mod communities;
 mod current_community;
 mod current_user;
@@ -29,11 +33,15 @@ mod mailer;
 mod memberships;
 mod ops;
 mod posts;
+mod products;
 mod public;
+mod purchases;
 mod rate_limits;
 mod router;
 mod storage;
+mod stripe;
 mod stripe_events;
+mod subscriptions;
 mod sync;
 
 use std::env;
@@ -113,9 +121,10 @@ async fn main() -> Result<(), String> {
         Some(private) => deployment.with_file_store(FileStore::Bucket(private)),
         None => deployment,
     };
+    let stripe = stripe::open()?;
     let arguments: Vec<String> = env::args().skip(1).collect();
     if !arguments.is_empty() {
-        return command(&deployment, &arguments).await;
+        return command(&deployment, stripe.as_ref(), &arguments).await;
     }
 
     let rate_limits = RateLimits::new();
@@ -134,6 +143,8 @@ async fn main() -> Result<(), String> {
         trust_proxy_headers: trust_proxy_headers(),
         trial_users_max: trial_users_max()?,
         stripe_signing_secret: stripe_events::open(),
+        stripe,
+        server_url: checkouts::ServerUrl::open()?,
     };
 
     let address = SocketAddr::from(([127, 0, 0, 1], port()?));
@@ -154,14 +165,17 @@ async fn main() -> Result<(), String> {
 /// A command on the database, run instead of the server.
 async fn command(
     deployment: &app_core::deployment::Deployment,
+    stripe: Option<&app_core::accounts::stripe::Stripe>,
     arguments: &[String],
 ) -> Result<(), String> {
     let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["jobs", rest @ ..] => jobs::command(deployment, rest).await,
         ["ops", rest @ ..] => ops::command(deployment, rest).await,
+        ["accounts", "products", rest @ ..] => products::command(deployment, stripe, rest).await,
         _ => Err(
-            "commands: jobs run, jobs run <name>, ops staff create <email>, ops staff delete <email>"
+            "commands: jobs run, jobs run <name>, ops staff create <email>, ops staff delete <email>, \
+             accounts products sync"
                 .to_string(),
         ),
     }

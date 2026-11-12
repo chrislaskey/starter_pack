@@ -262,6 +262,55 @@ export function accountsTrialCreate() {
   return send("POST", "/api/accounts/trial");
 }
 
+/** What is for sale, plans first, each with the prices it sells at. */
+export function accountsProductsList() {
+  return send("GET", "/api/accounts/products");
+}
+
+/**
+ * One product for sale, with its prices.
+ * @param {string} id
+ */
+export function accountsProductsGet(id) {
+  return send("GET", `/api/accounts/products/${encodeURIComponent(id)}`);
+}
+
+/**
+ * A checkout for the price, answering `{checkout, url}`: Stripe's page to pay on.
+ * @param {string} priceId
+ */
+export function accountsCheckoutsCreate(priceId) {
+  return send("POST", "/api/accounts/checkouts", { price_id: priceId });
+}
+
+/**
+ * A checkout, asked of Stripe while it may still change.
+ * @param {string} id
+ */
+export function accountsCheckoutsGet(id) {
+  return send("GET", `/api/accounts/checkouts/${encodeURIComponent(id)}`);
+}
+
+/** The signed-in person's one-time purchases, newest first. */
+export function accountsPurchasesList() {
+  return send("GET", "/api/accounts/purchases");
+}
+
+/** @param {string} id */
+export function accountsPurchasesGet(id) {
+  return send("GET", `/api/accounts/purchases/${encodeURIComponent(id)}`);
+}
+
+/** The signed-in person's plans, newest first, ended ones too. */
+export function accountsSubscriptionsList() {
+  return send("GET", "/api/accounts/subscriptions");
+}
+
+/** @param {string} id */
+export function accountsSubscriptionsGet(id) {
+  return send("GET", `/api/accounts/subscriptions/${encodeURIComponent(id)}`);
+}
+
 // Local users are a device's; the web has trial users instead.
 
 export function localUsersCanCreate() {

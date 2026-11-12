@@ -8,7 +8,13 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use app_core::accounts::AccountError;
+use app_core::accounts::checkouts::CheckoutError;
+use app_core::accounts::plans::PlanError;
+use app_core::accounts::products::ProductError;
+use app_core::accounts::purchases::PurchaseError;
+use app_core::accounts::stripe::StripeError;
 use app_core::accounts::stripe_events::StripeEventError;
+use app_core::accounts::subscriptions::SubscriptionError;
 use app_core::accounts::users::AccountUserError;
 use app_core::avatars::AvatarError;
 use app_core::communities::CommunityError;
@@ -288,7 +294,75 @@ impl From<StripeEventError> for ApiError {
             StripeEventError::BadSignature(_) | StripeEventError::Unreadable(_) => {
                 StatusCode::BAD_REQUEST
             }
+            StripeEventError::Stripe(error) => return ApiError::from_stripe(&error),
             StripeEventError::ServerOnly | StripeEventError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl ApiError {
+    /// A call to Stripe that failed: 502, as the fault is past the server.
+    fn from_stripe(error: &StripeError) -> ApiError {
+        ApiError::new(StatusCode::BAD_GATEWAY, error.to_string())
+    }
+}
+
+impl From<CheckoutError> for ApiError {
+    fn from(error: CheckoutError) -> Self {
+        let status = match &error {
+            CheckoutError::NotFound { .. } => StatusCode::NOT_FOUND,
+            CheckoutError::NeedsAccount => StatusCode::FORBIDDEN,
+            CheckoutError::PriceNotForSale
+            | CheckoutError::AlreadyOwned
+            | CheckoutError::AlreadySubscribed => StatusCode::UNPROCESSABLE_ENTITY,
+            CheckoutError::Stripe(error) => return ApiError::from_stripe(error),
+            CheckoutError::ServerOnly | CheckoutError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<PlanError> for ApiError {
+    fn from(error: PlanError) -> Self {
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    }
+}
+
+impl From<SubscriptionError> for ApiError {
+    fn from(error: SubscriptionError) -> Self {
+        let status = match &error {
+            SubscriptionError::NotFound { .. } => StatusCode::NOT_FOUND,
+            SubscriptionError::ServerOnly | SubscriptionError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<PurchaseError> for ApiError {
+    fn from(error: PurchaseError) -> Self {
+        let status = match &error {
+            PurchaseError::NotFound { .. } => StatusCode::NOT_FOUND,
+            PurchaseError::ServerOnly | PurchaseError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<ProductError> for ApiError {
+    fn from(error: ProductError) -> Self {
+        let status = match &error {
+            ProductError::NotFound { .. } => StatusCode::NOT_FOUND,
+            ProductError::Stripe(error) => return ApiError::from_stripe(error),
+            ProductError::ServerOnly | ProductError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };

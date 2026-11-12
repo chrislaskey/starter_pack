@@ -14,6 +14,13 @@ export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
 export const ACCOUNTS_TRIAL_PATH = "/accounts/trial";
 export const ACCOUNTS_SETTINGS_PATH = "/accounts/settings";
 export const ACCOUNTS_PASSWORD_EDIT_PATH = "/accounts/password";
+export const ACCOUNTS_PRODUCTS_INDEX_PATH = "/accounts/products";
+export const ACCOUNTS_PRODUCTS_SHOW_PATH = "/accounts/products/:id";
+export const ACCOUNTS_CHECKOUTS_SHOW_PATH = "/accounts/checkouts/:id";
+export const ACCOUNTS_PURCHASES_INDEX_PATH = "/accounts/purchases";
+export const ACCOUNTS_PURCHASES_SHOW_PATH = "/accounts/purchases/:id";
+export const ACCOUNTS_SUBSCRIPTIONS_INDEX_PATH = "/accounts/subscriptions";
+export const ACCOUNTS_SUBSCRIPTIONS_SHOW_PATH = "/accounts/subscriptions/:id";
 export const POSTS_INDEX_PATH = "/posts";
 export const POSTS_NEW_PATH = "/posts/new";
 export const POSTS_SHOW_PATH = "/posts/:id";
@@ -167,6 +174,44 @@ export function accountsSettingsUrl() {
 /** Where the signed-in person makes or changes their password. */
 export function accountsPasswordEditUrl() {
   return ACCOUNTS_PASSWORD_EDIT_PATH;
+}
+
+/** What is for sale: plans, then one-time products. */
+export function accountsProductsIndexUrl() {
+  return ACCOUNTS_PRODUCTS_INDEX_PATH;
+}
+
+/** @param {string} id */
+export function accountsProductsShowUrl(id) {
+  return ACCOUNTS_PRODUCTS_SHOW_PATH.replace(":id", encodeURIComponent(id));
+}
+
+/**
+ * Where Stripe's page returns to after paying, see docs/design/purchasing.md, P3.
+ * @param {string} id
+ */
+export function accountsCheckoutsShowUrl(id) {
+  return ACCOUNTS_CHECKOUTS_SHOW_PATH.replace(":id", encodeURIComponent(id));
+}
+
+/** The signed-in person's one-time purchases. */
+export function accountsPurchasesIndexUrl() {
+  return ACCOUNTS_PURCHASES_INDEX_PATH;
+}
+
+/** @param {string} id */
+export function accountsPurchasesShowUrl(id) {
+  return ACCOUNTS_PURCHASES_SHOW_PATH.replace(":id", encodeURIComponent(id));
+}
+
+/** The signed-in person's plans, the current one and the ended ones. */
+export function accountsSubscriptionsIndexUrl() {
+  return ACCOUNTS_SUBSCRIPTIONS_INDEX_PATH;
+}
+
+/** @param {string} id */
+export function accountsSubscriptionsShowUrl(id) {
+  return ACCOUNTS_SUBSCRIPTIONS_SHOW_PATH.replace(":id", encodeURIComponent(id));
 }
 
 export function supportIndexUrl() {

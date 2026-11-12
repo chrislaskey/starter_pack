@@ -24,7 +24,21 @@
 //! business, see `docs/design/device-accounts.md`.
 
 #[cfg(feature = "stripe")]
+pub mod checkouts;
+#[cfg(feature = "stripe")]
+pub mod plans;
+#[cfg(feature = "stripe")]
+pub mod prices;
+#[cfg(feature = "stripe")]
+pub mod products;
+#[cfg(feature = "stripe")]
+pub mod purchases;
+#[cfg(feature = "stripe")]
+pub mod stripe;
+#[cfg(feature = "stripe")]
 pub mod stripe_events;
+#[cfg(feature = "stripe")]
+pub mod subscriptions;
 pub mod users;
 
 use serde::{Deserialize, Serialize};

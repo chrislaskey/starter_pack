@@ -11,11 +11,13 @@ use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
 
+use app_core::accounts::plans::{self, Plan};
 use app_core::accounts::users as accounts_users;
 use app_core::deployment::Deployment;
 use app_core::ops::staff::{self, StaffError};
 use app_core::users::{self, Kind, User};
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::api_error::ApiError;
 
@@ -72,8 +74,9 @@ fn token_of(parts: &Parts) -> Result<String, ApiError> {
 
 /// The request's user as their own pages show them: with their
 /// account's email, which nobody else is sent, whether they are staff,
-/// for the link to the ops app, and whether they are a trial user, with
-/// when the trial ends, for the banner.
+/// for the link to the ops app, whether they are a trial user, with
+/// when the trial ends, for the banner, and their plan, with the
+/// subscription whose payment failed, for that banner.
 #[derive(Serialize)]
 pub struct CurrentUserShown {
     #[serde(flatten)]
@@ -82,6 +85,8 @@ pub struct CurrentUserShown {
     pub is_staff: bool,
     pub kind: Kind,
     pub trial_expires_at: Option<DateTime<Utc>>,
+    pub plan: Option<Plan>,
+    pub payment_failed_subscription_id: Option<Uuid>,
 }
 
 /// `GET /api/current-user`: the user the request is from.
@@ -118,11 +123,15 @@ async fn shown(deployment: &Deployment, user: User) -> Result<CurrentUserShown, 
         Some(_) => Kind::Trial,
         None => Kind::Full,
     };
+    let plan = plans::current(deployment, &user).await?;
+    let payment_failed_subscription_id = plans::payment_failed(deployment, &user).await?;
     Ok(CurrentUserShown {
         user,
         email: account.email,
         is_staff,
         kind,
         trial_expires_at: account.trial_expires_at,
+        plan,
+        payment_failed_subscription_id,
     })
 }

@@ -209,6 +209,47 @@ export function accountsTrialCreate() {
   return Promise.reject(new Error("only the web has trials"));
 }
 
+// Purchasing is the web server's alone, and the app does not reach it yet,
+// see docs/design/purchasing.md, build step 7.
+const purchasingOnTheWebOnly = () => Promise.reject(new Error("Purchases are on the web for now"));
+
+export function accountsProductsList() {
+  return purchasingOnTheWebOnly();
+}
+
+/** @param {string} _id */
+export function accountsProductsGet(_id) {
+  return purchasingOnTheWebOnly();
+}
+
+/** @param {string} _priceId */
+export function accountsCheckoutsCreate(_priceId) {
+  return purchasingOnTheWebOnly();
+}
+
+/** @param {string} _id */
+export function accountsCheckoutsGet(_id) {
+  return purchasingOnTheWebOnly();
+}
+
+export function accountsPurchasesList() {
+  return purchasingOnTheWebOnly();
+}
+
+/** @param {string} _id */
+export function accountsPurchasesGet(_id) {
+  return purchasingOnTheWebOnly();
+}
+
+export function accountsSubscriptionsList() {
+  return purchasingOnTheWebOnly();
+}
+
+/** @param {string} _id */
+export function accountsSubscriptionsGet(_id) {
+  return purchasingOnTheWebOnly();
+}
+
 // A local user: someone using the app on this device without signing
 // up, see docs/design/accounts-local-and-trial-users.md.
 

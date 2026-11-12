@@ -7,6 +7,7 @@
      trial user sees the trial's banner above every page, and has no
      sign-out either, having nothing to sign back in with. -->
 <script>
+  import AccountsPaymentFailedBanner from "../accounts/AccountsPaymentFailedBanner.svelte";
   import AccountsTrialBanner from "../accounts/AccountsTrialBanner.svelte";
   import CurrentCommunityMenu from "./CurrentCommunityMenu.svelte";
   import SyncStatus from "./SyncStatus.svelte";
@@ -56,6 +57,9 @@
 
 {#if currentUser?.kind === "trial" && currentUser.trial_expires_at}
   <AccountsTrialBanner trialExpiresAt={currentUser.trial_expires_at} />
+{/if}
+{#if currentUser?.payment_failed_subscription_id}
+  <AccountsPaymentFailedBanner subscriptionId={currentUser.payment_failed_subscription_id} />
 {/if}
 <nav class="flex flex-wrap items-center gap-4">
   <a href={homeUrl()} class="link">Home</a>

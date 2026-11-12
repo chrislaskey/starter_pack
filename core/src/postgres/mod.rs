@@ -5,7 +5,17 @@
 use sqlx::migrate::Migrator;
 
 #[cfg(feature = "stripe")]
+pub mod accounts_checkouts;
+#[cfg(feature = "stripe")]
+pub mod accounts_prices;
+#[cfg(feature = "stripe")]
+pub mod accounts_products;
+#[cfg(feature = "stripe")]
+pub mod accounts_purchases;
+#[cfg(feature = "stripe")]
 pub mod accounts_stripe_events;
+#[cfg(feature = "stripe")]
+pub mod accounts_subscriptions;
 pub mod accounts_users;
 pub mod communities;
 pub mod credentials;

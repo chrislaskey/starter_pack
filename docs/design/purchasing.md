@@ -1,6 +1,6 @@
 # Purchasing
 
-**Status: agreed 2026-11-11; step 1 built 2026-11-11.** Plans and one-time
+**Status: agreed 2026-11-11; steps 1–4 built 2026-11-11.** Plans and one-time
 purchases in `accounts`, paid through Stripe on the web and desktop and
 later through the App Store and Google Play on phones.
 
@@ -168,14 +168,17 @@ is.
   signature first, so such a body was still signed: `create` then reads
   the id and type itself. The object is fetched from Stripe anyway, so
   the endpoint's API version never breaks the webhook.
-- **Secrets** are the environment's: `STRIPE_SECRET_KEY` and
-  `STRIPE_WEBHOOK_SECRET`, held in `secrecy::SecretString`. A server
-  without them has no products and its Buy buttons are hidden.
-- **The events handled**: `checkout.session.completed`,
-  `checkout.session.async_payment_succeeded` and `_failed`,
-  `customer.subscription.created`, `.updated` and `.deleted`,
-  `invoice.paid`, `invoice.payment_failed`, `charge.refunded`,
-  `product.*` and `price.*`.
+- **Settings** are the environment's: `STRIPE_SECRET_KEY` and
+  `STRIPE_WEBHOOK_SECRET`, held in `secrecy::SecretString`; `STRIPE_TAX`;
+  and `SERVER_URL`, the server's address as people reach it, which
+  Stripe's return links start with, `http://localhost:4000` when unset.
+  Without the key the server takes no payments: a checkout is a 503.
+- **The events handled**: `product.*` and `price.*`, the catalog;
+  `checkout.session.*`, a checkout and, for a plan, its subscription;
+  `customer.subscription.*`, a plan changed anywhere; and
+  `charge.refunded`. A failed or paid renewal arrives as
+  `customer.subscription.updated`, so the `invoice.*` events are not
+  needed. Every other event is recorded and changes nothing.
 
 ## The catalog
 
@@ -259,11 +262,20 @@ Stripe's own "trial" is called **free days** here
    `STRIPE_WEBHOOK_SECRET`; the route checking signatures;
    `accounts_stripe_events`; tests with signed events. The API client
    and `STRIPE_SECRET_KEY` come with step 2, the first to call Stripe.
-2. **The catalog.** Products and prices copied, `Grant`, P1's pages.
-3. **One-time purchases.** The customer, checkouts, the return page,
-   the purchases pages: P2, P3, P5, P11.
-4. **Plans.** Subscriptions, `plans::current`, the plan in the current
-   user, the past-due banner: P4, P6, P10.
+2. **The catalog.** Built: the API client (`async-stripe` with rustls),
+   `STRIPE_SECRET_KEY`, `accounts_products` and `accounts_prices`,
+   `Grant`, the catalog events, `app_web accounts products sync`, and
+   `/accounts/products` and `/accounts/products/:id`.
+3. **One-time purchases.** Built: `STRIPE_TAX`, `SERVER_URL`, the
+   customer, `accounts_checkouts` and `accounts_purchases`, Buy, the
+   return page `/accounts/checkouts/:id`, `/accounts/purchases` and
+   `/accounts/purchases/:id`, refunds: P2, P3, P5, P11. The receipt is
+   Stripe's email; the purchase page says so.
+4. **Plans.** Built: `accounts_subscriptions`, `plans::current` and
+   `plans::payment_failed`, both on `GET /api/current-user`, the
+   past-due banner, one plan at a time, `/accounts/subscriptions` and
+   `/accounts/subscriptions/:id`: P4, P6, P10. Until step 5 the banner
+   points to Stripe's email for a new card.
 5. **Changing a plan.** Switch, cancel and resume, the portal: P7–P9.
 6. **The reconcile job.**
 7. **Desktop.** The system browser, coming back on focus, the plan in
@@ -311,7 +323,9 @@ needs Stripe's review before it is on, so apply early.
 6. **The products**, from step 2 on: in the Dashboard's product
    catalog, a product per row of The catalog, with tax code SaaS,
    `txcd_10103000`, and each price's lookup key set to the key there.
-   Made again in live mode, with the same lookup keys.
+   Then `app_web accounts products sync` copies them to the server;
+   the webhook keeps them up to date after. Made again in live mode,
+   with the same lookup keys.
 
 ## Checked 2026-11-11
 

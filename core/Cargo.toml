@@ -17,11 +17,31 @@ mail-resend = ["dep:reqwest", "dep:secrecy"]
 # Uploads straight to S3-style object storage, for the server; never in the Tauri app
 object-storage = ["dep:object_store", "dep:secrecy", "dep:futures-util"]
 # Taking payments through Stripe, for the server; never in the Tauri app
-stripe = ["dep:async-stripe-webhook", "dep:secrecy"]
+stripe = [
+    "dep:async-stripe",
+    "dep:async-stripe-billing",
+    "dep:async-stripe-checkout",
+    "dep:async-stripe-client-core",
+    "dep:async-stripe-core",
+    "dep:async-stripe-product",
+    "dep:async-stripe-shared",
+    "dep:async-stripe-types",
+    "dep:async-stripe-webhook",
+    "dep:futures-util",
+    "dep:secrecy",
+]
 
 [dependencies]
 argon2 = "0.6"
 # A release candidate, pinned exactly: the 1.0 line is the maintained one, see docs/design/purchasing.md
+async-stripe = { version = "=1.0.0-rc.10", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"], optional = true }
+async-stripe-billing = { version = "=1.0.0-rc.10", features = ["deserialize", "subscription"], optional = true }
+async-stripe-checkout = { version = "=1.0.0-rc.10", features = ["deserialize", "checkout_session"], optional = true }
+async-stripe-client-core = { version = "=1.0.0-rc.10", optional = true }
+async-stripe-core = { version = "=1.0.0-rc.10", features = ["deserialize", "customer", "charge"], optional = true }
+async-stripe-product = { version = "=1.0.0-rc.10", features = ["deserialize", "price", "product"], optional = true }
+async-stripe-shared = { version = "=1.0.0-rc.10", features = ["deserialize"], optional = true }
+async-stripe-types = { version = "=1.0.0-rc.10", optional = true }
 async-stripe-webhook = { version = "=1.0.0-rc.10", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 futures-util = { version = "0.3", default-features = false, optional = true }

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use app_core::accounts::stripe::Stripe;
 use app_core::deployment::Deployment;
 use app_core::mailer::Mailer;
 use axum::Router;
@@ -17,11 +18,12 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::api_error::ApiError;
+use crate::checkouts::ServerUrl;
 use crate::rate_limits::{self, RateLimits};
 use crate::stripe_events::StripeSigningSecret;
 use crate::{
-    accounts, avatars, communities, current_community, current_user, files, memberships, ops,
-    posts, public, stripe_events, sync,
+    accounts, avatars, checkouts, communities, current_community, current_user, files, memberships,
+    ops, posts, products, public, purchases, stripe_events, subscriptions, sync,
 };
 
 /// What every handler may take from the server: the database with its
@@ -35,6 +37,8 @@ pub struct AppState {
     pub trust_proxy_headers: bool,
     pub trial_users_max: TrialUsersMax,
     pub stripe_signing_secret: StripeSigningSecret,
+    pub stripe: Option<Stripe>,
+    pub server_url: ServerUrl,
 }
 
 /// How many trial users the server holds at once, `TRIAL_USERS_MAX`; 0,
@@ -110,6 +114,14 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
             get(current_community::get).put(current_community::update),
         )
         .route("/api/accounts/stripe-webhooks", post(stripe_events::create))
+        .route("/api/accounts/products", get(products::list))
+        .route("/api/accounts/products/{id}", get(products::get))
+        .route("/api/accounts/checkouts", post(checkouts::create))
+        .route("/api/accounts/checkouts/{id}", get(checkouts::get))
+        .route("/api/accounts/purchases", get(purchases::list))
+        .route("/api/accounts/purchases/{id}", get(purchases::get))
+        .route("/api/accounts/subscriptions", get(subscriptions::list))
+        .route("/api/accounts/subscriptions/{id}", get(subscriptions::get))
         .route("/api/avatars", put(avatars::update))
         .route("/api/avatars/uploads", post(avatars::create_upload))
         .route("/api/posts", get(posts::list).post(posts::create))
@@ -193,6 +205,7 @@ mod tests {
         token: String,
         mailer: Mailer,
         storage: Storage,
+        stripe: Stripe,
     }
 
     async fn test_router() -> (TestRouter, Value) {
@@ -223,6 +236,7 @@ mod tests {
             .with_file_store(app_core::deployment::FileStore::Bucket(storage.clone()))
             .with_avatar_bucket(storage.clone());
         let mailer = Mailer::memory();
+        let stripe = Stripe::memory();
         let alice = signed_up(&deployment, &mailer, "alice@example.com").await;
         let post = app_core::posts::create(&deployment, &alice.user, "the first post", &[])
             .await
@@ -240,6 +254,8 @@ mod tests {
             stripe_signing_secret: StripeSigningSecret(Some(std::sync::Arc::new(
                 secrecy::SecretString::from(STRIPE_SIGNING_SECRET),
             ))),
+            stripe: Some(stripe.clone()),
+            server_url: ServerUrl("http://server.test".to_string()),
         };
         let test_router = TestRouter {
             router: router(&dist, &ops_dist, state),
@@ -247,6 +263,7 @@ mod tests {
             token: alice.token,
             mailer,
             storage,
+            stripe,
         };
         (test_router, post)
     }
@@ -2070,6 +2087,8 @@ mod tests {
             trust_proxy_headers: false,
             trial_users_max: TrialUsersMax(0),
             stripe_signing_secret: StripeSigningSecret(None),
+            stripe: Some(router.stripe.clone()),
+            server_url: ServerUrl("http://server.test".to_string()),
         };
         let dist = std::env::temp_dir().join(format!("app_web_test_{}", std::process::id()));
         let without_stripe = super::router(&dist, &dist.join("ops"), state);
@@ -2077,5 +2096,252 @@ mod tests {
         let signature = stripe_signature(&body, STRIPE_SIGNING_SECRET);
         let (status, _) = stripe_webhook_send(&without_stripe, &body, Some(&signature)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn accounts_products_list_and_get_show_the_catalog() {
+        let (router, _) = test_router().await;
+        router
+            .stripe
+            .memory_product_put(app_core::accounts::stripe::StripeProduct {
+                id: "prod_license".to_string(),
+                name: "License".to_string(),
+                description: None,
+                active: true,
+            });
+        router
+            .stripe
+            .memory_price_put(app_core::accounts::stripe::StripePrice {
+                id: "price_license".to_string(),
+                product_id: "prod_license".to_string(),
+                lookup_key: Some("license".to_string()),
+                amount: Some(4900),
+                currency: "usd".to_string(),
+                interval: None,
+                active: true,
+            });
+        app_core::accounts::products::sync(&router.deployment, &router.stripe)
+            .await
+            .expect("synced");
+
+        let (status, list) = get(&router, "/api/accounts/products").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list[0]["name"], json!("License"));
+        assert_eq!(list[0]["kind"], json!("one_time"));
+        assert_eq!(list[0]["prices"][0]["amount"], json!(4900));
+        let id = list[0]["id"].as_str().expect("an id");
+        let (status, shown) = get(&router, &format!("/api/accounts/products/{id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(shown["name"], list[0]["name"]);
+        assert_eq!(shown["owned"], json!(false));
+        let (status, _) = get(&router, &format!("/api/accounts/products/{MISSING_ID}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send_as(
+            &router.router,
+            None,
+            Method::GET,
+            "/api/accounts/products",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn accounts_checkouts_create_then_get_records_the_purchase() {
+        use app_core::accounts::stripe::{
+            StripeCheckoutSession, StripeCheckoutSessionStatus, StripePaymentStatus, StripePrice,
+            StripeProduct,
+        };
+        let (router, _) = test_router().await;
+        router.stripe.memory_product_put(StripeProduct {
+            id: "prod_license".to_string(),
+            name: "License".to_string(),
+            description: None,
+            active: true,
+        });
+        router.stripe.memory_price_put(StripePrice {
+            id: "price_license".to_string(),
+            product_id: "prod_license".to_string(),
+            lookup_key: Some("license".to_string()),
+            amount: Some(4900),
+            currency: "usd".to_string(),
+            interval: None,
+            active: true,
+        });
+        app_core::accounts::products::sync(&router.deployment, &router.stripe)
+            .await
+            .expect("synced");
+        let (_, list) = get(&router, "/api/accounts/products").await;
+        let price_id = list[0]["prices"][0]["id"].clone();
+
+        let (status, created) = send(
+            &router,
+            Method::POST,
+            "/api/accounts/checkouts",
+            Some(json!({ "price_id": price_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            created["url"]
+                .as_str()
+                .expect("a url")
+                .starts_with("https://")
+        );
+        let id = created["checkout"]["id"].as_str().expect("an id");
+        let session_id = created["checkout"]["stripe_session_id"]
+            .as_str()
+            .expect("a session");
+
+        router
+            .stripe
+            .memory_checkout_session_put(StripeCheckoutSession {
+                id: session_id.to_string(),
+                url: None,
+                client_reference_id: Some(id.to_string()),
+                status: StripeCheckoutSessionStatus::Complete,
+                payment_status: StripePaymentStatus::Paid,
+                payment_intent_id: Some("pi_1".to_string()),
+                subscription_id: None,
+                amount_total: Some(4900),
+                currency: Some("usd".to_string()),
+            });
+        let (status, shown) = get(&router, &format!("/api/accounts/checkouts/{id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(shown["status"], json!("paid"));
+        assert_eq!(shown["product_name"], json!("License"));
+        let purchase_id = shown["purchase_id"].as_str().expect("a purchase");
+
+        let (status, purchases) = get(&router, "/api/accounts/purchases").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(purchases[0]["id"], json!(purchase_id));
+        assert_eq!(purchases[0]["product_name"], json!("License"));
+        let (status, purchase) =
+            get(&router, &format!("/api/accounts/purchases/{purchase_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(purchase["store"], json!("stripe"));
+
+        let (status, again) = send(
+            &router,
+            Method::POST,
+            "/api/accounts/checkouts",
+            Some(json!({ "price_id": price_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(again["error"], json!("You have this already"));
+    }
+
+    #[tokio::test]
+    async fn accounts_subscriptions_and_the_plan_on_the_current_user() {
+        use app_core::accounts::stripe::{
+            StripeCheckoutSession, StripeCheckoutSessionStatus, StripePaymentStatus, StripePrice,
+            StripeProduct, StripeSubscription,
+        };
+        let (router, _) = test_router().await;
+        router.stripe.memory_product_put(StripeProduct {
+            id: "prod_single".to_string(),
+            name: "Single user subscription".to_string(),
+            description: None,
+            active: true,
+        });
+        router.stripe.memory_price_put(StripePrice {
+            id: "price_monthly".to_string(),
+            product_id: "prod_single".to_string(),
+            lookup_key: Some("single_user_monthly".to_string()),
+            amount: Some(900),
+            currency: "usd".to_string(),
+            interval: Some("month".to_string()),
+            active: true,
+        });
+        app_core::accounts::products::sync(&router.deployment, &router.stripe)
+            .await
+            .expect("synced");
+        let (_, me) = get(&router, "/api/current-user").await;
+        assert_eq!(me["plan"], Value::Null);
+
+        let (_, list) = get(&router, "/api/accounts/products").await;
+        let price_id = list[0]["prices"][0]["id"].clone();
+        let (_, created) = send(
+            &router,
+            Method::POST,
+            "/api/accounts/checkouts",
+            Some(json!({ "price_id": price_id })),
+        )
+        .await;
+        let id = created["checkout"]["id"].as_str().expect("an id");
+        let session_id = created["checkout"]["stripe_session_id"]
+            .as_str()
+            .expect("a session");
+        let customer_id = match &router.stripe {
+            Stripe::Memory(memory) => memory.lock().expect("the memory").checkout_sessions_asked[0]
+                .customer_id
+                .clone(),
+            Stripe::Api(_) => unreachable!("tests use memory"),
+        };
+        let subscription = |status: &str| StripeSubscription {
+            id: "sub_1".to_string(),
+            customer_id: customer_id.clone(),
+            price_id: "price_monthly".to_string(),
+            status: status.to_string(),
+            current_period_end: Some(1_800_000_000),
+            cancel_at_period_end: false,
+            ended_at: None,
+        };
+        router
+            .stripe
+            .memory_subscription_put(subscription("active"));
+        router
+            .stripe
+            .memory_checkout_session_put(StripeCheckoutSession {
+                id: session_id.to_string(),
+                url: None,
+                client_reference_id: Some(id.to_string()),
+                status: StripeCheckoutSessionStatus::Complete,
+                payment_status: StripePaymentStatus::Paid,
+                payment_intent_id: None,
+                subscription_id: Some("sub_1".to_string()),
+                amount_total: Some(900),
+                currency: Some("usd".to_string()),
+            });
+        let (_, shown) = get(&router, &format!("/api/accounts/checkouts/{id}")).await;
+        assert_eq!(shown["status"], json!("paid"));
+        assert_eq!(shown["kind"], json!("plan"));
+
+        let (_, me) = get(&router, "/api/current-user").await;
+        assert_eq!(me["plan"]["grant"], json!("single_user_subscription"));
+        let subscription_id = me["plan"]["subscription_id"].clone();
+        let (status, subscriptions) = get(&router, "/api/accounts/subscriptions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscriptions[0]["id"], subscription_id);
+        assert_eq!(subscriptions[0]["status"], json!("active"));
+        assert_eq!(subscriptions[0]["price"]["interval"], json!("month"));
+        let subscription_path = format!(
+            "/api/accounts/subscriptions/{}",
+            subscription_id.as_str().expect("an id")
+        );
+        let (status, _) = get(&router, &subscription_path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        router
+            .stripe
+            .memory_subscription_put(subscription("past_due"));
+        let body = json!({
+            "id": "evt_1",
+            "object": "event",
+            "created": 1_790_000_000,
+            "data": { "object": { "id": "sub_1", "object": "subscription" } },
+            "livemode": false,
+            "pending_webhooks": 1,
+            "type": "customer.subscription.updated",
+        })
+        .to_string();
+        let signature = stripe_signature(&body, STRIPE_SIGNING_SECRET);
+        let (status, _) = stripe_webhook_send(&router.router, &body, Some(&signature)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, me) = get(&router, "/api/current-user").await;
+        assert_eq!(me["plan"], Value::Null);
+        assert_eq!(me["payment_failed_subscription_id"], subscription_id);
     }
 }

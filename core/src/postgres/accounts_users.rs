@@ -158,3 +158,48 @@ pub async fn delete_row(connection: &mut PgConnection, id: Uuid) -> Result<(), s
         .await?;
     Ok(())
 }
+
+/// The account's Stripe customer, `cus_...`, once it has bought.
+#[cfg(feature = "stripe")]
+pub async fn get_stripe_customer_id(
+    connection: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let customer_id: Option<Option<String>> =
+        sqlx::query_scalar("SELECT stripe_customer_id FROM accounts_users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(connection)
+            .await?;
+    Ok(customer_id.flatten())
+}
+
+/// Sets the account's Stripe customer, unless it has one already.
+#[cfg(feature = "stripe")]
+pub async fn set_stripe_customer_id_if_missing(
+    connection: &mut PgConnection,
+    id: Uuid,
+    customer_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE accounts_users SET stripe_customer_id = $2 WHERE id = $1 AND stripe_customer_id IS NULL",
+    )
+    .bind(id)
+    .bind(customer_id)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// The account whose Stripe customer it is.
+#[cfg(feature = "stripe")]
+pub async fn get_id_by_stripe_customer_id(
+    connection: &mut PgConnection,
+    customer_id: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let id: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM accounts_users WHERE stripe_customer_id = $1")
+            .bind(customer_id)
+            .fetch_optional(connection)
+            .await?;
+    Ok(id)
+}
