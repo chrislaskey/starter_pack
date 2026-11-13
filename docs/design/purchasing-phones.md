@@ -1,6 +1,7 @@
 # Purchasing on phones
 
-**Status: agreed 2026-11-12; iOS to build first, Android in a later
+**Status: iOS built 2026-11-12, not yet tried by hand in the simulator
+(see "As built" in `purchasing-ios-build.md`); Android in a later
 effort.** Step 8 of `purchasing.md`: plans and one-time purchases
 bought in the app on iOS through the App Store and on Android through
 Google Play. Read `purchasing.md` first; this doc only adds what
@@ -262,8 +263,8 @@ them for a one-time purchase, see To check.
   `svelte/src/lib/core/`.
 - **The same commands where they fit.** On a phone the products
   commands add the store's price to each price, and a new
-  `accounts_store_purchases_create(price_id)` runs M1 and answers the
-  new purchase or subscription; `accounts_store_purchases_restore` runs
+  `accounts_store_transactions_create(price_id)` runs M1 and answers the
+  new purchase or subscription; `accounts_store_transactions_restore` runs
   M2. `refused_on_a_phone` goes, and the checkout and portal commands
   answer that a phone uses its store.
 - **A transaction is finished only after the server has it.** A
@@ -315,6 +316,53 @@ tries Apple's sandbox.
 9. **The migration** for the two notification tables, when its step
    comes.
 
+## Checked 2026-11-12
+
+Step 0 of `purchasing-ios-build.md`, from each crate's published source
+and its repository.
+
+**`app-store-server-library` 6.0.2** (namecare, MIT; 4.x is no longer
+the newest, 6.0 came out 2026-08-13). **Passes.**
+
+- Maintained: releases 2026-08-13, 09-28 and 11-04; 1.5M downloads.
+- No RustSec advisory on the crate. Its `x509-validator` had
+  RUSTSEC-2026-0312, fixed in 0.3.1; 6.0.2 takes 0.3.2.
+- `SignedDataVerifier::new(root_certificates, environment, bundle_id,
+  app_apple_id, ..)` checks the chain against the roots we give it,
+  then the bundle id and the environment.
+  `verify_and_decode_signed_transaction` and
+  `verify_and_decode_notification` are there.
+- `AppStoreServerApiClient::get_transaction_info` and
+  `get_all_subscription_statuses` are there, async.
+- **No OCSP**: the chain is checked offline, with no revocation check
+  (its docs say so). So verifying does not block and needs no
+  `spawn_blocking`; the build doc's note on OCSP no longer holds.
+- TLS: feature `api-client-reqwest` takes `reqwest` 0.13 with
+  rustls, which the workspace already has. The signature check needs
+  one crypto feature: `ring`, already in `Cargo.lock`.
+
+**`tauri-plugin-iap`** (Choochmeque, MIT): 0.9.1 is the newest
+release, 0.10.0-rc.10 the newest candidate. **Fails one check.**
+
+- Maintained: commits weekly, the last 2026-11-08; no RustSec advisory.
+- Rust can call it: `app.iap().purchase(..)` through `IapExt`.
+- On iOS it gives Apple's signed transaction, `jws_representation`,
+  after a purchase and from `restore_purchases` (StoreKit's current
+  entitlements). It takes `app_account_token` (a UUID).
+- **It finishes every transaction itself**: `purchase` calls
+  `transaction.finish()` before returning, and its `Transaction.updates`
+  listener finishes each update and only tells JavaScript. Its
+  `acknowledge_purchase` and `consume_purchase` do nothing on iOS.
+  Pull request #267, which would have stopped this on macOS, was
+  closed unmerged. So a paid transaction is finished before our server
+  has it, which "A transaction is finished only after the server has
+  it" rules out; a credits purchase lost that way is gone for good.
+- No call for the unfinished transactions (`Transaction.unfinished`).
+- No call that opens the subscriptions page (`showManageSubscriptions`).
+
+Decided 2026-11-12: `app-store-server-library` 6.0.2, and a small iOS
+plugin of our own on StoreKit 2 in place of `tauri-plugin-iap`.
+
 ## Build order
 
 iOS, with deleting an account first: `purchasing-ios-build.md`.
@@ -332,6 +380,72 @@ merchant account, the products, a Google Cloud project with a Pub/Sub
 topic that Google Play's service account may publish to, a push
 subscription with an OIDC token to our route, and a service account
 with access to the app's orders.
+
+## Setting up the App Store
+
+Once per fork, as "Setting up Stripe" in `purchasing.md`. Nothing here
+is ever committed; the repo holds only the placeholders.
+
+1. **Agreements**: in App Store Connect, Business, sign the Paid Apps
+   Agreement and fill in the bank and tax forms. Nothing is sold until
+   it is active.
+2. **The Small Business Program**: apply at
+   developer.apple.com/app-store/small-business-program, for Apple's
+   15% on the first $1M a year.
+3. **The app**: an app record with the bundle id of
+   `tauri/tauri.conf.json`'s `identifier`; its Apple ID, a number on
+   the App Information page, is `APP_STORE_APP_ID`.
+4. **The products**, under Monetization, each with the catalog's id as
+   its Product ID, a name, a price and a review screenshot:
+   - a subscription group, "Single user subscription", with two
+     auto-renewable subscriptions, `single_user_yearly` at level 1 and
+     `single_user_monthly` at level 2, so yearly is the upgrade;
+   - `license`, non-consumable;
+   - `credits`, consumable.
+
+   Free days, if a fork wants them, are an introductory offer on each
+   subscription, matching `Grant::free_days`.
+5. **Grace period off**: the subscription group's Billing Grace Period
+   stays off, so a failed renewal is no plan, as on the web.
+6. **The In-App Purchase key**: Users and Access, Integrations,
+   In-App Purchase, Generate. Download the `.p8` once; its Key ID is
+   `APP_STORE_KEY_ID`, and the Issuer ID above the list is
+   `APP_STORE_ISSUER_ID`. The file's contents are
+   `APP_STORE_PRIVATE_KEY`.
+7. **Notifications**: App Information, App Store Server Notifications,
+   Version 2, the same URL for production and sandbox:
+   `https://<the server>/api/accounts/app-store-notifications`. Then
+   from the server, Request a Test Notification (or the API's) and see
+   `app store notification ... TEST: handled` in its log.
+8. **A sandbox tester**: Users and Access, Sandbox, Test Accounts. On
+   the iPhone, Settings, App Store, Sandbox Account, sign in with it;
+   a TestFlight or development build then buys in the sandbox, free,
+   with renewals every few minutes.
+9. **The server's settings**, from the environment:
+
+   ```sh
+   APP_STORE_BUNDLE_ID=com.example.starterpack
+   APP_STORE_APP_ID=1234567890        # omit to take the sandbox only
+   APP_STORE_ISSUER_ID=...
+   APP_STORE_KEY_ID=...
+   APP_STORE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+   ```
+
+   None set, the server sells nothing in the iPhone app and its
+   notifications route answers 404. The server must also have Stripe's
+   catalog synced, since a store's row points at the Stripe price with
+   the same lookup key, see The catalog on a phone.
+10. **Review notes**: say that purchases belong to the account and
+    follow it to the web and the desktop, that a test account is
+    given, and where Restore purchases and Delete my account are.
+
+**Trying it without App Store Connect.** `tauri/gen/apple/StarterPack.storekit`
+holds the four products and the scheme uses it when the app is run
+from Xcode (`cargo tauri ios dev --open`, then Run). StoreKit's sheet,
+Restore and the subscriptions page work in the simulator; the server
+cannot check what the simulator signs, since Xcode signs it rather
+than Apple, so the purchase is refused when sent. Trying a purchase end
+to end needs Apple's sandbox, steps 3 to 9.
 
 ## To check, before building
 

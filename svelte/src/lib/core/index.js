@@ -27,6 +27,8 @@ export const accountsSignInNewPassword = core.accountsSignInNewPassword;
 export const accountsSignInResetPassword = core.accountsSignInResetPassword;
 export const accountsSecondFactors = core.accountsSecondFactors;
 export const accountsPasswordUpdate = core.accountsPasswordUpdate;
+export const accountsDeletionsCodeCreate = core.accountsDeletionsCodeCreate;
+export const accountsDeletionsCreate = core.accountsDeletionsCreate;
 export const accountsSignInStart = core.accountsSignInStart;
 export const accountsSignInPending = core.accountsSignInPending;
 export const accountsSignInFinish = core.accountsSignInFinish;
@@ -43,6 +45,10 @@ export const accountsProductsList = core.accountsProductsList;
 export const accountsProductsGet = core.accountsProductsGet;
 export const accountsCheckoutsCreate = core.accountsCheckoutsCreate;
 export const accountsCheckoutsGet = core.accountsCheckoutsGet;
+export const accountsStoreGet = core.accountsStoreGet;
+export const accountsStoreTransactionsCreate = core.accountsStoreTransactionsCreate;
+export const accountsStoreTransactionsRestore = core.accountsStoreTransactionsRestore;
+export const accountsSubscriptionsManageOpen = core.accountsSubscriptionsManageOpen;
 export const accountsPurchasesList = core.accountsPurchasesList;
 export const accountsPurchasesGet = core.accountsPurchasesGet;
 export const accountsSubscriptionsList = core.accountsSubscriptionsList;
@@ -92,6 +98,7 @@ export const quickPickerClose = core.quickPickerClose;
 export const quickPickerOpenApp = core.quickPickerOpenApp;
 export const quickPickerAccessibilityRequest = core.quickPickerAccessibilityRequest;
 export const onQuickPickerOpened = core.onQuickPickerOpened;
+export const publicPagesOpen = core.publicPagesOpen;
 
 /**
  * Uploads the picture straight to object storage, then makes it the

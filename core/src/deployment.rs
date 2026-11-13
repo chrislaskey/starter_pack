@@ -47,6 +47,9 @@ pub struct Deployment {
     /// Stripe, on a server that sells, for the jobs that ask it.
     #[cfg(feature = "stripe")]
     pub stripe: Option<crate::accounts::stripe::Stripe>,
+    /// The App Store, on a server that sells in the iPhone app.
+    #[cfg(feature = "app-store")]
+    pub app_store: Option<crate::accounts::app_store::AppStore>,
 }
 
 impl Deployment {
@@ -61,6 +64,8 @@ impl Deployment {
             avatar_bucket: None,
             #[cfg(feature = "stripe")]
             stripe: None,
+            #[cfg(feature = "app-store")]
+            app_store: None,
         }
     }
 
@@ -72,6 +77,14 @@ impl Deployment {
     pub fn with_stripe(self, stripe: crate::accounts::stripe::Stripe) -> Deployment {
         Deployment {
             stripe: Some(stripe),
+            ..self
+        }
+    }
+
+    #[cfg(feature = "app-store")]
+    pub fn with_app_store(self, app_store: crate::accounts::app_store::AppStore) -> Deployment {
+        Deployment {
+            app_store: Some(app_store),
             ..self
         }
     }

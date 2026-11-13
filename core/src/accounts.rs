@@ -23,8 +23,15 @@
 //! resumes from the cursor; which file a device signs into is the app's
 //! business, see `docs/design/device-accounts.md`.
 
+#[cfg(feature = "app-store")]
+pub mod app_store;
+#[cfg(feature = "app-store")]
+pub mod app_store_notifications;
+#[cfg(feature = "app-store")]
+pub mod app_store_reconcile;
 #[cfg(feature = "stripe")]
 pub mod checkouts;
+pub mod deletions;
 pub mod online;
 #[cfg(feature = "stripe")]
 pub mod plans;
@@ -34,6 +41,8 @@ pub mod prices;
 pub mod products;
 #[cfg(feature = "stripe")]
 pub mod purchases;
+#[cfg(feature = "stripe")]
+pub mod store_transactions;
 #[cfg(feature = "stripe")]
 pub mod stripe;
 #[cfg(feature = "stripe")]
@@ -619,7 +628,7 @@ pub async fn sign_out_on_device<T: Transport>(
     }
     let (_user, token) = crate::users::signed_in_with_token(deployment).await?;
     match transport.sign_out(&token).await {
-        Ok(()) | Err(SyncError::Unauthorized) => {}
+        Ok(()) | Err(SyncError::Unauthorized) | Err(SyncError::AccountDeleted) => {}
         Err(error) => return Err(error.into()),
     }
     forget_signed_in(deployment).await

@@ -22,8 +22,9 @@ use crate::checkouts::ServerUrl;
 use crate::rate_limits::{self, RateLimits};
 use crate::stripe_events::StripeSigningSecret;
 use crate::{
-    accounts, avatars, checkouts, communities, current_community, current_user, files, memberships,
-    ops, posts, products, public, purchases, stripe_events, subscriptions, sync,
+    accounts, app_store_notifications, avatars, checkouts, communities, current_community,
+    current_user, deletions, files, memberships, ops, posts, products, public, purchases,
+    store_transactions, stripe_events, subscriptions, sync,
 };
 
 /// What every handler may take from the server: the database with its
@@ -96,6 +97,8 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
         .route("/api/accounts/password", put(accounts::password_update))
         .route("/api/accounts/device-token", post(accounts::device_token))
         .route("/api/accounts/sign-out", delete(accounts::sign_out))
+        .route("/api/accounts/deletions/code", post(deletions::code_create))
+        .route("/api/accounts/deletions", post(deletions::create))
         .route(
             "/api/accounts/trial",
             get(accounts::trial_get).post(accounts::trial_create),
@@ -114,6 +117,14 @@ pub fn router(svelte_dist: &Path, ops_dist: &Path, state: AppState) -> Router {
             get(current_community::get).put(current_community::update),
         )
         .route("/api/accounts/stripe-webhooks", post(stripe_events::create))
+        .route(
+            "/api/accounts/app-store-notifications",
+            post(app_store_notifications::create),
+        )
+        .route(
+            "/api/accounts/store-transactions",
+            post(store_transactions::create),
+        )
         .route("/api/accounts/products", get(products::list))
         .route("/api/accounts/products/{id}", get(products::get))
         .route("/api/accounts/checkouts", post(checkouts::create))
@@ -235,6 +246,12 @@ mod tests {
         fs::create_dir_all(dist.join("public")).expect("a public dir");
         fs::write(dist.join("public/index.html"), "<html>public home</html>").expect("the home");
         fs::write(dist.join("public/about.html"), "<html>public about</html>").expect("about");
+        fs::write(dist.join("public/terms.html"), "<html>public terms</html>").expect("terms");
+        fs::write(
+            dist.join("public/privacy.html"),
+            "<html>public privacy</html>",
+        )
+        .expect("privacy");
         let database = app_core::database::Database::open_sqlite_in_memory()
             .await
             .expect("a database");
@@ -1990,11 +2007,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_deletions_delete_with_the_mailed_code_then_the_token_is_gone() {
+        let (router, _) = test_router().await;
+        let token = Some(router.token.as_str());
+        let (status, _headers, body) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::POST,
+            "/api/accounts/deletions",
+            Some(json!({ "code": "not a code" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+        let (status, _headers, _body) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::POST,
+            "/api/accounts/deletions/code",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let code = code_sent_to(&router.mailer, "alice@example.com");
+        let (status, _headers, _body) = send_with(
+            &router.router,
+            token,
+            None,
+            Method::POST,
+            "/api/accounts/deletions",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _headers, body) =
+            send_with(&router.router, token, None, Method::GET, "/api/posts", None).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["code"], json!("account_deleted"));
+    }
+
+    #[tokio::test]
+    async fn app_store_routes_are_not_found_without_the_app_store() {
+        let (router, _) = test_router().await;
+        let (status, _headers, _body) = send_with(
+            &router.router,
+            Some(&router.token),
+            None,
+            Method::POST,
+            "/api/accounts/store-transactions",
+            Some(json!({ "store": "app_store", "signed_transaction": "a.b.c" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _headers, _body) = send_with(
+            &router.router,
+            None,
+            None,
+            Method::POST,
+            "/api/accounts/app-store-notifications",
+            Some(json!({ "signedPayload": "a.b.c" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn public_pages_answer_at_their_file_names() {
         let (router, _) = test_router().await;
         let cookie = format!("token={}", router.token);
         for cookie in [None, Some(cookie.as_str())] {
-            for (path, page) in [("/", "public home"), ("/about", "public about")] {
+            for (path, page) in [
+                ("/", "public home"),
+                ("/about", "public about"),
+                ("/terms", "public terms"),
+                ("/privacy", "public privacy"),
+            ] {
                 let (status, _headers, body) =
                     send_with(&router.router, None, cookie, Method::GET, path, None).await;
                 assert_eq!(status, StatusCode::OK);

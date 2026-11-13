@@ -3,9 +3,11 @@
      docs/design/purchasing.md. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
+  import PublicPagesLinks from "../lib/PublicPagesLinks.svelte";
   import AccountsNeeded from "./AccountsNeeded.svelte";
   import { currentUserLoad } from "../lib/current_user.js";
   import {
+    accountsDeletionsNewUrl,
     accountsPasswordEditUrl,
     accountsProductsIndexUrl,
     accountsPurchasesIndexUrl,
@@ -26,6 +28,9 @@
   <h1>Account</h1>
   {#if currentUser && currentUser.kind !== "full"}
     <AccountsNeeded kind={currentUser.kind} />
+    {#if currentUser.kind === "trial"}
+      <p><a href={accountsDeletionsNewUrl()} class="link">Delete my trial</a></p>
+    {/if}
   {:else}
     {#if currentUser}
       <p>{currentUser.email}</p>
@@ -37,5 +42,7 @@
     <p><a href={accountsSubscriptionsIndexUrl()} class="link">Plans</a></p>
     <p><a href={accountsProductsIndexUrl()} class="link">Plans and products for sale</a></p>
     <p><a href={accountsPurchasesIndexUrl()} class="link">Purchases</a></p>
+    <p><a href={accountsDeletionsNewUrl()} class="link text-error">Delete my account</a></p>
   {/if}
+  <p class="muted"><PublicPagesLinks /></p>
 </main>

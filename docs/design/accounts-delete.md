@@ -1,6 +1,7 @@
 # Deleting an account
 
-**Status: agreed 2026-11-12, to build.** A full user deletes their
+**Status: built 2026-11-12** (`purchasing-ios-build.md`, step 1; "As
+built" at the end). A full user deletes their
 own account from the app or the web. Apple asks for this before any
 iOS release (guideline 5.1.1(v)), and `purchasing.md`'s P12 and
 `purchasing-phones.md`'s M8 left it for here. The build plan is
@@ -157,3 +158,27 @@ All seven agreed 2026-11-12 as recommended.
 - Undo, see 2.
 - Sign in with Apple's token revocation, if Sign in with Apple is ever
   added: Apple asks that a delete revokes it.
+
+## As built
+
+- **The mailer is passed in**: `deletions::code_create(deployment,
+  mailer, user)` and `deletions::create(deployment, mailer, user,
+  code)`, `code` none for a trial. Stripe is the deployment's
+  (`Deployment::with_stripe`), as the jobs read it, not a parameter.
+- **The code's row** is found by the user, `tokens::delete_code_hash`,
+  with the code's hash beside it; a wrong code counts as a sign-in's
+  does, and `MAX_CODE_ATTEMPTS` deletes it. A wrong code answers 422,
+  never 401, which a device takes for a sign-out.
+- **The user's row** is deleted by `users::delete_in`, a server write
+  recorded as an event in the log, as the picture's is, since `name`
+  is the only field a device may change on it.
+- **The plan** answered by the current user now says its `store`, so
+  the page warns by where it was bought. The App Store and Google Play
+  links open each store's subscriptions page on the web until step 4
+  opens StoreKit's sheet.
+- **Another device** removes the account on the sync's 410; an online
+  call's 410 starts a sync, so there is one path. The pages are told by
+  the `synced` event's `account_deleted`, and open the device's accounts
+  saying so.
+- **On the web** a deleted account's cookie is read as signed out.
+

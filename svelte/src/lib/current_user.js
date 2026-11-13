@@ -16,7 +16,7 @@ import { currentUserGet } from "./core/index.js";
  * signed up; `local`, on this device only, in the app; `trial`, on the
  * web until `trial_expires_at` unless they sign up. See
  * docs/design/accounts-local-and-trial-users.md.
- * @typedef {{grant: string, product_id: string, product_name: string, price_id: string, subscription_id: string, status: string, current_period_end: string | null, cancel_at_period_end: boolean}} Plan
+ * @typedef {{grant: string, product_id: string, product_name: string, price_id: string, subscription_id: string, store: "stripe" | "app_store" | "play_store", status: string, current_period_end: string | null, cancel_at_period_end: boolean}} Plan
  * @typedef {{id: string, name: string, email: string, kind: "full" | "local" | "trial", trial_expires_at?: string | null, is_staff?: boolean, avatar_url?: string | null, plan?: Plan | null, payment_failed_subscription_id?: string | null}} User
  */
 

@@ -2,12 +2,18 @@
      its price, its status, its next renewal or the day it ends, and what
      they can do with it: cancel at the end of the period, resume, undo a
      switch waiting for then, and change their card on Stripe's Customer
-     Portal. Switching is on the plan's product page. See
-     docs/design/purchasing.md, P6 to P9. -->
+     Portal. Switching is on the plan's product page. A plan from a
+     phone's store is managed in that store: Manage in the App Store on
+     the iPhone, and where it is managed everywhere else; a Stripe plan
+     seen on a phone is managed on the web. See
+     docs/design/purchasing.md, P6 to P9, and
+     docs/design/purchasing-phones.md, M4 and M5. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
   import {
+    accountsStoreGet,
     accountsSubscriptionsGet,
+    accountsSubscriptionsManageOpen,
     accountsSubscriptionsPortalCreate,
     accountsSubscriptionsUpdate,
   } from "../lib/core/index.js";
@@ -15,6 +21,7 @@
   import { pathParams } from "../lib/router.js";
   import { accountsProductsShowUrl, accountsSubscriptionsIndexUrl } from "../lib/routes.js";
   import { priceFormat } from "./money.js";
+  import { storeManagedWhere, storeName } from "./stores.js";
   import { subscriptionStatusSay } from "./subscription_status.js";
 
   const id = pathParams().id;
@@ -22,6 +29,10 @@
   let busy = $state(false);
   let inBrowser = $state(false);
   let error = $state("");
+  /** Where this app sells: the plan is managed here only when it was bought here. */
+  let here = $state("stripe");
+
+  accountsStoreGet().then((store) => (here = store));
 
   function load() {
     accountsSubscriptionsGet(id).then(
@@ -55,6 +66,16 @@
       error = String(problem);
     } finally {
       busy = false;
+    }
+  }
+
+  async function manage() {
+    error = "";
+    try {
+      await accountsSubscriptionsManageOpen();
+      inBrowser = true;
+    } catch (problem) {
+      error = String(problem);
     }
   }
 
@@ -99,10 +120,17 @@
       <p>Changes to {priceFormat(subscription.scheduled_price)} on {day(subscription.scheduled_at)}.</p>
     {/if}
 
-    {#if inBrowser}
+    {#if inBrowser && subscription.store === "stripe"}
       <p class="muted">Stripe's page is open in your browser. This page updates when you come back.</p>
     {/if}
-    {#if !ended}
+    {#if !ended && subscription.store !== here}
+      <p class="muted">Bought in {storeName(subscription.store)}: manage it {storeManagedWhere(subscription.store)}.</p>
+    {:else if !ended && subscription.store !== "stripe"}
+      <div class="flex flex-wrap gap-2">
+        <a href={accountsProductsShowUrl(subscription.product_id)} class="btn btn-sm">Switch</a>
+        <button type="button" class="btn btn-sm" onclick={manage}>Manage in {storeName(subscription.store)}</button>
+      </div>
+    {:else if !ended}
       <div class="flex flex-wrap gap-2">
         {#if subscription.scheduled_price}
           <button type="button" class="btn btn-sm" disabled={busy} onclick={() => update({ action: "switch_undo" })}>

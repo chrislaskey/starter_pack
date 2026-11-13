@@ -93,6 +93,34 @@ pub async fn touch_communities_of(
     Ok(())
 }
 
+/// Deletes outright the trial user, as `delete_expired_before` does,
+/// when they still are one: a trial deleting itself. Whether they were.
+pub async fn delete_one(
+    connection: &mut SqliteConnection,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let trial = "SELECT id FROM accounts_users WHERE id = $1 AND trial_expires_at IS NOT NULL";
+    for statement in [
+        format!("DELETE FROM app_events WHERE user_id IN ({trial})"),
+        format!(
+            "DELETE FROM app_communities WHERE id IN
+               (SELECT community_id FROM app_users_communities WHERE user_id IN ({trial}))"
+        ),
+        format!("DELETE FROM app_users WHERE id IN ({trial})"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(user_id.hyphenated())
+            .execute(&mut *connection)
+            .await?;
+    }
+    let result =
+        sqlx::query("DELETE FROM accounts_users WHERE id = $1 AND trial_expires_at IS NOT NULL")
+            .bind(user_id.hyphenated())
+            .execute(connection)
+            .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Deletes outright the trial users whose trial ended before the time,
 /// with everything of theirs: their events, the communities they are
 /// in, which are theirs alone, their user's row and with it their

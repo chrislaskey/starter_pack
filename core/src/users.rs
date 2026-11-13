@@ -85,6 +85,9 @@ pub enum UserError {
     ServerOnly,
     #[error("The server did not accept this token")]
     UnknownToken,
+    /// The token's account was deleted, see `accounts::deletions`.
+    #[error("This account was deleted")]
+    AccountDeleted,
     #[error("Nobody is signed in")]
     NotSignedIn,
     #[error("This needs an account: sign up or sign in first")]
@@ -360,6 +363,52 @@ pub(crate) async fn update_avatar_url_in(
     Ok(updated)
 }
 
+/// What a deleted user is shown as, to those who still see their row.
+pub const DELETED_NAME: &str = "Deleted user";
+
+/// Deletes the user, on the server, as an event in its log: the row
+/// soft-deleted, named `DELETED_NAME` and without a picture, so every
+/// device that pulled it sees them go, see `accounts::deletions`.
+pub(crate) async fn delete_in(tx: &mut Transaction, id: Uuid) -> Result<User, UserError> {
+    let user = get_live(tx, id).await?;
+    let now = now();
+    let event = Event::update(
+        TABLE,
+        id,
+        user.version,
+        Fields::from_iter([
+            ("name".to_string(), json!(user.name)),
+            ("avatar_url".to_string(), json!(user.avatar_url)),
+            ("deleted_at".to_string(), json!(null)),
+        ]),
+        Fields::from_iter([
+            ("name".to_string(), json!(DELETED_NAME)),
+            ("avatar_url".to_string(), json!(null)),
+            ("deleted_at".to_string(), json!(now)),
+        ]),
+        now,
+    );
+    let deleted = User {
+        name: DELETED_NAME.to_string(),
+        avatar_url: None,
+        updated_at: now,
+        version: user.version + 1,
+        last_synced_at: Some(now),
+        deleted_at: Some(now),
+        deleted_by_id: Some(id),
+        ..user
+    };
+    sql!(&mut *tx, users::update_deleted(&deleted))?;
+    let answer = Answer::applied(
+        event.id,
+        deleted.version,
+        Conflicts::new(),
+        table_row(&deleted)?,
+    );
+    events::record(tx, id, &event, &answer).await?;
+    Ok(deleted)
+}
+
 /// Every user's picture, deleted users' too, since a deleted row keeps
 /// its file until the purge removes the row.
 #[cfg_attr(not(feature = "object-storage"), allow(dead_code))]
@@ -380,7 +429,8 @@ pub(crate) async fn delete_of_unconfirmed_accounts_before(
 }
 
 /// The live user the token stands for, on the server; a token the
-/// server does not know, or one that has expired, stands for nobody.
+/// server does not know, or one that has expired, stands for nobody,
+/// and one of a deleted account is `AccountDeleted`.
 pub async fn get_by_token(deployment: &Deployment, token: &str) -> Result<User, UserError> {
     let (api_made_after, session_made_after) = tokens::made_after_to_be_valid(now());
     let mut tx = deployment.begin().await?;
@@ -389,7 +439,11 @@ pub async fn get_by_token(deployment: &Deployment, token: &str) -> Result<User, 
         users::get_by_token_hash(&tokens::hash(token), api_made_after, session_made_after)
     )?;
     tx.commit().await?;
-    user.ok_or(UserError::UnknownToken)
+    match user {
+        Some(user) if user.deleted_at.is_some() => Err(UserError::AccountDeleted),
+        Some(user) => Ok(user),
+        None => Err(UserError::UnknownToken),
+    }
 }
 
 /// The user signed in on this device, a device setting; a local user

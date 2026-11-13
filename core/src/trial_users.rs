@@ -161,6 +161,13 @@ pub async fn delete_expired(
     Ok(TrialUsersDeleted { users })
 }
 
+/// Removes the trial user outright now, with everything of theirs, as
+/// `delete_expired` would later: a trial deleting itself, see
+/// `accounts::deletions`. Whether they were a trial.
+pub(crate) async fn delete_in(tx: &mut Transaction, user_id: Uuid) -> Result<bool, sqlx::Error> {
+    sql!(tx, trial_users::delete_one(user_id))
+}
+
 /// Shows a trial user's communities to everyone, once they signed up:
 /// written as changed now, so the next pull of anyone brings them.
 pub(crate) async fn show_communities_in(

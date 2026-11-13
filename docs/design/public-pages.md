@@ -48,4 +48,7 @@ of the app's (`home`, `posts`, `accounts`).
   browser loads its pages from it.
 - **The desktop and phone apps** never show a public page: their window
   opens at `/home` (`tauri/tauri.conf.json`), and the app's router sends
-  `/` there too. The files are in their bundle, unlinked.
+  `/` there too. The files are in their bundle, unlinked. The terms
+  and the privacy policy, linked from the sign-up and account
+  settings pages, open on the web server in the system browser
+  (`tauri/src/public_pages.rs`).

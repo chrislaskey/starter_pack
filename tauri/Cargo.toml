@@ -44,6 +44,8 @@ objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitma
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSArray", "NSDictionary", "NSString"] }
 objc2-ui-kit = { version = "0.3", features = ["UIImage", "UIPasteboard"] }
+# StoreKit 2, our own plugin, see plugins/storekit and docs/design/purchasing-phones.md
+tauri-plugin-storekit = { path = "plugins/storekit" }
 
 [dev-dependencies]
 tempfile = "3"

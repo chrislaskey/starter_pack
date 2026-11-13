@@ -21,12 +21,15 @@
 
 mod accounts;
 mod api_error;
+mod app_store;
+mod app_store_notifications;
 mod avatars;
 mod checkouts;
 mod communities;
 mod current_community;
 mod current_user;
 mod database;
+mod deletions;
 mod files;
 mod jobs;
 mod mailer;
@@ -39,6 +42,7 @@ mod purchases;
 mod rate_limits;
 mod router;
 mod storage;
+mod store_transactions;
 mod stripe;
 mod stripe_events;
 mod subscriptions;
@@ -124,6 +128,10 @@ async fn main() -> Result<(), String> {
     let stripe = stripe::open()?;
     let deployment = match &stripe {
         Some(stripe) => deployment.with_stripe(stripe.clone()),
+        None => deployment,
+    };
+    let deployment = match app_store::open()? {
+        Some(app_store) => deployment.with_app_store(app_store),
         None => deployment,
     };
     let arguments: Vec<String> = env::args().skip(1).collect();

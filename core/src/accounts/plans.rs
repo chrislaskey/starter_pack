@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::accounts::prices;
 use crate::accounts::products::Grant;
+use crate::accounts::purchases::Store;
 use crate::accounts::subscriptions::{self, SubscriptionStatus};
 use crate::deployment::{Deployment, Role};
 use crate::users::User;
@@ -23,6 +24,8 @@ pub struct Plan {
     pub product_name: String,
     pub price_id: Uuid,
     pub subscription_id: Uuid,
+    /// Where it was bought, and so where it is managed.
+    pub store: Store,
     pub status: SubscriptionStatus,
     /// The next renewal, or the end when `cancel_at_period_end`.
     pub current_period_end: Option<DateTime<Utc>>,
@@ -62,6 +65,7 @@ pub async fn current(deployment: &Deployment, user: &User) -> Result<Option<Plan
             product_name,
             price_id: subscription.price_id,
             subscription_id: subscription.id,
+            store: subscription.store,
             status: subscription.status,
             current_period_end: subscription.current_period_end,
             cancel_at_period_end: subscription.cancel_at_period_end,

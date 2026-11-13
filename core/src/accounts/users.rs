@@ -118,6 +118,12 @@ pub(crate) async fn delete_unconfirmed_in(
     Ok(sql!(&mut *tx, accounts_users::delete_row(id))?)
 }
 
+/// Marks the account deleted: sign-in finds it no longer, and its
+/// email is free to sign up again, see `accounts::deletions`.
+pub(crate) async fn delete_in(tx: &mut Transaction, id: Uuid) -> Result<(), AccountUserError> {
+    Ok(sql!(&mut *tx, accounts_users::set_deleted_at(id, now()))?)
+}
+
 /// The live account by its id.
 pub(crate) async fn get_in(
     tx: &mut Transaction,

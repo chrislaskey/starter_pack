@@ -57,7 +57,7 @@ pub async fn get(connection: &mut SqliteConnection, id: Uuid) -> Result<Option<U
     Ok(row.map(User::from))
 }
 
-/// The live user the token with the hash stands for: an app's token
+/// The user the token with the hash stands for, deleted or not: an app's token
 /// made after `api_made_after`, or the browser's made after
 /// `session_made_after`, which is when each would have expired.
 pub async fn get_by_token_hash(
@@ -69,7 +69,7 @@ pub async fn get_by_token_hash(
     let row: Option<UserRow> = sqlx::query_as(
         "SELECT u.id, u.name, u.inserted_at, u.updated_at, u.version, u.last_synced_at, u.deleted_at, u.deleted_by_id, u.avatar_url
          FROM app_users u JOIN accounts_tokens t ON t.user_id = u.id
-         WHERE t.token_hash = $1 AND u.deleted_at IS NULL
+         WHERE t.token_hash = $1
            AND ((t.context = 'api' AND t.inserted_at > $2) OR (t.context = 'session' AND t.inserted_at > $3))",
     )
     .bind(token_hash)
@@ -92,6 +92,29 @@ pub async fn update(connection: &mut SqliteConnection, user: &User) -> Result<()
     .bind(user.updated_at)
     .bind(user.version)
     .bind(user.last_synced_at)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Writes a deleted user: the fields `update` writes and the delete's.
+pub async fn update_deleted(
+    connection: &mut SqliteConnection,
+    user: &User,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE app_users SET name = $2, avatar_url = $3, updated_at = $4, version = $5, last_synced_at = $6,
+           deleted_at = $7, deleted_by_id = $8
+         WHERE id = $1",
+    )
+    .bind(user.id.hyphenated())
+    .bind(&user.name)
+    .bind(&user.avatar_url)
+    .bind(user.updated_at)
+    .bind(user.version)
+    .bind(user.last_synced_at)
+    .bind(user.deleted_at)
+    .bind(user.deleted_by_id.map(|id| id.hyphenated()))
     .execute(connection)
     .await?;
     Ok(())

@@ -10,7 +10,7 @@
 
 use std::env;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Url};
 
 const CONFIG_ENTRY: &str = "starter-pack";
 const DEFAULT_SYNC_SERVER_URL: &str = "http://localhost:4000";
@@ -31,6 +31,21 @@ pub fn browser_sign_in_url(app: &AppHandle) -> String {
         configured(app, "browserSignInUrl"),
         format!("{}/accounts/sign-in", sync_server_url(app)),
     )
+}
+
+/// A page of the web's, such as `/terms`, which the app opens in the
+/// browser: on the server of the sign-in page.
+pub fn browser_page_url(app: &AppHandle, path: &str) -> Result<String, String> {
+    page_beside(&browser_sign_in_url(app), path)
+}
+
+fn page_beside(sign_in_url: &str, path: &str) -> Result<String, String> {
+    let mut url = Url::parse(sign_in_url)
+        .map_err(|error| format!("the sign-in URL {sign_in_url} is not a URL: {error}"))?;
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
 }
 
 /// The environment's, else the config's, else the fallback; blanks
@@ -75,5 +90,14 @@ mod tests {
             "a blank environment value is unset"
         );
         assert_eq!(pick(None, None, fallback()), "http://localhost:4000");
+    }
+
+    #[test]
+    fn server_urls_browser_page_is_beside_the_sign_in_page() {
+        assert_eq!(
+            page_beside("http://localhost:5173/accounts/sign-in?x=1", "/terms").unwrap(),
+            "http://localhost:5173/terms"
+        );
+        assert!(page_beside("not a url", "/terms").is_err());
     }
 }

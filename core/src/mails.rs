@@ -46,6 +46,35 @@ pub fn no_account(to: &str) -> Mail {
     }
 }
 
+/// The code that confirms deleting an account, see
+/// `accounts::deletions::code_create`.
+pub fn delete_code(to: &str, code: &str) -> Mail {
+    Mail {
+        to: to.to_string(),
+        subject: format!("Your code to delete your {APP_NAME} account"),
+        text: format!(
+            "Your code is {code}. It expires in ten minutes. Entering it deletes \
+             your account and everything in it, and cannot be undone.\n\n\
+             If you did not ask for it, someone is signed in to your account: \
+             sign in and change your password."
+        ),
+    }
+}
+
+/// To the address an account had, once it was deleted.
+pub fn account_deleted(to: &str) -> Mail {
+    Mail {
+        to: to.to_string(),
+        subject: format!("Your {APP_NAME} account was deleted"),
+        text: format!(
+            "Your {APP_NAME} account and everything in it were deleted, as you asked. \
+             A plan bought in the App Store is billed by Apple until you cancel it \
+             in your Apple ID's subscriptions.\n\n\
+             You can sign up again with this email at any time."
+        ),
+    }
+}
+
 /// To an account whose forgotten password was replaced at a sign-in,
 /// see `accounts::sign_in_with_reset_password`.
 pub fn password_reset(to: &str) -> Mail {

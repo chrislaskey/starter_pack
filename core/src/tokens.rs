@@ -7,7 +7,9 @@
 //! emailed code, which carries the code's hash and the wrong attempts
 //! so far; the one whose code matched and that waits for a password;
 //! and the device code a finished
-//! browser sign-in leaves for the device to collect, see `accounts`.
+//! browser sign-in leaves for the device to collect, see `accounts`;
+//! and the emailed code that confirms deleting an account, see
+//! `accounts::deletions`.
 //! Made and deleted there; the expired ones go with the purge.
 
 use chrono::{DateTime, Duration, Utc};
@@ -41,15 +43,18 @@ pub enum Context {
     /// A finished browser sign-in waiting for the device to collect it,
     /// five minutes.
     DeviceCode,
+    /// The emailed code that confirms deleting the account, ten minutes.
+    DeleteCode,
 }
 
 impl Context {
-    pub const ALL: [Context; 5] = [
+    pub const ALL: [Context; 6] = [
         Context::Api,
         Context::Session,
         Context::SignInCode,
         Context::SignInPassword,
         Context::DeviceCode,
+        Context::DeleteCode,
     ];
 
     /// The context as the column keeps it.
@@ -60,6 +65,7 @@ impl Context {
             Context::SignInCode => "sign_in_code",
             Context::SignInPassword => "sign_in_password",
             Context::DeviceCode => "device_code",
+            Context::DeleteCode => "delete_code",
         }
     }
 
@@ -74,7 +80,7 @@ impl Context {
         match self {
             Context::Api => Duration::days(API_VALIDITY_DAYS),
             Context::Session => Duration::days(SESSION_VALIDITY_DAYS),
-            Context::SignInCode | Context::SignInPassword => {
+            Context::SignInCode | Context::SignInPassword | Context::DeleteCode => {
                 Duration::minutes(SIGN_IN_CODE_VALIDITY_MINUTES)
             }
             Context::DeviceCode => Duration::minutes(DEVICE_CODE_VALIDITY_MINUTES),
@@ -171,6 +177,32 @@ pub(crate) async fn create_device_code(
     )
     .await?;
     Ok(code)
+}
+
+/// Makes the user's code to confirm deleting their account, replacing
+/// any earlier one: the six digits to email, kept as a hash on a row
+/// found by the user, `delete_code_hash`.
+pub(crate) async fn create_delete_code(
+    tx: &mut Transaction,
+    user_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    delete_of_user(tx, user_id, Context::DeleteCode).await?;
+    let code = random_code();
+    insert(
+        tx,
+        user_id,
+        Context::DeleteCode,
+        delete_code_hash(user_id),
+        Some(hash(&code)),
+        None,
+    )
+    .await?;
+    Ok(code)
+}
+
+/// The hash the user's delete code row is kept under.
+pub(crate) fn delete_code_hash(user_id: Uuid) -> String {
+    hash(&format!("delete_code:{user_id}"))
 }
 
 /// Gives the pending sign-in a new code, its ten minutes starting over

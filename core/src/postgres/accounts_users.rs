@@ -99,6 +99,20 @@ pub async fn set_confirmed_at(
     Ok(())
 }
 
+/// Marks the account deleted, see `accounts::deletions`.
+pub async fn set_deleted_at(
+    connection: &mut PgConnection,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE accounts_users SET deleted_at = $2, updated_at = $2 WHERE id = $1")
+        .bind(id)
+        .bind(now)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
 /// Deletes the accounts that never proved their email and were made
 /// before the time, with their credentials and tokens; how many. Their
 /// `app_users` rows go first, see `users::delete_of_unconfirmed_accounts_before`.

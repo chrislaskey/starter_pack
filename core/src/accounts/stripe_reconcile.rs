@@ -1,6 +1,7 @@
 //! The daily job that catches what a missed webhook left behind: the
 //! catalog copied again, every checkout still open or processing asked
-//! of Stripe, and every subscription not ended copied again. Server
+//! of Stripe, every subscription of a deleted account still live ended,
+//! and every subscription not ended copied again. Server
 //! only, on a server with Stripe. Asking for every live subscription
 //! is fine for a small app; a big one would ask only for what changed.
 //! See `docs/design/purchasing.md`.
@@ -50,6 +51,16 @@ pub async fn run(
         &mut tx,
         accounts_checkouts::list_pending_stripe_session_ids()
     )?;
+    let of_deleted_accounts = sql!(
+        &mut tx,
+        accounts_subscriptions::list_live_store_ids_of_deleted_accounts(Store::Stripe)
+    )?;
+    tx.commit().await?;
+
+    for subscription_id in &of_deleted_accounts {
+        stripe.subscription_cancel(subscription_id).await?;
+    }
+    let mut tx = deployment.begin().await?;
     let live_subscription_ids = sql!(
         &mut tx,
         accounts_subscriptions::list_live_store_ids(Store::Stripe)

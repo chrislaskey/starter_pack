@@ -1265,6 +1265,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_accounts_remove_an_account_deleted_elsewhere() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let server = server().await;
+        let transport = InProcess { server: &server };
+        let device = DeviceAccounts::open(directory.path())
+            .await
+            .expect("opened");
+        let session = signed_up(&server, "alice@example.com").await;
+        let alice = device
+            .keep_signed_in(session.clone())
+            .await
+            .expect("alice kept");
+        posts::create(
+            &device.active().await.expect("alice's"),
+            &alice,
+            "lost with it",
+            &[],
+        )
+        .await
+        .expect("a post");
+        let mailer = Mailer::memory();
+        app_core::accounts::deletions::code_create(&server, &mailer, &session.user)
+            .await
+            .expect("a code");
+        let code = mails::code_in(&mailer.last_sent_to("alice@example.com").expect("mailed"))
+            .expect("a code in it");
+        app_core::accounts::deletions::create(&server, &mailer, &session.user, Some(&code))
+            .await
+            .expect("deleted on the web");
+
+        let error = sync::run(&device.active().await.expect("alice's"), &transport)
+            .await
+            .expect_err("410");
+        assert!(matches!(error, SyncError::AccountDeleted));
+        let removal = device
+            .remove(&transport, alice.id, true)
+            .await
+            .expect("removed");
+        assert_eq!(removal, Removal::Removed);
+        assert_eq!(device.active_user_id().await, None);
+        assert!(device.list().await.expect("listed").is_empty());
+    }
+
+    #[tokio::test]
     async fn device_accounts_hold_at_most_the_cap() {
         let directory = tempfile::tempdir().expect("a directory");
         let server = server().await;

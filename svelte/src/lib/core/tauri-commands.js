@@ -551,3 +551,54 @@ export function onQuickPickerOpened(callback) {
     stopping.then((stop) => stop());
   };
 }
+
+/**
+ * Opens a public page, `terms` or `privacy`, in the system browser, since
+ * the app never shows one (../../../../tauri/src/public_pages.rs).
+ * @param {"terms" | "privacy"} page
+ */
+export function publicPagesOpen(page) {
+  return invoke("public_pages_open", { page });
+}
+
+/** Mails the signed-in person the code that confirms deleting their account. */
+export function accountsDeletionsCodeCreate() {
+  return invoke("accounts_deletions_code_create");
+}
+
+/**
+ * Deletes the account with the mailed code, then removes it from this
+ * device (../../../../tauri/src/deletions.rs).
+ * @param {string | null} code
+ */
+export function accountsDeletionsCreate(code) {
+  return invoke("accounts_deletions_create", { code: code ?? "" });
+}
+
+// A phone's store (../../../../tauri/src/store_transactions.rs): its
+// sheet, then the server records the proof, then the store's
+// transaction is finished.
+
+/** The store this app sells through: `app_store`, `play_store`, or `stripe` on the desktop. */
+export function accountsStoreGet() {
+  return invoke("accounts_store_get");
+}
+
+/**
+ * The store's sheet for the price: `{purchase}` or `{subscription}` once
+ * the server has it, else `{cancelled: true}` or `{pending: true}`.
+ * @param {string} priceId
+ */
+export function accountsStoreTransactionsCreate(priceId) {
+  return invoke("accounts_store_transactions_create", { priceId });
+}
+
+/** Restore purchases: `{recorded, refused}`. */
+export function accountsStoreTransactionsRestore() {
+  return invoke("accounts_store_transactions_restore");
+}
+
+/** The store's own page of subscriptions. */
+export function accountsSubscriptionsManageOpen() {
+  return invoke("accounts_subscriptions_manage_open");
+}

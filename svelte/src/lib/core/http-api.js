@@ -51,7 +51,8 @@ export async function currentUserGet() {
   try {
     return await send("GET", "/api/current-user");
   } catch (problem) {
-    if (/** @type {{status?: number}} */ (problem).status === 401) return null;
+    // 410: the account of this browser's cookie was deleted
+    if ([401, 410].includes(/** @type {{status?: number}} */ (problem).status ?? 0)) return null;
     throw problem;
   }
 }
@@ -602,4 +603,44 @@ export function quickPickerAccessibilityRequest() {
  */
 export function onQuickPickerOpened(_callback) {
   return () => {};
+}
+
+/**
+ * Opens a public page, `terms` or `privacy`, in a new tab.
+ * @param {"terms" | "privacy"} page
+ */
+export function publicPagesOpen(page) {
+  window.open(`/${page}`, "_blank", "noopener");
+  return Promise.resolve();
+}
+
+/** Mails the signed-in person the code that confirms deleting their account. */
+export function accountsDeletionsCodeCreate() {
+  return send("POST", "/api/accounts/deletions/code");
+}
+
+/**
+ * Deletes the signed-in person's account with the mailed code, none for a trial.
+ * @param {string | null} code
+ */
+export function accountsDeletionsCreate(code) {
+  return send("POST", "/api/accounts/deletions", { code });
+}
+
+/** The store this app sells through: on the web, Stripe. */
+export function accountsStoreGet() {
+  return Promise.resolve("stripe");
+}
+
+/** A phone store's sheet: never on the web. */
+export function accountsStoreTransactionsCreate(_priceId) {
+  return Promise.reject(new Error("On the web, plans and products are bought through Stripe"));
+}
+
+export function accountsStoreTransactionsRestore() {
+  return Promise.reject(new Error("Restoring purchases is in the iPhone app"));
+}
+
+export function accountsSubscriptionsManageOpen() {
+  return Promise.reject(new Error("A plan from a phone's store is managed on the phone"));
 }

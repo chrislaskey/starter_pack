@@ -16,6 +16,7 @@ import { pageLoadErrorClear, pageLoadErrorShow } from "./page_load_error.svelte.
 import {
   ACCOUNTS_INDEX_PATH,
   ACCOUNTS_PASSWORD_EDIT_PATH,
+  ACCOUNTS_DELETIONS_NEW_PATH,
   ACCOUNTS_PRODUCTS_INDEX_PATH,
   ACCOUNTS_PRODUCTS_SHOW_PATH,
   ACCOUNTS_CHECKOUTS_SHOW_PATH,
@@ -102,6 +103,7 @@ const { navigate, route } = createRouter({
   [PROFILE_EDIT_PATH]: () => import("../profile/ProfileEditPage.svelte"),
   [ACCOUNTS_SETTINGS_PATH]: () => import("../accounts/AccountsSettingsPage.svelte"),
   [ACCOUNTS_PASSWORD_EDIT_PATH]: () => import("../accounts/AccountsPasswordEditPage.svelte"),
+  [ACCOUNTS_DELETIONS_NEW_PATH]: () => import("../accounts/AccountsDeletionsNewPage.svelte"),
   [ACCOUNTS_PRODUCTS_INDEX_PATH]: () => import("../accounts/AccountsProductsIndexPage.svelte"),
   [ACCOUNTS_PRODUCTS_SHOW_PATH]: () => import("../accounts/AccountsProductsShowPage.svelte"),
   [ACCOUNTS_CHECKOUTS_SHOW_PATH]: () => import("../accounts/AccountsCheckoutsShowPage.svelte"),

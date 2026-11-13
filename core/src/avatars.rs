@@ -219,6 +219,24 @@ pub struct DeleteUnreferencedReport {
     pub deleted: usize,
 }
 
+/// Deletes every picture of the user's from the bucket at once, for a
+/// deleted account, see `accounts::deletions`; how many. A server with
+/// no bucket has none.
+#[cfg(feature = "object-storage")]
+pub async fn delete_of_user(
+    deployment: &Deployment,
+    user_id: uuid::Uuid,
+) -> Result<usize, AvatarError> {
+    let Some(storage) = &deployment.avatar_bucket else {
+        return Ok(0);
+    };
+    let pictures = storage.list(&format!("{KEY_PREFIX}/{user_id}")).await?;
+    for picture in &pictures {
+        storage.delete(&picture.key).await?;
+    }
+    Ok(pictures.len())
+}
+
 /// Deletes every picture no user points at, deleted users included, once
 /// it is older than `UNREFERENCED_DAYS`: an upload never confirmed, a
 /// picture replaced, the picture of a user the purge removed. Rows go

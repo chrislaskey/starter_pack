@@ -159,3 +159,19 @@ pub async fn refund(
     .await?;
     Ok(())
 }
+
+/// The id of the row with the store's id, and its user's, if there is one.
+pub async fn get_ids_by_store_id(
+    connection: &mut SqliteConnection,
+    store: Store,
+    store_id: &str,
+) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+    let row: Option<(Hyphenated, Hyphenated)> = sqlx::query_as(
+        "SELECT id, user_id FROM accounts_purchases WHERE store = $1 AND store_id = $2",
+    )
+    .bind(store.as_str())
+    .bind(store_id)
+    .fetch_optional(connection)
+    .await?;
+    Ok(row.map(|(id, user_id)| (id.into_uuid(), user_id.into_uuid())))
+}

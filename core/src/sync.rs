@@ -169,6 +169,9 @@ pub enum SyncError {
     /// The device sent no token, or one the server does not know.
     #[error("The server did not accept this device's token")]
     Unauthorized,
+    /// The token's account was deleted: a 410.
+    #[error("This account was deleted")]
+    AccountDeleted,
     /// A backfill of a community the user is not in.
     #[error("not a member of community {community_id}")]
     NotAMember { community_id: Uuid },
@@ -571,6 +574,7 @@ impl InProcess<'_> {
         match users::get_by_token(self.server, token).await {
             Ok(user) => Ok(user),
             Err(UserError::UnknownToken) => Err(SyncError::Unauthorized),
+            Err(UserError::AccountDeleted) => Err(SyncError::AccountDeleted),
             Err(error) => Err(error.into()),
         }
     }
@@ -852,6 +856,9 @@ impl Http {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(SyncError::Unauthorized);
         }
+        if status == reqwest::StatusCode::GONE {
+            return Err(SyncError::AccountDeleted);
+        }
         if !status.is_success() {
             let answer: Option<ErrorAnswer> = response.json().await.ok();
             return Err(match answer {
@@ -880,6 +887,9 @@ impl Http {
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(SyncError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::GONE {
+            return Err(SyncError::AccountDeleted);
         }
         if !status.is_success() {
             return Err(SyncError::Transport(format!(
@@ -1023,6 +1033,9 @@ impl Transport for Http {
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(SyncError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::GONE {
+            return Err(SyncError::AccountDeleted);
         }
         if status.is_client_error() {
             return Err(SyncError::Refused(format!(

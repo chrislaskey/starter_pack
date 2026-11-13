@@ -1,6 +1,7 @@
 //! An error as the API answers it: a status and `{"error": "..."}`, from
 //! the error of whichever core module the handler called; a form's
-//! fields that were wrong also as `"errors": {"field": ["message"]}`.
+//! fields that were wrong also as `"errors": {"field": ["message"]}`;
+//! a token of a deleted account as 410 with `"code": "account_deleted"`.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -8,10 +9,14 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use app_core::accounts::AccountError;
+use app_core::accounts::app_store::AppStoreError;
+use app_core::accounts::app_store_notifications::AppStoreNotificationError;
 use app_core::accounts::checkouts::CheckoutError;
+use app_core::accounts::deletions::DeletionError;
 use app_core::accounts::plans::PlanError;
 use app_core::accounts::products::ProductError;
 use app_core::accounts::purchases::PurchaseError;
+use app_core::accounts::store_transactions::StoreTransactionError;
 use app_core::accounts::stripe::StripeError;
 use app_core::accounts::stripe_events::StripeEventError;
 use app_core::accounts::subscriptions::SubscriptionError;
@@ -34,6 +39,8 @@ pub struct ApiError {
     status: StatusCode,
     message: String,
     field_errors: Option<FieldErrors>,
+    /// A word the apps act on, beside the message for the person.
+    code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -42,6 +49,15 @@ impl ApiError {
             status,
             message: message.into(),
             field_errors: None,
+            code: None,
+        }
+    }
+
+    /// 410: the token's account was deleted.
+    pub fn account_deleted() -> ApiError {
+        ApiError {
+            code: Some("account_deleted"),
+            ..ApiError::new(StatusCode::GONE, "This account was deleted")
         }
     }
 
@@ -51,6 +67,7 @@ impl ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             message: "Some fields need another look".to_string(),
             field_errors: Some(field_errors),
+            code: None,
         }
     }
 }
@@ -170,6 +187,7 @@ impl From<UserError> for ApiError {
             UserError::UnknownToken | UserError::NotSignedIn | UserError::LocalUser => {
                 StatusCode::UNAUTHORIZED
             }
+            UserError::AccountDeleted => return ApiError::account_deleted(),
             UserError::InvalidName | UserError::Invalid(_) | UserError::Rejected(_) => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
@@ -267,6 +285,70 @@ impl From<AccountError> for ApiError {
     }
 }
 
+impl From<DeletionError> for ApiError {
+    fn from(error: DeletionError) -> Self {
+        let status = match error {
+            DeletionError::User(error) => return error.into(),
+            DeletionError::AccountUser(error) => return error.into(),
+            DeletionError::Post(error) => return error.into(),
+            DeletionError::File(error) => return error.into(),
+            DeletionError::Membership(error) => return error.into(),
+            DeletionError::Community(error) => return error.into(),
+            // Never 401, which a device takes for a sign-out
+            DeletionError::CodeDoesNotMatch | DeletionError::TrialHasNoCode => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            DeletionError::Mail(_) => StatusCode::SERVICE_UNAVAILABLE,
+            DeletionError::ServerOnly | DeletionError::Refused(_) | DeletionError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<StoreTransactionError> for ApiError {
+    fn from(error: StoreTransactionError) -> Self {
+        let status = match &error {
+            StoreTransactionError::AppStore(error) => return ApiError::from_app_store(error),
+            StoreTransactionError::StoreNotSetUp => StatusCode::NOT_FOUND,
+            StoreTransactionError::SomeoneElses | StoreTransactionError::NoAccount => {
+                StatusCode::FORBIDDEN
+            }
+            StoreTransactionError::NeedsAccount
+            | StoreTransactionError::PriceNotForSale
+            | StoreTransactionError::AlreadyOwned
+            | StoreTransactionError::AlreadySubscribed => StatusCode::UNPROCESSABLE_ENTITY,
+            StoreTransactionError::ServerOnly | StoreTransactionError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
+impl From<AppStoreNotificationError> for ApiError {
+    fn from(error: AppStoreNotificationError) -> Self {
+        match &error {
+            AppStoreNotificationError::AppStore(error) => ApiError::from_app_store(error),
+            AppStoreNotificationError::ServerOnly | AppStoreNotificationError::Database(_) => {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            }
+        }
+    }
+}
+
+impl ApiError {
+    fn from_app_store(error: &AppStoreError) -> ApiError {
+        let status = match error {
+            AppStoreError::NotVerified(_) | AppStoreError::NotFound(_) => StatusCode::BAD_REQUEST,
+            AppStoreError::Incomplete(_) | AppStoreError::Transport(_) => StatusCode::BAD_GATEWAY,
+            AppStoreError::Settings(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError::new(status, error.to_string())
+    }
+}
+
 impl From<SyncError> for ApiError {
     fn from(error: SyncError) -> Self {
         match error {
@@ -277,6 +359,7 @@ impl From<SyncError> for ApiError {
             SyncError::Membership(error) => error.into(),
             SyncError::User(error) => error.into(),
             SyncError::Unauthorized => ApiError::new(StatusCode::UNAUTHORIZED, error.to_string()),
+            SyncError::AccountDeleted => ApiError::account_deleted(),
             SyncError::NotAMember { .. } => ApiError::new(StatusCode::FORBIDDEN, error.to_string()),
             SyncError::Transport(_) | SyncError::Refused(_) | SyncError::Malformed(_) => {
                 ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
@@ -382,10 +465,13 @@ impl IntoResponse for ApiError {
         if self.status.is_server_error() {
             tracing::error!("{}", self.message);
         }
-        let body = match self.field_errors {
+        let mut body = match self.field_errors {
             Some(field_errors) => json!({ "error": self.message, "errors": field_errors }),
             None => json!({ "error": self.message }),
         };
+        if let Some(code) = self.code {
+            body["code"] = json!(code);
+        }
         (self.status, Json(body)).into_response()
     }
 }

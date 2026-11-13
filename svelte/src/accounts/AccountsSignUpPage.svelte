@@ -5,6 +5,7 @@
      the email is filled in from ?email=. -->
 <script>
   import AppNav from "../lib/AppNav.svelte";
+  import PublicPagesLinks from "../lib/PublicPagesLinks.svelte";
   import { accountsSignUp, accountsTrialGet } from "../lib/core/index.js";
   import { accountsSignInUrl, accountsTrialUrl } from "../lib/routes.js";
   import AccountsForm from "./AccountsForm.svelte";
@@ -47,6 +48,7 @@
     <AccountsSignInSteps {email} {pending} {challenge} {keepSignedIn} onstartover={() => (pending = "")} />
   {:else}
     <AccountsForm bind:email bind:name withName bind:keepSignedIn withKeepSignedIn={!challenge} submitText="Sign up" {error} {busy} onsubmit={signUp} />
+    <p class="muted">By signing up you accept the <PublicPagesLinks />.</p>
     <p class="muted">Already have an account? <a href={accountsSignInUrl(email || undefined)} class="link">Sign in</a></p>
     {#if trialAvailable}
       <p class="muted">Just looking? <a href={accountsTrialUrl()} class="link">Try it without an account</a></p>

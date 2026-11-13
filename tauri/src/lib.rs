@@ -17,6 +17,7 @@ mod communities;
 mod conflicts;
 mod current_community;
 mod current_user;
+mod deletions;
 mod device_accounts;
 mod files;
 mod local_users;
@@ -25,9 +26,13 @@ mod macos;
 mod memberships;
 mod pending_changes;
 mod posts;
+mod public_pages;
 mod purchasing;
 mod quick_picker;
 mod server_urls;
+#[cfg(mobile)]
+mod store_sheet;
+mod store_transactions;
 mod sync;
 
 use tauri::{Manager, WindowEvent};
@@ -36,7 +41,10 @@ pub(crate) const MAIN_WINDOW: &str = "main";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "ios")]
+    let builder = builder.plugin(tauri_plugin_storekit::init());
+    builder
         .plugin(tauri_plugin_opener::init())
         .register_asynchronous_uri_scheme_protocol("files", |context, request, responder| {
             let app = context.app_handle().clone();
@@ -47,6 +55,7 @@ pub fn run() {
         .setup(|app| {
             device_accounts::open_and_manage(app)?;
             sync::setup(app)?;
+            store_transactions::spawn_send_unfinished(app.handle().clone());
             quick_picker::register(app.handle())?;
             Ok(())
         })
@@ -69,6 +78,8 @@ pub fn run() {
             accounts::accounts_sign_out,
             accounts::accounts_second_factors,
             accounts::accounts_password_update,
+            deletions::accounts_deletions_code_create,
+            deletions::accounts_deletions_create,
             communities::communities_list,
             communities::communities_get,
             communities::communities_create,
@@ -76,6 +87,7 @@ pub fn run() {
             communities::communities_delete,
             memberships::memberships_join,
             memberships::memberships_leave,
+            public_pages::public_pages_open,
             posts::posts_list,
             posts::posts_get,
             posts::posts_create,
@@ -122,7 +134,11 @@ pub fn run() {
             purchasing::accounts_subscriptions_list,
             purchasing::accounts_subscriptions_get,
             purchasing::accounts_subscriptions_update,
-            purchasing::accounts_subscriptions_portal_create
+            purchasing::accounts_subscriptions_portal_create,
+            store_transactions::accounts_store_get,
+            store_transactions::accounts_store_transactions_create,
+            store_transactions::accounts_store_transactions_restore,
+            store_transactions::accounts_subscriptions_manage_open
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

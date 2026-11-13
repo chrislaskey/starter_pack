@@ -5,6 +5,8 @@
 //! Stripe's pages open in the browser and come back to
 //! `/accounts/back-to-app`, see `ReturnTo`.
 //!
+//! Deleting the account is asked the same way, see `deletions_create`.
+//!
 //! The plan is the exception, as the device must know it offline:
 //! `plan_refresh` keeps the server's answer in the `plan` device
 //! setting, and `plan_kept` trusts it until its period ends. See
@@ -226,6 +228,42 @@ mod on_server {
         let path = format!("/api/accounts/subscriptions/{id}/portal");
         let body = json!({ "return_to": ReturnTo::App });
         ask(deployment, server, Method::POST, &path, Some(&body)).await
+    }
+
+    /// Sends the proof of what a store's sheet sold, `{"store":
+    /// "app_store", "signed_transaction": "..."}`, for the server to
+    /// check with the store and record: the purchase or subscription.
+    pub async fn store_transactions_create(
+        deployment: &Deployment,
+        server: &Http,
+        proof: &Value,
+    ) -> Result<Value, OnlineError> {
+        let path = "/api/accounts/store-transactions";
+        ask(deployment, server, Method::POST, path, Some(proof)).await
+    }
+
+    /// Has the server mail the code that confirms deleting the account,
+    /// see `accounts::deletions`.
+    pub async fn deletions_code_create(
+        deployment: &Deployment,
+        server: &Http,
+    ) -> Result<(), OnlineError> {
+        let path = "/api/accounts/deletions/code";
+        ask(deployment, server, Method::POST, path, None).await?;
+        Ok(())
+    }
+
+    /// Deletes the account on the server with the mailed code; the app
+    /// then removes it from the device.
+    pub async fn deletions_create(
+        deployment: &Deployment,
+        server: &Http,
+        code: &str,
+    ) -> Result<(), OnlineError> {
+        let body = json!({ "code": code });
+        let path = "/api/accounts/deletions";
+        ask(deployment, server, Method::POST, path, Some(&body)).await?;
+        Ok(())
     }
 
     /// Asks the server for the signed-in person's plan and keeps it.

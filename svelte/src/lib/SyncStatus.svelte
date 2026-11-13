@@ -1,10 +1,14 @@
 <!-- Inside the app: whether it is working offline, what waits to reach
      the server, the changes it did not keep, and the buttons to sync now
      and to work offline or go online. The web shows nothing: it is the
-     server; and nothing for a local user, who has nothing to sync with. -->
+     server; and nothing for a local user, who has nothing to sync with.
+     A sync that found the account deleted elsewhere, which removed it
+     from the device, opens the device's accounts saying so. -->
 <script>
   import { onSynced, syncRun, syncSetOffline, syncStatus } from "./core/index.js";
-  import { conflictsIndexUrl } from "./routes.js";
+  import { currentUserForget } from "./current_user.js";
+  import { navigateToUrl } from "./router.js";
+  import { accountsIndexUrl, conflictsIndexUrl } from "./routes.js";
 
   let status = $state(null);
   let busy = $state(false);
@@ -20,7 +24,16 @@
 
   /** @param {unknown} outcome */
   function synced(outcome) {
-    const { report, error: failure } = /** @type {{report?: {push_error?: string}, error?: string}} */ (outcome ?? {});
+    const {
+      report,
+      error: failure,
+      account_deleted: accountDeleted,
+    } = /** @type {{report?: {push_error?: string}, error?: string, account_deleted?: boolean}} */ (outcome ?? {});
+    if (accountDeleted) {
+      currentUserForget();
+      navigateToUrl(accountsIndexUrl({ accountDeleted: true }));
+      return;
+    }
     error = failure ?? report?.push_error ?? "";
     load();
   }

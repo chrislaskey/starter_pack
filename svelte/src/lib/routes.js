@@ -14,6 +14,7 @@ export const ACCOUNTS_SIGN_IN_PATH = "/accounts/sign-in";
 export const ACCOUNTS_TRIAL_PATH = "/accounts/trial";
 export const ACCOUNTS_SETTINGS_PATH = "/accounts/settings";
 export const ACCOUNTS_PASSWORD_EDIT_PATH = "/accounts/password";
+export const ACCOUNTS_DELETIONS_NEW_PATH = "/accounts/deletions/new";
 export const ACCOUNTS_PRODUCTS_INDEX_PATH = "/accounts/products";
 export const ACCOUNTS_PRODUCTS_SHOW_PATH = "/accounts/products/:id";
 export const ACCOUNTS_CHECKOUTS_SHOW_PATH = "/accounts/checkouts/:id";
@@ -62,9 +63,12 @@ export function accountsTrialUrl() {
   return ACCOUNTS_TRIAL_PATH;
 }
 
-/** The accounts on this device, inside the app only. */
-export function accountsIndexUrl() {
-  return ACCOUNTS_INDEX_PATH;
+/**
+ * The accounts on this device, inside the app only.
+ * @param {{accountDeleted?: boolean}} [options] to say an account was just deleted
+ */
+export function accountsIndexUrl({ accountDeleted = false } = {}) {
+  return accountDeleted ? `${ACCOUNTS_INDEX_PATH}?account_deleted=1` : ACCOUNTS_INDEX_PATH;
 }
 
 // The account pages carry two things in their query, which every link
@@ -182,6 +186,11 @@ export function accountsSettingsUrl() {
 /** Where the signed-in person makes or changes their password. */
 export function accountsPasswordEditUrl() {
   return ACCOUNTS_PASSWORD_EDIT_PATH;
+}
+
+/** Where the signed-in person deletes their account. */
+export function accountsDeletionsNewUrl() {
+  return ACCOUNTS_DELETIONS_NEW_PATH;
 }
 
 /** What is for sale: plans, then one-time products. */

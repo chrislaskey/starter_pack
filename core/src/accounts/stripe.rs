@@ -506,6 +506,47 @@ impl Stripe {
         }
     }
 
+    /// Ends the subscription now, with no refund and no last invoice,
+    /// for a deleted account, see `accounts::deletions`.
+    pub async fn subscription_cancel(&self, id: &str) -> Result<(), StripeError> {
+        match self {
+            Stripe::Api(api) => {
+                stripe_billing::subscription::CancelSubscription::new(id)
+                    .prorate(false)
+                    .invoice_now(false)
+                    .send(&api.client)
+                    .await
+                    .map_err(StripeError::from_api)?;
+                Ok(())
+            }
+            Stripe::Memory(memory) => memory_subscription_change(memory, id, |stored| {
+                stored.status = "canceled".to_string();
+                stored.cancel_at_period_end = false;
+                stored.ended_at = Some(chrono::Utc::now().timestamp());
+            }),
+        }
+    }
+
+    /// Deletes the customer, which removes their saved cards; Stripe
+    /// keeps their payments and invoices. One already gone is fine.
+    pub async fn customer_delete(&self, customer_id: &str) -> Result<(), StripeError> {
+        match self {
+            Stripe::Api(api) => {
+                match stripe_core::customer::DeleteCustomer::new(customer_id)
+                    .send(&api.client)
+                    .await
+                {
+                    Ok(_) | Err(stripe::StripeError::Stripe(_, 404)) => Ok(()),
+                    Err(error) => Err(StripeError::from_api(error)),
+                }
+            }
+            Stripe::Memory(memory) => {
+                lock(memory).customers.retain(|_, id| id != customer_id);
+                Ok(())
+            }
+        }
+    }
+
     /// Stripe's Customer Portal for the customer, for their card and
     /// invoices, coming back to `return_url`: its page.
     pub async fn billing_portal_session_create(

@@ -57,6 +57,20 @@ macro_rules! visible_to {
     };
 }
 
+/// The user's own posts, not deleted, oldest first.
+pub async fn list_live_of_user(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<Post>, sqlx::Error> {
+    let rows: Vec<PostRow> = sqlx::query_as(select!(
+        "WHERE deleted_at IS NULL AND user_id = $1 ORDER BY inserted_at, id"
+    ))
+    .bind(user_id)
+    .fetch_all(connection)
+    .await?;
+    Ok(rows.into_iter().map(Post::from).collect())
+}
+
 /// The posts the user sees, not deleted, newest first.
 pub async fn list_visible(
     connection: &mut PgConnection,

@@ -33,16 +33,20 @@ pub enum Job {
     /// `accounts::stripe_reconcile::run`, on a server with Stripe: what a
     /// missed webhook left behind.
     StripeReconcile,
+    /// `accounts::app_store_reconcile::run`, on a server with the App
+    /// Store: what a missed notification left behind.
+    AppStoreReconcile,
 }
 
 impl Job {
     /// Every job, in the order `run_due` runs them.
-    pub const ALL: [Job; 5] = [
+    pub const ALL: [Job; 6] = [
         Job::Purge,
         Job::TrialUsersDelete,
         Job::AvatarsDeleteUnreferenced,
         Job::FilesDeleteUnreferenced,
         Job::StripeReconcile,
+        Job::AppStoreReconcile,
     ];
 
     /// Its name in `app_jobs` and on the command line.
@@ -53,6 +57,7 @@ impl Job {
             Job::AvatarsDeleteUnreferenced => "avatars_delete_unreferenced",
             Job::FilesDeleteUnreferenced => "files_delete_unreferenced",
             Job::StripeReconcile => "stripe_reconcile",
+            Job::AppStoreReconcile => "app_store_reconcile",
         }
     }
 
@@ -67,7 +72,8 @@ impl Job {
             | Job::TrialUsersDelete
             | Job::AvatarsDeleteUnreferenced
             | Job::FilesDeleteUnreferenced
-            | Job::StripeReconcile => Role::Server,
+            | Job::StripeReconcile
+            | Job::AppStoreReconcile => Role::Server,
         }
     }
 
@@ -77,7 +83,8 @@ impl Job {
             Job::Purge
             | Job::AvatarsDeleteUnreferenced
             | Job::FilesDeleteUnreferenced
-            | Job::StripeReconcile => Duration::days(1),
+            | Job::StripeReconcile
+            | Job::AppStoreReconcile => Duration::days(1),
             Job::TrialUsersDelete => Duration::hours(1),
         }
     }
@@ -103,6 +110,10 @@ impl Job {
             Job::StripeReconcile => deployment.stripe.is_some(),
             #[cfg(not(feature = "stripe"))]
             Job::StripeReconcile => false,
+            #[cfg(feature = "app-store")]
+            Job::AppStoreReconcile => deployment.app_store.is_some(),
+            #[cfg(not(feature = "app-store"))]
+            Job::AppStoreReconcile => false,
         }
     }
 }
@@ -129,7 +140,7 @@ pub struct JobRun {
 pub enum JobError {
     #[error("the {} job does not run on this deployment", .0.name())]
     NotForThisRole(Job),
-    #[error("the {} job is not set up here: no bucket, or no Stripe", .0.name())]
+    #[error("the {} job is not set up here: no bucket, no Stripe, or no App Store", .0.name())]
     NotSetUp(Job),
     #[error(transparent)]
     Purge(#[from] PurgeError),
@@ -142,6 +153,9 @@ pub enum JobError {
     #[cfg(feature = "stripe")]
     #[error(transparent)]
     StripeReconcile(#[from] crate::accounts::stripe_reconcile::StripeReconcileError),
+    #[cfg(feature = "app-store")]
+    #[error(transparent)]
+    AppStoreReconcile(#[from] crate::accounts::app_store_reconcile::AppStoreReconcileError),
     #[error("could not record the report: {0}")]
     Report(#[from] serde_json::Error),
     #[error("database error: {0}")]
@@ -221,6 +235,15 @@ async fn perform(deployment: &Deployment, job: Job, now: DateTime<Utc>) -> Resul
         },
         #[cfg(not(feature = "stripe"))]
         Job::StripeReconcile => Err(JobError::NotSetUp(job)),
+        #[cfg(feature = "app-store")]
+        Job::AppStoreReconcile => match &deployment.app_store {
+            Some(app_store) => Ok(serde_json::to_value(
+                crate::accounts::app_store_reconcile::run(deployment, app_store).await?,
+            )?),
+            None => Err(JobError::NotSetUp(job)),
+        },
+        #[cfg(not(feature = "app-store"))]
+        Job::AppStoreReconcile => Err(JobError::NotSetUp(job)),
     }
 }
 
@@ -384,6 +407,9 @@ mod tests {
                 .with_file_store(FileStore::Bucket(Storage::memory()));
             #[cfg(feature = "stripe")]
             let deployment = deployment.with_stripe(crate::accounts::stripe::Stripe::memory());
+            #[cfg(feature = "app-store")]
+            let deployment =
+                deployment.with_app_store(crate::accounts::app_store::AppStore::memory());
             deployment
         }
 

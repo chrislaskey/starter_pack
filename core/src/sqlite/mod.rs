@@ -4,6 +4,8 @@
 
 use sqlx::migrate::Migrator;
 
+#[cfg(feature = "app-store")]
+pub mod accounts_app_store_notifications;
 #[cfg(feature = "stripe")]
 pub mod accounts_checkouts;
 #[cfg(feature = "stripe")]

@@ -132,7 +132,7 @@ async fn signed_in_user_of(
     };
     match users::get_by_token(deployment, cookie.value()).await {
         Ok(user) => Ok(Some(user)),
-        Err(users::UserError::UnknownToken) => Ok(None),
+        Err(users::UserError::UnknownToken | users::UserError::AccountDeleted) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }

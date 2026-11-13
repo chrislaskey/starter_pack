@@ -89,6 +89,7 @@ pub async fn accounts_sign_in_finish(
         .sign_in_clear()
         .await
         .map_err(|error| error.to_string())?;
+    crate::store_transactions::spawn_send_unfinished(app.clone());
     sync::spawn(app);
     Ok(finished)
 }

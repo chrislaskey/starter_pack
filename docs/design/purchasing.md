@@ -142,7 +142,9 @@ webhook marks the purchase refunded, and a refunded one-time purchase
 gives nothing. Ops shows it later.
 
 **P12. Deleting an account** with a plan cancels it at once in Stripe,
-designed in `accounts-delete.md`.
+with no refund, and deletes the Stripe customer; built 2026-11-12, see
+`accounts-delete.md`. A plan the call missed is ended by
+`stripe_reconcile`.
 
 ## The copy of Stripe
 

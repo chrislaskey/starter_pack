@@ -626,6 +626,24 @@ pub async fn delete_unreferenced(
     Ok(report)
 }
 
+/// Deletes the bytes of every file of the user's from the bucket at
+/// once, for a deleted account, see `accounts::deletions`; how many. A
+/// server with no bucket has none.
+#[cfg(feature = "object-storage")]
+pub async fn delete_bytes_of_user(
+    deployment: &Deployment,
+    user_id: Uuid,
+) -> Result<usize, FileError> {
+    let FileStore::Bucket(storage) = &deployment.file_store else {
+        return Ok(0);
+    };
+    let files = storage.list(&format!("{KEY_PREFIX}/{user_id}")).await?;
+    for file in &files {
+        storage.delete(&file.key).await?;
+    }
+    Ok(files.len())
+}
+
 /// Removes from the account's folder the bytes no live row points at:
 /// those of a deleted row at once, and those of no row, or a fetch left
 /// half done, once they are older than `UNREFERENCED_DAYS`, since a

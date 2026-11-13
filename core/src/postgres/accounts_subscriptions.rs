@@ -128,6 +128,23 @@ pub async fn upsert(
     Ok(())
 }
 
+/// The store's ids of the subscriptions of deleted accounts that have
+/// not ended, for the reconcile to end them.
+pub async fn list_live_store_ids_of_deleted_accounts(
+    connection: &mut PgConnection,
+    store: Store,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT s.store_id FROM accounts_subscriptions s JOIN accounts_users a ON a.id = s.user_id \
+         WHERE s.store = $1 AND a.deleted_at IS NOT NULL \
+         AND s.ended_at IS NULL AND s.status NOT IN ('canceled', 'incomplete_expired') \
+         ORDER BY s.inserted_at",
+    )
+    .bind(store.as_str())
+    .fetch_all(connection)
+    .await
+}
+
 /// The store's ids of the subscriptions that have not ended.
 pub async fn list_live_store_ids(
     connection: &mut PgConnection,
@@ -140,5 +157,20 @@ pub async fn list_live_store_ids(
     )
     .bind(store.as_str())
     .fetch_all(connection)
+    .await
+}
+
+/// The id of the row with the store's id, and its user's, if there is one.
+pub async fn get_ids_by_store_id(
+    connection: &mut PgConnection,
+    store: Store,
+    store_id: &str,
+) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, user_id FROM accounts_subscriptions WHERE store = $1 AND store_id = $2",
+    )
+    .bind(store.as_str())
+    .bind(store_id)
+    .fetch_optional(connection)
     .await
 }

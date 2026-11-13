@@ -46,6 +46,8 @@
   let moveError = $state("");
   let busy = $state(false);
   let error = $state("");
+  /** Whether the page was opened just after an account was deleted. */
+  const accountDeleted = new URLSearchParams(window.location.search).has("account_deleted");
 
   async function load() {
     try {
@@ -173,6 +175,9 @@
 <main class="page">
   <AppNav />
   <h1>Accounts on this device</h1>
+  {#if accountDeleted}
+    <p class="muted">This account was deleted, and removed from this device.</p>
+  {/if}
 
   {#if error}
     <p class="error">{error}</p>

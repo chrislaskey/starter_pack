@@ -11,7 +11,9 @@
 //! it goes online again, and neither does one with no account active,
 //! see `device_accounts`, which holds the same lock while it switches
 //! files. A 401 means the server has forgotten the token: the account is
-//! signed out on the device, its data kept.
+//! signed out on the device, its data kept. A 410 means the account was
+//! deleted, on another device or the web: it is removed from the device
+//! with its file, and the pages are told, `account_deleted`.
 //! A sync is a spawned task, not a queued job, and the only queue is the
 //! pending events: see "How a sync is started and run" in the design.
 
@@ -76,6 +78,18 @@ pub fn setup(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// An online call's error for the pages; one answered 410 starts a
+/// sync, which removes the deleted account as it does for its own.
+pub fn online_error(app: &AppHandle, error: online::OnlineError) -> String {
+    if matches!(
+        error,
+        online::OnlineError::Server(SyncError::AccountDeleted)
+    ) {
+        spawn(app.clone());
+    }
+    error.to_string()
+}
+
 /// Starts a sync in the background.
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -121,6 +135,13 @@ pub async fn run(app: &AppHandle) -> Result<Report, String> {
             log::warn!("could not sign out: {error}");
         }
     }
+    let account_deleted = matches!(&result, Err(SyncError::AccountDeleted));
+    if account_deleted && let Some(user_id) = device.active_user_id().await {
+        log::warn!("the account was deleted: removing it from the device");
+        if let Err(error) = device.remove(&server.transport, user_id, true).await {
+            log::warn!("could not remove the deleted account: {error}");
+        }
+    }
     if let (Ok(report), Ok(deployment)) = (&result, device.active().await)
         && !report.signed_out
         && !report.local
@@ -134,7 +155,11 @@ pub async fn run(app: &AppHandle) -> Result<Report, String> {
         Ok(report) => log::info!("synced: {report:?}"),
         Err(error) => log::warn!("sync failed: {error:?}"),
     }
-    let event = json!({ "report": result.as_ref().ok(), "error": result.as_ref().err() });
+    let event = json!({
+        "report": result.as_ref().ok(),
+        "error": result.as_ref().err(),
+        "account_deleted": account_deleted,
+    });
     if let Err(error) = app.emit("synced", event) {
         log::warn!("could not report the sync: {error}");
     }
